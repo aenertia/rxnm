@@ -17,12 +17,14 @@ shopt -s nullglob
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
-# Fallback for system installation if relative path fails
-if [ ! -d "$LIB_DIR" ]; then
-    LIB_DIR="/usr/lib/rocknix-network-manager"
+# Check for a specific file to confirm we have the right directory.
+# If we are symlinked in /usr/bin, ../lib exists (/usr/lib) but is wrong.
+if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
+    # Fallback to standard install location
+    LIB_DIR="/usr/lib/rocknix-network-manager/lib"
 fi
 
-if [ ! -d "$LIB_DIR" ]; then
+if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
     echo "ERROR: Could not locate library directory at $LIB_DIR" >&2
     exit 1
 fi
