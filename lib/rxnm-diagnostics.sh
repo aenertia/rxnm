@@ -97,9 +97,12 @@ action_status() {
     done < <(ip -o addr show)
 
     declare -A GW_MAP
+    # FIX: Added Check for empty gw_dev to prevent "bad array subscript" crash
     while read -r _ _ gw_addr _ gw_dev _ ; do
-        GW_MAP["$gw_dev"]="$gw_addr"
-    done < <(ip -4 route show default)
+        if [ -n "$gw_dev" ]; then
+            GW_MAP["$gw_dev"]="$gw_addr"
+        fi
+    done < <(ip -4 route show default || true)
 
     local global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
     
