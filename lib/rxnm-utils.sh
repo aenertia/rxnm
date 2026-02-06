@@ -22,17 +22,18 @@ cleanup() {
 
 acquire_global_lock() {
     local timeout="${1:-5}"
+    local fd
     
-    exec 200>"$GLOBAL_LOCK_FILE"
-    if ! flock -n 200; then
+    exec {fd}>"$GLOBAL_LOCK_FILE"
+    if ! flock -n "$fd"; then
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
             old_pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
             if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
-                exec 200>"$GLOBAL_LOCK_FILE"
-                if ! flock -n 200; then
+                exec {fd}>"$GLOBAL_LOCK_FILE"
+                if ! flock -n "$fd"; then
                     log_error "Failed to acquire lock even after cleanup"
                     return 1
                 fi
@@ -56,21 +57,28 @@ acquire_iface_lock() {
     local timeout="${2:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
     
-    exec {fd}>"$lock_file" || return 1
+    exec {lock_fd}>"$lock_file" || return 1
     
-    if ! flock -w "$timeout" "$fd"; then
+    if ! flock -w "$timeout" "$lock_fd"; then
         log_error "Failed to acquire lock for $iface after ${timeout}s"
-        exec {fd}>&-
+        exec {lock_fd}>&-
         return 1
     fi
-    lock_fd=$fd
 }
 
 with_iface_lock() {
     local iface="$1"; shift
+    local lock_fd
     acquire_iface_lock "$iface" || return 1
-    trap 'flock -u "$lock_fd"; exec {lock_fd}>&-' RETURN
+    
+    # Execute command
     "$@"
+    local ret=$?
+    
+    # Release lock
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    return $ret
 }
 
 # --- LOGGING ---
@@ -106,7 +114,6 @@ audit_log() {
 }
 
 json_success() {
-    # Fix: Explicitly check for unset/empty to avoid shell brace expansion bugs
     local data="$1"
     if [ -z "$data" ]; then data="{}"; fi
     jq -n --argjson data "$data" '{success:true} + $data'

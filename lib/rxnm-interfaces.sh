@@ -61,6 +61,7 @@ _task_create_vlan() {
         fi
     else
         local content
+        # Corrected: bridge ($8) is empty, vlan ($9) is $name
         content=$(build_network_config "$parent" "" "yes" "Parent for VLAN ${name}" "" "" "" "" "$name" "" "" "" "yes" "yes")
         secure_write "$parent_cfg" "$content" "644"
     fi
