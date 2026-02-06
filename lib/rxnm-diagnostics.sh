@@ -41,16 +41,17 @@ action_check_internet() {
     local target="http://clients3.google.com/generate_204"
     local v4=false v6=false
     
+    # Parallelize checks slightly
+    local out4 out6
+    
     if ip -4 route show default | grep -q default; then
-        local out
-        out=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
-        [[ "${out%%:*}" == "204" ]] && v4=true
+        out4=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
+        [[ "${out4%%:*}" == "204" ]] && v4=true
     fi
 
     if ip -6 route show default | grep -q default; then
-        local out
-        out=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
-        [[ "${out%%:*}" == "204" ]] && v6=true
+        out6=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
+        [[ "${out6%%:*}" == "204" ]] && v6=true
     fi
     
     json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$(($v4 || $v6 ? "true" : "false"))"'}'
@@ -62,9 +63,8 @@ action_status() {
     local hostname="ROCKNIX"
     [ -f /etc/hostname ] && read -r hostname < /etc/hostname
 
-    # Use global cached IWD state
     declare -A WIFI_SSID_MAP
-    if [ "$IWD_ACTIVE" = true ]; then
+    if is_service_active "iwd"; then
         local bus_data
         bus_data=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
         
@@ -80,63 +80,54 @@ action_status() {
     fi
 
     declare -A IP_MAP
-    # Optimization: Use readarray and read directly into vars to avoid subshells in loop
-    readarray -t ip_lines < <(ip -o -4 addr show)
-    for line in "${ip_lines[@]}"; do
-        # Format: 2: wlan0    inet 192.168.1.1/24 ...
-        read -r _ iface_name _ ip_addr _ <<< "$line"
-        IP_MAP["$iface_name"]="${ip_addr%/*}"
-    done
+    declare -A IPV6_MAP
+    # IPv4 + IPv6 parsing
+    while read -r _ iface_name family ip_addr _; do
+        if [[ "$family" == "inet" ]]; then
+             IP_MAP["$iface_name"]="${ip_addr%/*}"
+        elif [[ "$family" == "inet6" ]]; then
+             # Simple accumulation of IPv6 addresses
+             IPV6_MAP["$iface_name"]="${IPV6_MAP[$iface_name]:-}${ip_addr%/*},"
+        fi
+    done < <(ip -o addr show)
 
     declare -A GW_MAP
-    # Optimization: Bash array split with read for faster parsing
-    readarray -t gw_lines < <(ip -4 route show default)
-    for line in "${gw_lines[@]}"; do
-        # Format: default via 192.168.1.1 dev eth0 proto dhcp ...
-        read -r _ _ gw_addr _ gw_dev _ <<< "$line"
+    while read -r _ _ gw_addr _ gw_dev _ ; do
         GW_MAP["$gw_dev"]="$gw_addr"
-    done
+    done < <(ip -4 route show default)
 
     local global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
-    local -a json_ifaces=()
+    
+    # Construct JSON structure using jq -n inside the loop is slow
+    # We will build a bash array of JSON objects and join them
+    local -a json_objects=()
 
-    # Optimization: Iterate glob directly to avoid spawning subshell ls/find
     for iface_path in /sys/class/net/*; do
         local iface=${iface_path##*/}
         [[ "$iface" == "lo" || "$iface" == "sit0" ]] && continue
         
         local ip="${IP_MAP[$iface]:-}"
+        local ipv6_csv="${IPV6_MAP[$iface]:-}"
         local gw="${GW_MAP[$iface]:-}"
-        
-        # Optimization: Batch sysfs reads in one subshell
         local mac=""
         read -r mac < "$iface_path/address" 2>/dev/null || mac=""
         
-        local connected="false"; [ -n "$ip" ] && connected="true"
+        local connected="false"; [ -n "$ip" ] || [ -n "$ipv6_csv" ] && connected="true"
+        
+        # Type detection
         local type="ethernet"
-
-        # Optimization: Heuristic type detection (fast path)
         case "$iface" in
-            wlan*|wlp*)
-                type="wifi" ;;
-            br*)
-                [ -d "$iface_path/bridge" ] && type="bridge" || type="ethernet" ;;
-            wg*)
-                type="vpn" ;;
-            usb*|rndis*)
-                type="gadget" ;;
-            bnep*)
-                type="bluetooth_pan" ;;
-            tun*|tap*)
-                type="tun" ;;
+            wlan*|wlp*) type="wifi" ;;
+            br*) [ -d "$iface_path/bridge" ] && type="bridge" || type="ethernet" ;;
+            wg*) type="vpn" ;;
+            usb*|rndis*) type="gadget" ;;
+            bnep*) type="bluetooth_pan" ;;
+            tun*|tap*) type="tun" ;;
             *)
-                # Slow path: check filesystem
                 if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
                     type="wifi"
                 elif [ -d "$iface_path/bridge" ]; then
                     type="bridge"
-                elif [ -f "$iface_path/tun_flags" ]; then
-                    type="tun"
                 else
                     type="ethernet"
                 fi
@@ -144,17 +135,27 @@ action_status() {
         esac
         
         local ssid=""
+        local channel=""
+        local frequency=""
         if [ "$type" == "wifi" ]; then
              ssid="${WIFI_SSID_MAP[$iface]:-}"
-             if [ -z "$ssid" ]; then
-                 # Optimization: Avoid double call to iwctl
-                 if [ "$IWD_ACTIVE" = true ]; then
-                     local ap_output
-                     ap_output=$(iwctl ap "$iface" show 2>/dev/null)
-                     if grep -q "Started" <<< "$ap_output"; then
-                         type="wifi_ap"
-                         ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
-                     fi
+             
+             # Fetch Frequency/Channel
+             if command -v iw >/dev/null; then
+                 local iw_info
+                 iw_info=$(iw dev "$iface" info 2>/dev/null)
+                 if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ MHz\) ]]; then
+                     channel="${BASH_REMATCH[1]}"
+                     frequency="${BASH_REMATCH[2]}"
+                 fi
+             fi
+             
+             if [ -z "$ssid" ] && is_service_active "iwd"; then
+                 local ap_output
+                 ap_output=$(iwctl ap "$iface" show 2>/dev/null)
+                 if grep -q "Started" <<< "$ap_output"; then
+                     type="wifi_ap"
+                     ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
                  fi
              fi
         fi
@@ -169,21 +170,45 @@ action_status() {
             iface_proxy_json=$(get_proxy_json "${STORAGE_NET_DIR}/proxy-${iface}.conf")
         fi
         
-        local safe_ssid="null"
-        if [ -n "$ssid" ]; then
-            # Optimization: Bash parameter expansion for escaping
-            safe_ssid="\"${ssid//\"/\\\"}\""
+        # Format IPv6 array
+        local ipv6_json="[]"
+        if [ -n "$ipv6_csv" ]; then
+            # remove trailing comma
+            ipv6_csv="${ipv6_csv%,}"
+            # split and json encode
+            ipv6_json=$(jq -n -R 'split(",")' <<< "$ipv6_csv")
         fi
-        
-        # Optimization: Accumulate array items instead of string concatenation
-        json_ifaces+=("\"$iface\":{\"type\":\"$type\",\"ip\":\"$ip\",\"mac\":\"$mac\",\"connected\":$connected,\"ssid\":$safe_ssid,\"gateway\":\"$gw\",\"config\":\"$cfg_mode\",\"proxy\":$iface_proxy_json}")
+
+        # Safely construct object
+        local json_obj
+        json_obj=$(jq -n \
+            --arg name "$iface" \
+            --arg type "$type" \
+            --arg ip "$ip" \
+            --argjson ipv6 "$ipv6_json" \
+            --arg mac "$mac" \
+            --argjson connected "$connected" \
+            --arg ssid "$ssid" \
+            --arg channel "$channel" \
+            --arg freq "$frequency" \
+            --arg gw "$gw" \
+            --arg config "$cfg_mode" \
+            --argjson proxy "$iface_proxy_json" \
+            '{name: $name, type: $type, ip: $ip, ipv6: $ipv6, mac: $mac, connected: $connected, ssid: (if $ssid=="" then null else $ssid end), channel: (if $channel=="" then null else $channel end), frequency: (if $freq=="" then null else $freq end), gateway: $gw, config: $config, proxy: $proxy}')
+            
+        json_objects+=("$json_obj")
     done
     
-    # Optimization: Join array at end
-    local json_ifaces_str
-    json_ifaces_str=$(IFS=,; echo "${json_ifaces[*]}")
+    # Join objects
+    local json_ifaces_array
+    json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
     
-    echo "{\"hostname\":\"$hostname\",\"global_proxy\":$global_proxy_json,\"interfaces\":{$json_ifaces_str}}" | jq .
+    # Construct final JSON
+    jq -n \
+        --arg hn "$hostname" \
+        --argjson gp "$global_proxy_json" \
+        --argjson ifs "$json_ifaces_array" \
+        '{hostname: $hn, global_proxy: $gp, interfaces: ($ifs | map({(.name): .}) | add)}'
 }
 
 action_help() {
@@ -231,7 +256,9 @@ Profiles:
 Options:
   --interface <iface>       Target interface (e.g., wlan0, eth0)
   --ssid <ssid>             SSID for connection or AP
-  --password <pass>         WiFi passphrase or AP password
+  --password <pass>         WiFi passphrase (Legacy, use --password-stdin preferred)
+  --password-stdin          Read password from standard input
+  --password-file <file>    Read password from a specific file
   --ip <ip/cidr>            Static IP address (e.g., 192.168.1.10/24)
   --gateway <ip>            Gateway IP
   --dns <ip,ip>             Comma-separated DNS servers
@@ -251,16 +278,11 @@ Examples:
   # Scan WiFi
   rxnm scan --interface wlan0
 
-  # Connect with WPS (Push Button)
-  rxnm wps --interface wlan0
+  # Connect securely
+  echo "MyPassword" | rxnm connect --ssid "MyWiFi" --password-stdin
 
   # Create Bond (Active-Backup)
   rxnm create-bond --name bond0 --mode active-backup
   rxnm set-bond-slave --interface eth0 --bond bond0
-
-  # Connect to WireGuard
-  rxnm connect-wireguard --name wg0 --address 10.100.0.2/24 \\
-    --private-key "S3cret..." --peer-key "PubK3y..." --endpoint "vpn.example.com:51820"
-
 EOF
 }

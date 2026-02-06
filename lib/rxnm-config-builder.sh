@@ -22,7 +22,6 @@ build_network_config() {
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then
-        log_info "Avahi detected: Disabling systemd-networkd MulticastDNS."
         mdns="no"
     fi
 
@@ -91,7 +90,6 @@ build_gateway_config() {
     local llmnr="${6:-yes}"
     
     if [ "$mdns" == "yes" ] && is_avahi_running; then
-        log_info "Avahi detected: Disabling systemd-networkd MulticastDNS."
         mdns="no"
     fi
 

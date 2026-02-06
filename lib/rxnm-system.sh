@@ -4,14 +4,47 @@
 
 # --- SERVICE STATE MANAGEMENT ---
 cache_service_states() {
-    systemctl is-active --quiet iwd && IWD_ACTIVE=true
-    systemctl is-active --quiet systemd-networkd && NETWORKD_ACTIVE=true
-    systemctl is-active --quiet avahi-daemon && AVAHI_ACTIVE=true
+    # Initialize cache with timestamps
+    local now
+    now=$(date +%s)
+    
+    local services=("iwd" "systemd-networkd" "avahi-daemon")
+    local states
+    states=$(systemctl is-active "${services[@]}" 2>/dev/null)
+    
+    local i=0
+    while IFS= read -r state; do
+        local svc="${services[$i]}"
+        SERVICE_STATE_CACHE["$svc"]="$state"
+        SERVICE_STATE_TS["$svc"]=$now
+        ((i++))
+    done <<< "$states"
+    
+    [ "${SERVICE_STATE_CACHE["iwd"]}" == "active" ] && IWD_ACTIVE=true || IWD_ACTIVE=false
+    [ "${SERVICE_STATE_CACHE["systemd-networkd"]}" == "active" ] && NETWORKD_ACTIVE=true || NETWORKD_ACTIVE=false
+    [ "${SERVICE_STATE_CACHE["avahi-daemon"]}" == "active" ] && AVAHI_ACTIVE=true || AVAHI_ACTIVE=false
+}
+
+is_service_active() {
+    local svc="$1"
+    local now
+    now=$(date +%s)
+    local last_check="${SERVICE_STATE_TS["$svc"]:-0}"
+    local age=$((now - last_check))
+    
+    # Cache TTL: 2 seconds
+    if [ $age -gt 2 ]; then
+        local state
+        state=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+        SERVICE_STATE_CACHE["$svc"]="$state"
+        SERVICE_STATE_TS["$svc"]=$now
+    fi
+    
+    [[ "${SERVICE_STATE_CACHE["$svc"]}" == "active" ]]
 }
 
 is_avahi_running() {
-    # Optimized: Use cached global state
-    [ "$AVAHI_ACTIVE" = true ]
+    is_service_active "avahi-daemon"
 }
 
 # --- LIFECYCLE ACTIONS ---
@@ -20,16 +53,13 @@ action_setup() {
     ensure_dirs
     check_paths
     
-    # Refresh cache to ensure accuracy on startup/restart
     cache_service_states
     
     [ -d /run/systemd/netif ] && chown -R systemd-network:systemd-network /run/systemd/netif 2>/dev/null
 
     # Optimization: Batch copy wireless profiles
     if [ -d "$STORAGE_WIFI_DIR" ]; then
-        # Glob already handles nonexistence due to nullglob option set at top
         local psk_files=("${STORAGE_WIFI_DIR}"/*.psk)
-        # Only try copy if files exist
         [ ${#psk_files[@]} -gt 0 ] && cp "${psk_files[@]}" "${STATE_DIR}/iwd/" 2>/dev/null
     fi
 
@@ -59,7 +89,6 @@ action_stop() {
 
 # --- FILE OPERATIONS ---
 ensure_dirs() {
-    # Optimization: Check if directory exists before trying to create it
     [ -d "$STORAGE_NET_DIR" ] || mkdir -p "$STORAGE_NET_DIR"
     [ -d "${STATE_DIR}/iwd" ] || mkdir -p "${STATE_DIR}/iwd"
     [ -d "${STORAGE_PROFILES_DIR}" ] || mkdir -p "${STORAGE_PROFILES_DIR}"
@@ -69,13 +98,12 @@ ensure_dirs() {
 check_paths() {
     if [ ! -L "$ETC_NET_DIR" ] && [ "$ETC_NET_DIR" != "$STORAGE_NET_DIR" ]; then
         if [ "$(stat -c %i "$ETC_NET_DIR")" != "$(stat -c %i "$STORAGE_NET_DIR" 2>/dev/null)" ]; then
-            log_info "WARNING: $ETC_NET_DIR does not point to $STORAGE_NET_DIR. Persistence may fail."
+            log_warn "$ETC_NET_DIR does not point to $STORAGE_NET_DIR. Persistence may fail."
         fi
     fi
 }
 
 fix_permissions() {
-    # Optimization: Use find -exec + to batch permission fixes
     if [ -d "$STORAGE_NET_DIR" ]; then
         find "$STORAGE_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' \) -exec chmod 644 {} + 2>/dev/null
     fi
@@ -86,7 +114,7 @@ fix_permissions() {
 
 reload_networkd() {
     fix_permissions
-    if [ "$NETWORKD_ACTIVE" = true ]; then
+    if is_service_active "systemd-networkd"; then
         networkctl reload
     fi
 }
@@ -94,7 +122,7 @@ reload_networkd() {
 reconfigure_iface() {
     local iface="$1"
     fix_permissions
-    if [ "$NETWORKD_ACTIVE" = true ]; then
+    if is_service_active "systemd-networkd"; then
         if [ -n "$iface" ]; then
             networkctl reconfigure "$iface" 2>/dev/null || networkctl reload
         else
@@ -108,11 +136,15 @@ secure_write() {
     local content="$2"
     local perms="${3:-644}"
     
-    if [[ "$dest" != "$STORAGE_NET_DIR"* ]] && [[ "$dest" != "$STATE_DIR"* ]] && [[ "$dest" != "$CONF_DIR"* ]]; then
+    # Hardened path check
+    if [[ "$dest" != "${STORAGE_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${STATE_DIR}/"* ]] && \
+       [[ "$dest" != "${CONF_DIR}/"* ]]; then
          log_error "Illegal file write attempted: $dest"
          return 1
     fi
     
+    # Use mktemp for atomicity
     local tmp
     tmp=$(mktemp "${dest}.XXXXXX") || return 1
     
@@ -126,19 +158,10 @@ secure_write() {
 tune_network_stack() {
     local profile="$1"
     
-    # Base optimizations for ARM targets
-    # Increase conntrack limit for NAT scenarios (defaults often too low on embedded)
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
-    
-    # Enable Fast Open to speed up TCP connection establishment
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
-    
-    # Reduce keepalive time to detect dead links faster on mobile devices
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
 
-    # Bridge Optimization: 
-    # Disable netfilter on bridges to improve throughput and lower CPU usage
-    # unless specifically needing to filter bridged packets (rare on AP/Client mode)
     if [ -d /proc/sys/net/bridge ]; then
         sysctl -w net.bridge.bridge-nf-call-iptables=0 \
                   net.bridge.bridge-nf-call-ip6tables=0 \
@@ -170,7 +193,11 @@ enable_nat_masquerade() {
     local fw_tool
     fw_tool=$(detect_firewall_tool)
     
-    # Find upstream (WAN) interface
+    if [ "$fw_tool" == "none" ]; then
+        log_warn "NAT requested but no firewall tool (iptables/nft) found."
+        return 0
+    fi
+    
     local wan_iface
     wan_iface=$(ip -4 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
     
@@ -185,7 +212,6 @@ enable_nat_masquerade() {
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
 
     if [ "$fw_tool" == "iptables" ]; then
-        # IPv4
         iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
         iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
         
@@ -198,7 +224,6 @@ enable_nat_masquerade() {
         iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
         iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
         
-        # IPv6 (if available)
         if command -v ip6tables >/dev/null && ip6tables -t nat -L >/dev/null 2>&1; then
             ip6tables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
             ip6tables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
@@ -229,13 +254,11 @@ disable_nat_masquerade() {
     
     if [ "$fw_tool" == "iptables" ]; then
         for table in nat filter mangle; do
-            # Optimized loop: Read line by line using bash to avoid subshells in loop
             local rules
             rules=$(iptables-save -t "$table" | grep -- '--comment "rocknix"')
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 read -r _ chain rest <<< "$line"
-                # Remove "-A $chain " prefix
                 local rule="${line#-A $chain }"
                 iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
             done <<< "$rules"

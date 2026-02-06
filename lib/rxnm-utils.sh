@@ -9,6 +9,52 @@ cleanup() {
     if [ ${#temp_files[@]} -gt 0 ]; then
         rm -f "${temp_files[@]}" 2>/dev/null
     fi
+    # Remove PID file if we own the lock
+    if [ -f "$GLOBAL_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
+        if [ "$pid" == "$$" ]; then
+            rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
+        fi
+    fi
+}
+
+# --- LOCKING MECHANISM ---
+
+acquire_global_lock() {
+    local timeout="${1:-5}"
+    
+    # Try to acquire lock
+    exec 200>"$GLOBAL_LOCK_FILE"
+    if ! flock -n 200; then
+        # Check for stale PID
+        if [ -f "$GLOBAL_PID_FILE" ]; then
+            local old_pid
+            old_pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
+            if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
+                log_warn "Removing stale lock (PID $old_pid)"
+                rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
+                exec 200>"$GLOBAL_LOCK_FILE"
+                if ! flock -n 200; then
+                    log_error "Failed to acquire lock even after cleanup"
+                    return 1
+                fi
+            else
+                log_error "Another instance is running (PID $old_pid)"
+                return 1
+            fi
+        else
+            log_error "Another instance is running (Lock held)"
+            return 1
+        fi
+    fi
+    
+    # Write our PID
+    echo $$ > "$GLOBAL_PID_FILE"
+    
+    # Ensure cleanup on exit
+    trap cleanup EXIT INT TERM
+    return 0
 }
 
 acquire_iface_lock() {
@@ -38,16 +84,24 @@ with_iface_lock() {
     "$@"
 }
 
+# --- LOGGING ---
+
+log_debug() {
+    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
+}
+
 log_info() {
-    local msg="$1"
-    if [ -t 1 ]; then echo "INFO: $msg" >&2; fi
-    logger -t rocknix-network "$msg"
+    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2 || logger -t rocknix-network "$*"
+}
+
+log_warn() {
+    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
+    logger -t rocknix-network "WARN: $*"
 }
 
 log_error() {
-    local msg="$1"
-    if [ -t 1 ]; then echo "ERROR: $msg" >&2; fi
-    logger -t rocknix-network "ERROR [${FUNCNAME[1]:-main}]: $msg"
+    echo "[ERROR] $*" >&2
+    logger -t rocknix-network "ERROR [${FUNCNAME[1]:-main}]: $*"
 }
 
 cli_error() {
@@ -74,6 +128,8 @@ json_error() {
     return 0 
 }
 
+# --- VALIDATION ---
+
 sanitize_ssid() {
     local ssid="$1"
     if [ ${#ssid} -gt 32 ]; then
@@ -81,11 +137,39 @@ sanitize_ssid() {
         return 1
     fi
     local safe
-    # Whitelist alphanumeric, underscore, hyphen. Dots are REMOVED.
-    # This prevents directory traversal (../) in filenames.
+    # Whitelist alphanumeric, underscore, hyphen. Dots are REMOVED to prevent traversal.
     safe=$(printf '%s' "$ssid" | tr -cd '[:alnum:]_-')
     [ -z "$safe" ] && safe="_unnamed_"
     echo "$safe"
+}
+
+validate_ssid() {
+    local ssid="$1"
+    local len=${#ssid}
+    
+    if (( len < 1 || len > 32 )); then
+        log_error "Invalid SSID length: $len"
+        return 1
+    fi
+    
+    # Check for dangerous characters ($, `, \, !, ;)
+    if [[ "$ssid" =~ [\$\`\\\!\;] ]]; then
+        log_error "SSID contains forbidden characters"
+        return 1
+    fi
+    
+    return 0
+}
+
+validate_interface_name() {
+    local iface="$1"
+    # Standard linux interface names: alphanumeric, hyphen, underscore, colon, dot
+    # Limit length to 15 chars (IFNAMSIZ)
+    if [[ ! "$iface" =~ ^[a-zA-Z0-9_:.-]{1,15}$ ]]; then
+        log_error "Invalid interface name: $iface"
+        return 1
+    fi
+    return 0
 }
 
 validate_passphrase() {
@@ -111,7 +195,36 @@ validate_channel() {
 }
 
 validate_ip() {
-    [[ "$1" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(/([0-9]|[1-2][0-9]|3[0-2]))?$ ]]
+    local ip="$1"
+    local clean_ip="${ip%/*}" # Remove CIDR if present
+
+    # Use 'ip' tool for robust validation (Supports v4 and v6)
+    if command -v ip >/dev/null; then
+        if ip route get "$clean_ip" >/dev/null 2>&1; then
+            return 0
+        fi
+        # 'ip route get' might fail for link-local or non-routable, 
+        # allow if it looks generally like an IPv6 address
+        if [[ "$clean_ip" =~ : ]] && [[ "$clean_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            return 0
+        fi
+        # Basic IPv4 fallback
+        if [[ "$clean_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            return 0
+        fi
+        return 1
+    else
+        # Fallback regex if 'ip' tool missing (rare)
+        # IPv4
+        if [[ "$clean_ip" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; then
+            return 0
+        fi
+        # Simple IPv6 check
+        if [[ "$clean_ip" =~ : ]]; then
+            return 0
+        fi
+        return 1
+    fi
 }
 
 validate_routes() {

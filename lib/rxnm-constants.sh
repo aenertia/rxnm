@@ -8,6 +8,13 @@
 : "${ETC_NET_DIR:=/etc/systemd/network}"
 : "${RUN_DIR:=/run/rocknix}"
 
+# Logging Levels
+export LOG_LEVEL_ERROR=0
+export LOG_LEVEL_WARN=1
+export LOG_LEVEL_INFO=2
+export LOG_LEVEL_DEBUG=3
+: "${LOG_LEVEL:=$LOG_LEVEL_INFO}"
+
 # Optimization: Cache CPU capability check
 IS_LOW_POWER=false
 if grep -qi "RK3326\|RK3566" /proc/cpuinfo 2>/dev/null; then
@@ -56,8 +63,12 @@ STORAGE_HOST_NET_FILE="${STORAGE_NET_DIR}/70-wifi-host.network"
 STORAGE_PAN_NET_FILE="${STORAGE_NET_DIR}/70-bluetooth-pan.network"
 STORAGE_BT_PIN_FILE="${STORAGE_NET_DIR}/bluetooth.pin"
 
+# Locking
+GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
+GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
+
 # --- GLOBAL SERVICE STATE CACHE ---
 # Initialized in system.sh
-IWD_ACTIVE=false
-NETWORKD_ACTIVE=false
-AVAHI_ACTIVE=false
+# Using an associative array for caching with timestamps if needed
+declare -A SERVICE_STATE_CACHE
+declare -A SERVICE_STATE_TS

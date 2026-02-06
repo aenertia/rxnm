@@ -16,14 +16,12 @@ get_wifi_iface() {
     local cache_ttl=30
     
     if [ -n "$WIFI_IFACE_CACHE" ] && [ $((now - WIFI_IFACE_CACHE_TIME)) -lt $cache_ttl ]; then
-        # Fix: Verify the interface still physically exists (handles unplugged USB dongles)
         if [ -d "/sys/class/net/$WIFI_IFACE_CACHE" ]; then
             echo "$WIFI_IFACE_CACHE"
             return 0
         fi
     fi
     
-    # Check for wireless capability
     local best_iface=""
     for iface in /sys/class/net/*; do
         [ ! -e "$iface" ] && continue
@@ -31,12 +29,10 @@ get_wifi_iface() {
             local ifname
             ifname=$(basename "$iface")
             
-            # Use this interface if we haven't found one yet
             if [ -z "$best_iface" ]; then
                 best_iface="$ifname"
             fi
             
-            # If this interface is UP, prefer it and stop looking
             local operstate
             read -r operstate < "$iface/operstate" 2>/dev/null
             if [[ "$operstate" != "down" ]]; then
@@ -76,7 +72,7 @@ _task_host_mode() {
     tune_network_stack "host"
     if [ "$use_share" == "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
     
-    if [ "$IWD_ACTIVE" != true ]; then echo "IWD not running" >&2; exit 1; fi
+    if ! is_service_active "iwd"; then echo "IWD not running" >&2; exit 1; fi
 
     iwctl station "$iface" disconnect >/dev/null 2>&1
     
@@ -88,7 +84,13 @@ _task_host_mode() {
     
     case "$mode" in
         adhoc)
-             printf "%s\n" "$pass" | iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
+             # Use temp file for password pipe
+             local pass_file
+             pass_file=$(mktemp)
+             chmod 600 "$pass_file"
+             printf "%s" "$pass" > "$pass_file"
+             cat "$pass_file" | iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
+             rm -f "$pass_file"
              ;;
         ap|*)
              iwctl ap "$iface" start-profile "$ssid" 2>&1
@@ -108,7 +110,7 @@ _task_client_mode() {
     disable_nat_masquerade
     
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
-        if [ "$IWD_ACTIVE" = true ]; then
+        if is_service_active "iwd"; then
             iwctl ap "$iface" stop >/dev/null 2>&1 || true
             iwctl station "$iface" scan >/dev/null 2>&1
         fi
@@ -140,7 +142,7 @@ action_wps() {
     [ -z "$iface" ] && iface=$(get_wifi_iface)
     [ -z "$iface" ] && return 1
 
-    if [ "$IWD_ACTIVE" != true ]; then
+    if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 1
     fi
@@ -156,7 +158,7 @@ action_forget() {
     local ssid="$1"
     [ -z "$ssid" ] && { json_error "SSID required"; return 1; }
 
-    if [ "$IWD_ACTIVE" != true ]; then
+    if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 1
     fi
@@ -186,7 +188,7 @@ action_scan() {
     [ -z "$iface" ] && iface=$(get_wifi_iface)
     [ -z "$iface" ] && return 1
 
-    if [ "$IWD_ACTIVE" != true ]; then
+    if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 1
     fi
@@ -247,13 +249,17 @@ action_connect() {
     [ -n "$ssid" ] || return 1
     [ -z "$iface" ] && iface=$(get_wifi_iface)
     
+    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 1; fi
+    
+    if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 1; fi
+
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
 
     if [ -n "$pass" ] && [ "$EPHEMERAL_CREDS" != "true" ]; then
         with_iface_lock "$iface" _task_save_wifi_creds "$ssid" "$pass"
     fi
     
-    if [ "$IWD_ACTIVE" != true ]; then
+    if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 1
     fi
@@ -264,16 +270,26 @@ action_connect() {
     local attempts=0
     local max_attempts=3
     local out=""
+    
+    local pass_file
+    if [ -n "$pass" ]; then
+        pass_file=$(mktemp)
+        chmod 600 "$pass_file"
+        printf "%s" "$pass" > "$pass_file"
+    fi
+    
     while [ $attempts -lt $max_attempts ]; do
         if [ "$EPHEMERAL_CREDS" == "true" ] && [ -n "${pass:-}" ]; then
-             out=$(printf '%s\n' "$pass" | iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
+             out=$(cat "$pass_file" | iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
         else
+             # Assuming creds saved or not needed
              out=$(iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi
         
         if [[ -z "$out" ]]; then
             audit_log "WIFI_CONNECT" "Connected to $ssid"
             json_success '{"connected": true}'
+            [ -n "$pass_file" ] && rm -f "$pass_file"
             return 0
         fi
         
@@ -286,6 +302,8 @@ action_connect() {
         sleep 1
     done
     
+    [ -n "$pass_file" ] && rm -f "$pass_file"
+    
     json_error "Failed to connect: $out"
 }
 
@@ -296,7 +314,8 @@ action_host() {
     
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
     if ! validate_passphrase "$pass"; then echo "Invalid passphrase" >&2; exit 1; fi
-    
+    if ! validate_ssid "$ssid"; then echo "Invalid SSID" >&2; exit 1; fi
+
     local use_share="false"
     [ "$mode" == "ap" ] && use_share="true"
     [ -n "$share" ] && use_share="$share"

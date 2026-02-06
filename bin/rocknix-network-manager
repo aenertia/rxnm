@@ -14,8 +14,6 @@ IFS=$'\n\t'
 shopt -s nullglob
 
 # --- BOOTSTRAP ---
-# Resolve the directory of the script to find libraries
-# If installed globally, these might be in /usr/lib/rocknix-network-manager
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
@@ -35,40 +33,6 @@ source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
 source "${LIB_DIR}/rxnm-config-builder.sh"
 
-# Source Modules
-source "${LIB_DIR}/rxnm-wifi.sh"
-source "${LIB_DIR}/rxnm-bluetooth.sh"
-source "${LIB_DIR}/rxnm-interfaces.sh"
-source "${LIB_DIR}/rxnm-profiles.sh"
-source "${LIB_DIR}/rxnm-diagnostics.sh"
-
-# --- INITIALIZATION ---
-
-# Dependency check
-for cmd in jq busctl networkctl ip curl; do
-    if ! command -v "$cmd" >/dev/null; then
-        echo "ERROR: Missing dependency '$cmd'. Install systemd, curl and jq." >&2
-        exit 1
-    fi
-done
-
-# Ensure run directory exists
-mkdir -p "$RUN_DIR"
-
-# Global Lock Check
-LOCKFILE="${RUN_DIR}/network.lock"
-exec 200>"$LOCKFILE"
-if ! flock -n 200; then
-    echo "ERROR: Another instance of rocknix-network-manager is running." >&2
-    exit 1
-fi
-
-# Trap cleanup
-trap cleanup EXIT INT TERM
-
-# Initialize Service State Cache
-cache_service_states
-
 # --- ARGUMENT PARSING & DISPATCH ---
 
 CMD=""
@@ -76,6 +40,9 @@ SUB_CMD=""
 : "${EPHEMERAL_CREDS:=false}"
 ARG_MDNS="yes"
 ARG_LLMNR="yes"
+
+# We parse args first to determine what to load and do
+ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -118,8 +85,22 @@ while [[ $# -gt 0 ]]; do
         --password)
             if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
                 ARG_PASS="$2"; shift 2
+                log_warn "Passing password as argument is insecure. Use --password-stdin."
             else
                 cli_error "--password requires a value"
+            fi
+            ;;
+        --password-stdin)
+            # Read from stdin
+            ARG_PASS=$(cat)
+            shift
+            ;;
+        --password-file)
+            if [ -r "${2:-}" ]; then
+                ARG_PASS=$(<"$2")
+                shift 2
+            else
+                cli_error "--password-file requires a readable file"
             fi
             ;;
         --interface)
@@ -178,7 +159,6 @@ while [[ $# -gt 0 ]]; do
                 cli_error "--llmnr requires a value (yes/no/resolve)"
             fi
             ;;
-        # WireGuard Args
         --private-key)
             if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
                 ARG_PRIV_KEY="$2"; shift 2
@@ -207,7 +187,6 @@ while [[ $# -gt 0 ]]; do
                 cli_error "--allowed-ips requires a value"
             fi
             ;;
-        
         --ipv4)
             if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
                 ARG_V4="$2"; shift 2
@@ -314,6 +293,65 @@ while [[ $# -gt 0 ]]; do
 done
 
 [ -z "$CMD" ] && { [ -t 0 ] && CMD="status" || CMD="start"; }
+
+# --- INITIALIZATION ---
+
+# Dependency check
+for cmd in jq busctl networkctl ip curl; do
+    if ! command -v "$cmd" >/dev/null; then
+        echo "ERROR: Missing dependency '$cmd'." >&2
+        exit 1
+    fi
+done
+
+# Ensure run directory exists
+mkdir -p "$RUN_DIR"
+
+# Global Lock Check using new robust mechanism (except for status/help/check which are read-only)
+if [[ "$CMD" != "status" && "$CMD" != "help" && "$CMD" != "check-internet" && "$CMD" != "check-portal" && "$CMD" != "scan" ]]; then
+    acquire_global_lock || exit 1
+fi
+
+# Lazy Load Modules
+case "$CMD" in
+    start|stop|reload)
+        source "${LIB_DIR}/rxnm-wifi.sh"
+        source "${LIB_DIR}/rxnm-bluetooth.sh" # for cleanup
+        ;;
+    status|check-internet|check-portal)
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
+        ;;
+    scan|wps|forget|connect|disconnect|host|client|set-country)
+        source "${LIB_DIR}/rxnm-wifi.sh"
+        ;;
+    pan-net)
+        source "${LIB_DIR}/rxnm-bluetooth.sh"
+        ;;
+    create-*|set-*|connect-wireguard|delete-link)
+        source "${LIB_DIR}/rxnm-interfaces.sh"
+        ;;
+    profile)
+        source "${LIB_DIR}/rxnm-profiles.sh"
+        ;;
+    *)
+        # Fallback load all
+        source "${LIB_DIR}/rxnm-wifi.sh"
+        source "${LIB_DIR}/rxnm-bluetooth.sh"
+        source "${LIB_DIR}/rxnm-interfaces.sh"
+        source "${LIB_DIR}/rxnm-profiles.sh"
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
+        ;;
+esac
+
+# Initialize Service State Cache
+cache_service_states
+
+# NAT Firewall Warning
+if [[ "${ARG_SHARE:-}" == "true" ]] || [[ "$CMD" == "host" ]] || [[ "$CMD" == "pan-net" ]]; then
+    if [ "$(detect_firewall_tool)" == "none" ]; then
+         log_warn "Sharing requested but no firewall tool found. NAT will NOT be enabled."
+    fi
+fi
 
 case "$CMD" in
     start) action_setup ;;

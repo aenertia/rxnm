@@ -10,17 +10,14 @@ _task_create_bond() {
     
     ensure_dirs
     local netdev_file="${STORAGE_NET_DIR}/60-bond-${name}.netdev"
-    # Basic robust bond config
     local netdev_content="[NetDev]\nName=${name}\nKind=bond\n[Bond]\nMode=${mode}\nMIIMonitorSec=100ms\n"
     
-    # Add LACP rate if mode is 802.3ad
     if [ "$mode" == "802.3ad" ]; then
         netdev_content+="LACPTransmitRate=fast\nTransmitHashPolicy=layer2+3\n"
     fi
 
     secure_write "$netdev_file" "$netdev_content" "644"
     
-    # Create the network file for the master interface (usually DHCP client)
     local network_file="${STORAGE_NET_DIR}/75-config-${name}.network"
     local content
     content=$(build_network_config "$name" "" "yes" "Bond Interface ($mode)" "" "" "" "" "" "" "" "" "yes" "yes")
@@ -36,7 +33,6 @@ _task_set_bond_slave() {
     ensure_dirs
     local cfg_file="${STORAGE_NET_DIR}/75-config-${iface}.network"
     local content
-    # Pass bond as arg 15
     content=$(build_network_config "$iface" "" "no" "Bond Slave" "" "" "" "" "" "" "" "" "no" "no" "$bond")
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
@@ -215,11 +211,10 @@ set_network_cfg() {
 
 action_create_bridge() {
     local name="$1"
-    [ -z "$name" ] && { json_error "Bridge name required"; return 1; }
+    ! validate_interface_name "$name" && { json_error "Invalid bridge name"; return 1; }
     
     ensure_dirs
     local netdev_file="${STORAGE_NET_DIR}/60-bridge-${name}.netdev"
-    # Optimization: Disable STP for fast link up, Enable Multicast Snooping for WiFi efficiency
     local content="[NetDev]\nName=${name}\nKind=bridge\n[Bridge]\nSTP=no\nMulticastSnooping=yes\n"
     
     secure_write "$netdev_file" "$content" "644"
@@ -230,7 +225,7 @@ action_create_bridge() {
 action_create_bond() {
     local name="$1"
     local mode="$2"
-    [ -z "$name" ] && { json_error "Bond name required"; return 1; }
+    ! validate_interface_name "$name" && { json_error "Invalid bond name"; return 1; }
     
     _task_create_bond "$name" "$mode"
     json_success '{"type": "bond", "iface": "'"$name"'", "mode": "'"${mode:-active-backup}"'"}'
@@ -239,6 +234,7 @@ action_create_bond() {
 action_set_bond_slave() {
     local iface="$1"; local bond="$2"
     [ -z "$iface" ] || [ -z "$bond" ] && { json_error "Interface and Bond required"; return 1; }
+    ! validate_interface_name "$iface" && { json_error "Invalid interface"; return 1; }
     
     with_iface_lock "$iface" _task_set_bond_slave "$iface" "$bond"
     json_success '{"action": "set_bond_slave", "iface": "'"$iface"'", "bond": "'"$bond"'"}'
@@ -246,7 +242,7 @@ action_set_bond_slave() {
 
 action_create_vlan() {
     local parent="$1"; local name="$2"; local id="$3"
-    [ -z "$parent" ] || [ -z "$name" ] || [ -z "$id" ] && { json_error "Missing arguments"; return 1; }
+    ! validate_interface_name "$name" && { json_error "Invalid vlan name"; return 1; }
     
     with_iface_lock "$parent" _task_create_vlan "$parent" "$name" "$id"
     
@@ -256,7 +252,7 @@ action_create_vlan() {
 
 action_set_member() {
     local iface="$1"; local bridge="$2"
-    [ -z "$iface" ] && { json_error "Interface required"; return 1; }
+    ! validate_interface_name "$iface" && { json_error "Invalid interface"; return 1; }
     
     with_iface_lock "$iface" _task_set_member "$iface" "$bridge"
     json_success '{"action": "set_member", "iface": "'"$iface"'", "bridge": "'"$bridge"'"}'
@@ -264,8 +260,9 @@ action_set_member() {
 
 action_delete_netdev() {
     local name="$1"
+    ! validate_interface_name "$name" && { json_error "Invalid name"; return 1; }
+    
     local found="false"
-    # Check for Bridges, VLANs, and now Bonds
     for f in "${STORAGE_NET_DIR}/60-bridge-${name}.netdev" \
              "${STORAGE_NET_DIR}/60-vlan-${name}.netdev" \
              "${STORAGE_NET_DIR}/60-bond-${name}.netdev"; do
@@ -303,6 +300,7 @@ action_set_static() {
     
     ! validate_ip "$ip" && { json_error "Invalid IP"; return 1; }
     [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
+    [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
     
     [[ "$ip" != *"/"* ]] && ip="${ip}/24"
 
@@ -330,6 +328,8 @@ action_set_proxy() {
 
 action_connect_wireguard() {
     local name="$1"; local priv="$2"; local peer="$3"; local endp="$4"; local ips="$5"; local addr="$6"; local dns="$7"
+    
+    ! validate_interface_name "$name" && { json_error "Invalid interface name"; return 1; }
     
     [ -z "$name" ] || [ -z "$priv" ] || [ -z "$peer" ] || [ -z "$endp" ] || [ -z "$addr" ] && \
         { json_error "Missing WireGuard args"; return 1; }
