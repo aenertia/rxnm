@@ -205,7 +205,7 @@ action_status() {
         --arg hn "$hostname" \
         --argjson gp "$global_proxy_json" \
         --argjson ifs "$json_ifaces_array" \
-        '{success: true, hostname: $hn, global_proxy: $gp, interfaces: (if ($ifs != null and ($ifs | length) > 0) then ($ifs | map({(.name): .}) | add) else {} end)}'
+        '{hostname: $hn, global_proxy: $gp, interfaces: (if ($ifs != null and ($ifs | length) > 0) then ($ifs | map({(.name): .}) | add) else {} end)}'
 }
 
 action_help() {

@@ -61,7 +61,7 @@ _task_create_vlan() {
         fi
     else
         local content
-        # Corrected: bridge ($8) is empty, vlan ($9) is $name
+        # build_network_config(match_iface, match_ssid, dhcp, desc, addresses, gateway, dns, bridge, vlan, ...)
         content=$(build_network_config "$parent" "" "yes" "Parent for VLAN ${name}" "" "" "" "" "$name" "" "" "" "yes" "yes")
         secure_write "$parent_cfg" "$content" "644"
     fi
@@ -91,20 +91,10 @@ _task_set_dhcp() {
     
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
-    if [ -n "$dns" ] || [ -n "$domains" ] || [ -n "$routes" ]; then
-        ensure_dirs
-        set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr"
-        reconfigure_iface "$iface"
-    else
-        local safe_ssid=""
-        [ -n "$ssid" ] && safe_ssid=$(sanitize_ssid "$ssid")
-        if [ -n "$safe_ssid" ]; then
-             rm -f "${STORAGE_NET_DIR}/75-config-${iface}-${safe_ssid}.network"
-        else
-             rm -f "${STORAGE_NET_DIR}/75-config-${iface}.network"
-        fi
-        reconfigure_iface "$iface"
-    fi
+    # Always ensure a configuration file is written to provide persistence and verification
+    ensure_dirs
+    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr"
+    reconfigure_iface "$iface"
 }
 
 _task_set_static() {
