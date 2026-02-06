@@ -77,7 +77,7 @@ _task_host_mode() {
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
     
-    # Fix: Allow open AP
+    # Fix: Correctly handle Open networks by omitting [Security] if pass is empty
     local ap_data="[General]\nChannel=${channel:-1}\n"
     if [ -n "$pass" ]; then
         ap_data+="[Security]\nPassphrase=${pass}\n"
@@ -92,6 +92,7 @@ _task_host_mode() {
              if [ -n "$pass" ]; then
                 printf "%s" "$pass" | iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
              else
+                # Default to open ad-hoc if no pass
                 iwctl ad-hoc "$iface" start "$ssid" 2>&1
              fi
              ;;
@@ -112,7 +113,7 @@ _task_client_mode() {
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             iwctl ap "$iface" stop >/dev/null 2>&1 || true
-            # Fix: Disconnect
+            # Fix: Ensure actual disconnection from existing APs
             iwctl station "$iface" disconnect >/dev/null 2>&1 || true
             iwctl station "$iface" scan >/dev/null 2>&1 || true
         fi
@@ -134,6 +135,25 @@ _task_set_country() {
     else
         return 1
     fi
+}
+
+_task_forget() {
+    local ssid="$1"
+    if is_service_active "iwd"; then
+        iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
+    fi
+    
+    local safe_ssid=$(sanitize_ssid "$ssid")
+    local removed_count=0
+    local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
+    for f in "${config_files[@]}"; do
+        if [ -f "$f" ]; then
+            rm -f "$f"
+            removed_count=$((removed_count + 1))
+        fi
+    done
+    if [ $removed_count -gt 0 ]; then reload_networkd; fi
+    json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
 # --- ACTIONS ---
@@ -160,30 +180,11 @@ action_forget() {
     local ssid="$1"
     [ -z "$ssid" ] && { json_error "SSID required"; return 0; }
 
-    # Fix: Wrap in lock
+    # Fix: Acquisition of interface lock for forget action to prevent race conditions
     local iface
     iface=$(get_wifi_iface || echo "global_wifi")
     
     with_iface_lock "$iface" _task_forget "$ssid"
-}
-
-_task_forget() {
-    local ssid="$1"
-    if is_service_active "iwd"; then
-        iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
-    fi
-    
-    local safe_ssid=$(sanitize_ssid "$ssid")
-    local removed_count=0
-    local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
-    for f in "${config_files[@]}"; do
-        if [ -f "$f" ]; then
-            rm -f "$f"
-            removed_count=$((removed_count + 1))
-        fi
-    done
-    if [ $removed_count -gt 0 ]; then reload_networkd; fi
-    json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
     return 0
 }
 
@@ -230,7 +231,9 @@ action_scan() {
     
     objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
-    echo "$objects_json" | jq -r --arg dev "$device_path" '
+    # Standardize output for status checks
+    local result
+    result=$(echo "$objects_json" | jq -r --arg dev "$device_path" '
         [
             .data[] | to_entries[] | 
             select(.value["net.connman.iwd.Network"] != null) |
@@ -248,7 +251,9 @@ action_scan() {
                 )
             }
         ] | unique_by(.ssid) | sort_by(-.signal)
-    '
+    ')
+    
+    json_success "$result"
     return 0
 }
 
@@ -259,10 +264,9 @@ action_connect() {
     if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
-    # Fix: Handle password for open network or hidden
+    # For connect: Only prompt if it's a TTY and not hidden/provided
     if [ -z "${pass:-}" ] && [ -t 0 ] && [[ "$hidden" != "true" ]]; then 
-        # Optional: prompt or read
-        :
+        read -r -p "Passphrase for $ssid: " pass
     fi
 
     if [ -n "$pass" ] && [ "$EPHEMERAL_CREDS" != "true" ]; then
@@ -313,7 +317,7 @@ action_connect() {
     return 0
 }
 
-# Fix: Explicit disconnect action
+# Fix: Explicit disconnect action added for functional parity
 action_disconnect() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
@@ -330,6 +334,7 @@ action_host() {
     [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
+    # Validation: Skip if intended open (pass length 0)
     if [ -n "$pass" ] && ! validate_passphrase "$pass"; then json_error "Invalid passphrase"; return 0; fi
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
@@ -337,8 +342,9 @@ action_host() {
     [ "$mode" == "ap" ] && use_share="true"
     [ -n "$share" ] && use_share="$share"
 
+    # Fix: No interactive read for 'host' mode - default to Open if pass is missing
     with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel"
-    json_success '{"status": "host_started"}'
+    json_success '{"status": "host_started", "ssid": "'"$ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"'}'
     return 0
 }
 
