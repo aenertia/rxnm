@@ -7,11 +7,9 @@
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 get_wifi_iface() {
-    # FIX: Use ${1:-} to prevent 'unbound variable' error under set -u
     local preferred="${1:-}"
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
     
-    # Check cache (30s TTL)
     local now
     now=$(date +%s)
     local cache_ttl=30
@@ -24,20 +22,17 @@ get_wifi_iface() {
     fi
     
     local best_iface=""
-    # FIX: Use nullglob to prevent iterating literal string if no match
     local interfaces=(/sys/class/net/*)
     for iface in "${interfaces[@]}"; do
         [ ! -e "$iface" ] && continue
         if [ -d "$iface/wireless" ] || [ -d "$iface/phy80211" ]; then
             local ifname
             ifname=$(basename "$iface")
-            
             if [ -z "$best_iface" ]; then
                 best_iface="$ifname"
             fi
-            
             local operstate
-            read -r operstate < "$iface/operstate" 2>/dev/null || true
+            read -r operstate < "$iface/operstate" 2>/dev/null || operstate="unknown"
             if [[ "$operstate" != "down" ]]; then
                 best_iface="$ifname"
                 break
@@ -87,7 +82,6 @@ _task_host_mode() {
     
     case "$mode" in
         adhoc)
-             # Use temp file for password pipe
              local pass_file
              pass_file=$(mktemp)
              chmod 600 "$pass_file"
@@ -103,15 +97,12 @@ _task_host_mode() {
 
 _task_client_mode() {
     local iface="$1"
-    
     rm -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     rm -f "${STORAGE_NET_DIR}/70-share-${iface}.network"
     rm -f "$STORAGE_HOST_NET_FILE"
-    
     reload_networkd
     reconfigure_iface "$iface"
     disable_nat_masquerade
-    
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             iwctl ap "$iface" stop >/dev/null 2>&1 || true
@@ -123,7 +114,6 @@ _task_client_mode() {
 _task_save_wifi_creds() {
     local ssid="$1"
     local pass="$2"
-    
     ensure_dirs
     secure_write "${STATE_DIR}/iwd/${ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
 }
@@ -142,8 +132,9 @@ _task_set_country() {
 
 action_wps() {
     local iface="$1"
-    [ -z "$iface" ] && iface=$(get_wifi_iface)
-    [ -z "$iface" ] && return 1
+    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
+    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 1; fi
 
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
@@ -170,7 +161,6 @@ action_forget() {
     
     local safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
-    
     local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
     for f in "${config_files[@]}"; do
         if [ -f "$f" ]; then
@@ -178,19 +168,14 @@ action_forget() {
             removed_count=$((removed_count + 1))
         fi
     done
-    
-    if [ $removed_count -gt 0 ]; then
-        reload_networkd
-    fi
-
+    if [ $removed_count -gt 0 ]; then reload_networkd; fi
     json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
 action_scan() {
     local iface="$1"
-    [ -z "$iface" ] && iface=$(get_wifi_iface)
-    
-    # If no interface found, error out gracefully instead of crashing
+    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     if [ -z "$iface" ]; then
         json_error "No WiFi interface found"
         return 1
@@ -255,10 +240,9 @@ action_scan() {
 action_connect() {
     local ssid="$1"; local pass="$2"; local iface="$3"; local hidden="$4"
     [ -n "$ssid" ] || return 1
-    [ -z "$iface" ] && iface=$(get_wifi_iface)
-    
+    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 1; fi
-    
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 1; fi
 
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
@@ -278,8 +262,8 @@ action_connect() {
     local attempts=0
     local max_attempts=3
     local out=""
+    local pass_file=""
     
-    local pass_file
     if [ -n "$pass" ]; then
         pass_file=$(mktemp)
         chmod 600 "$pass_file"
@@ -290,17 +274,14 @@ action_connect() {
         if [ "$EPHEMERAL_CREDS" == "true" ] && [ -n "${pass:-}" ]; then
              out=$(cat "$pass_file" | iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
         else
-             # Assuming creds saved or not needed
              out=$(iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi
-        
         if [[ -z "$out" ]]; then
             audit_log "WIFI_CONNECT" "Connected to $ssid"
             json_success '{"connected": true}'
             [ -n "$pass_file" ] && rm -f "$pass_file"
             return 0
         fi
-        
         case "$out" in
             *"Not found"*|*"No such network"*) break ;;
             *"Authentication failed"*) break ;;
@@ -309,16 +290,15 @@ action_connect() {
         attempts=$((attempts+1))
         sleep 1
     done
-    
     [ -n "$pass_file" ] && rm -f "$pass_file"
-    
     json_error "Failed to connect: $out"
 }
 
 action_host() {
     local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"
     [ -z "$ssid" ] && return 1
-    [ -z "$iface" ] && iface=$(get_wifi_iface)
+    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
     if ! validate_passphrase "$pass"; then echo "Invalid passphrase" >&2; exit 1; fi
@@ -329,23 +309,20 @@ action_host() {
     [ -n "$share" ] && use_share="$share"
 
     with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel"
-        
     json_success '{"status": "host_started"}'
 }
 
 action_client() {
     local iface="$1"
-    [ -z "$iface" ] && iface=$(get_wifi_iface)
-    
+    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     with_iface_lock "$iface" _task_client_mode "$iface"
-        
     json_success '{"mode": "client", "iface": "'"$iface"'"}'
 }
 
 action_set_country() {
     local code="$1"
     ! validate_country "$code" && { json_error "Invalid country"; return 1; }
-    
     if with_iface_lock "global_country" _task_set_country "$code"; then
         json_success '{"country": "'"$code"'"}'
     else

@@ -4,7 +4,6 @@
 
 cleanup() {
     # Remove temporary files safely
-    # Optimization: Use nullglob expansion instead of finding/looping
     local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
     if [ ${#temp_files[@]} -gt 0 ]; then
         rm -f "${temp_files[@]}" 2>/dev/null
@@ -24,10 +23,8 @@ cleanup() {
 acquire_global_lock() {
     local timeout="${1:-5}"
     
-    # Try to acquire lock
     exec 200>"$GLOBAL_LOCK_FILE"
     if ! flock -n 200; then
-        # Check for stale PID
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
             old_pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
@@ -49,23 +46,18 @@ acquire_global_lock() {
         fi
     fi
     
-    # Write our PID
     echo $$ > "$GLOBAL_PID_FILE"
-    
-    # Ensure cleanup on exit
     trap cleanup EXIT INT TERM
     return 0
 }
 
 acquire_iface_lock() {
     local iface="$1"
-    local timeout="${2:-10}" # Default 10s timeout
+    local timeout="${2:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
     
-    # Assign file descriptor automatically
     exec {fd}>"$lock_file" || return 1
     
-    # Use timeout to prevent indefinite hangs
     if ! flock -w "$timeout" "$fd"; then
         log_error "Failed to acquire lock for $iface after ${timeout}s"
         exec {fd}>&-
@@ -74,12 +66,9 @@ acquire_iface_lock() {
     lock_fd=$fd
 }
 
-# Wrapper to handle locking logic cleanly
-# Usage: with_iface_lock "interface" command arg1 arg2 ...
 with_iface_lock() {
     local iface="$1"; shift
     acquire_iface_lock "$iface" || return 1
-    # Ensure lock is released and FD closed on return
     trap 'flock -u "$lock_fd"; exec {lock_fd}>&-' RETURN
     "$@"
 }
@@ -117,8 +106,9 @@ audit_log() {
 }
 
 json_success() {
-    # FIX: Ensure no extra braces are present in variable expansion
-    jq -n --argjson data "${1:-{}}" '{success:true} + $data'
+    # Fix: Use local variable to avoid brace expansion issues with $1
+    local data="${1:-{}}"
+    jq -n --argjson data "$data" '{success:true} + $data'
 }
 
 json_error() {
@@ -126,6 +116,8 @@ json_error() {
     local code="${2:-1}"
     jq -n --arg msg "$msg" --arg code "$code" \
         '{success:false, error:$msg, exit_code:($code|tonumber)}'
+    # Ensure we return 0 so the script can finish its cycle, 
+    # the caller handles the logical error via the JSON response.
     return 0 
 }
 
@@ -138,7 +130,6 @@ sanitize_ssid() {
         return 1
     fi
     local safe
-    # Whitelist alphanumeric, underscore, hyphen. Dots are REMOVED to prevent traversal.
     safe=$(printf '%s' "$ssid" | tr -cd '[:alnum:]_-')
     [ -z "$safe" ] && safe="_unnamed_"
     echo "$safe"
@@ -147,25 +138,19 @@ sanitize_ssid() {
 validate_ssid() {
     local ssid="$1"
     local len=${#ssid}
-    
     if (( len < 1 || len > 32 )); then
         log_error "Invalid SSID length: $len"
         return 1
     fi
-    
-    # Check for dangerous characters ($, `, \, !, ;)
     if [[ "$ssid" =~ [\$\`\\\!\;] ]]; then
         log_error "SSID contains forbidden characters"
         return 1
     fi
-    
     return 0
 }
 
 validate_interface_name() {
     local iface="$1"
-    # Standard linux interface names: alphanumeric, hyphen, underscore, colon, dot
-    # Limit length to 15 chars (IFNAMSIZ)
     if [[ ! "$iface" =~ ^[a-zA-Z0-9_:.-]{1,15}$ ]]; then
         log_error "Invalid interface name: $iface"
         return 1
@@ -197,30 +182,22 @@ validate_channel() {
 
 validate_ip() {
     local ip="$1"
-    local clean_ip="${ip%/*}" # Remove CIDR if present
-
-    # Use 'ip' tool for robust validation (Supports v4 and v6)
+    local clean_ip="${ip%/*}"
     if command -v ip >/dev/null; then
         if ip route get "$clean_ip" >/dev/null 2>&1; then
             return 0
         fi
-        # 'ip route get' might fail for link-local or non-routable, 
-        # allow if it looks generally like an IPv6 address
         if [[ "$clean_ip" =~ : ]] && [[ "$clean_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
             return 0
         fi
-        # Basic IPv4 fallback
         if [[ "$clean_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             return 0
         fi
         return 1
     else
-        # Fallback regex if 'ip' tool missing (rare)
-        # IPv4
         if [[ "$clean_ip" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; then
             return 0
         fi
-        # Simple IPv6 check
         if [[ "$clean_ip" =~ : ]]; then
             return 0
         fi
@@ -237,14 +214,11 @@ validate_routes() {
         if [[ "$r" == *":"* ]]; then
             rgw="${r#*:}"
         fi
-        
         if [[ "$dest" == "0.0.0.0/0" ]] || [[ "$dest" == "::/0" ]]; then
             log_error "Modifying default route not allowed via this interface"
             return 1
         fi
-        
         if ! validate_ip "$dest"; then return 1; fi
-        
         if [ -n "$rgw" ]; then
             if ! validate_ip "$rgw"; then return 1; fi
         fi
@@ -295,10 +269,8 @@ get_proxy_json() {
                 no_proxy|export\ no_proxy) noproxy="$value" ;;
             esac
         done < "$file"
-
         [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
         [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
-
         jq -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
             '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
     else

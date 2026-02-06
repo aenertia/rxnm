@@ -19,7 +19,6 @@ action_check_portal() {
     elif [ "$http_code" == "000" ]; then
         json_success '{"portal_detected": false, "status": "offline"}'
     else
-        # Auto-Ack Attempt
         local ack_attempt="failed"
         if curl -L "${curl_opts[@]}" "$url" >/dev/null 2>&1; then
              http_code=$(curl "${curl_opts[@]}" "$url" 2>/dev/null || echo "000")
@@ -40,39 +39,36 @@ action_check_internet() {
     local curl_fmt="%{http_code}:%{time_total}"
     local target="http://clients3.google.com/generate_204"
     local v4="false" v6="false"
-    
-    # Parallelize checks slightly
-    local out4 out6
+    local out4="" out6=""
     
     if ip -4 route show default | grep -q default; then
-        out4=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
+        out4=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000:0")
         [[ "${out4%%:*}" == "204" ]] && v4="true"
     fi
 
     if ip -6 route show default | grep -q default; then
-        out6=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
+        out6=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000:0")
         [[ "${out6%%:*}" == "204" ]] && v6="true"
     fi
     
     local connected="false"
     [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
     
-    # FIX: Use string values to avoid arithmetic expansion errors on "true"
     json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$connected"'}'
 }
 
 action_status() {
-    [ -f "$STORAGE_COUNTRY_FILE" ] && iw reg set "$(cat "$STORAGE_COUNTRY_FILE")" 2>/dev/null
+    [ -f "$STORAGE_COUNTRY_FILE" ] && iw reg set "$(cat "$STORAGE_COUNTRY_FILE")" 2>/dev/null || true
     
     local hostname="ROCKNIX"
-    # FIX: 'read' returns exit code 1 if file has no newline at EOF. '|| true' prevents set -e crash.
-    [ -f /etc/hostname ] && { read -r hostname < /etc/hostname || true; }
+    if [ -f /etc/hostname ]; then
+        # Guard read to prevent exit 1 on missing newline
+        read -r hostname < /etc/hostname || true
+    fi
 
     declare -A WIFI_SSID_MAP
     if is_service_active "iwd"; then
         local bus_data
-        # FIX: If busctl fails (e.g. dbus error), command sub returns non-zero and assignment crashes script.
-        # We capture error or empty string safely.
         bus_data=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null || echo "")
         
         if [ -n "$bus_data" ]; then
@@ -90,31 +86,25 @@ action_status() {
 
     declare -A IP_MAP
     declare -A IPV6_MAP
-    # IPv4 + IPv6 parsing
     while read -r _ iface_name family ip_addr _; do
         if [[ "$family" == "inet" ]]; then
              IP_MAP["$iface_name"]="${ip_addr%/*}"
         elif [[ "$family" == "inet6" ]]; then
-             # Simple accumulation of IPv6 addresses
              IPV6_MAP["$iface_name"]="${IPV6_MAP[$iface_name]:-}${ip_addr%/*},"
         fi
-    done < <(ip -o addr show)
+    done < <(ip -o addr show 2>/dev/null || true)
 
     declare -A GW_MAP
-    # FIX: Added Check for empty gw_dev to prevent "bad array subscript" crash
     while read -r _ _ gw_addr _ gw_dev _ ; do
         if [ -n "$gw_dev" ]; then
             GW_MAP["$gw_dev"]="$gw_addr"
         fi
-    done < <(ip -4 route show default || true)
+    done < <(ip -4 route show default 2>/dev/null || true)
 
-    local global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
+    local global_proxy_json
+    global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
     
-    # Construct JSON structure using jq -n inside the loop is slow
-    # We will build a bash array of JSON objects and join them
     local -a json_objects=()
-
-    # FIX: Use nullglob to avoid iterating literal string if no matches
     local ifaces=(/sys/class/net/*)
     for iface_path in "${ifaces[@]}"; do
         local iface=${iface_path##*/}
@@ -124,11 +114,12 @@ action_status() {
         local ipv6_csv="${IPV6_MAP[$iface]:-}"
         local gw="${GW_MAP[$iface]:-}"
         local mac=""
-        read -r mac < "$iface_path/address" 2>/dev/null || mac=""
+        if [ -f "$iface_path/address" ]; then
+            read -r mac < "$iface_path/address" || mac=""
+        fi
         
         local connected="false"; [ -n "$ip" ] || [ -n "$ipv6_csv" ] && connected="true"
         
-        # Type detection
         local type="ethernet"
         case "$iface" in
             wlan*|wlp*) type="wifi" ;;
@@ -153,8 +144,6 @@ action_status() {
         local frequency=""
         if [ "$type" == "wifi" ]; then
              ssid="${WIFI_SSID_MAP[$iface]:-}"
-             
-             # Fetch Frequency/Channel
              if command -v iw >/dev/null; then
                  local iw_info
                  iw_info=$(iw dev "$iface" info 2>/dev/null || true)
@@ -163,7 +152,6 @@ action_status() {
                      frequency="${BASH_REMATCH[2]}"
                  fi
              fi
-             
              if [ -z "$ssid" ] && is_service_active "iwd"; then
                  local ap_output
                  ap_output=$(iwctl ap "$iface" show 2>/dev/null || echo "")
@@ -184,16 +172,12 @@ action_status() {
             iface_proxy_json=$(get_proxy_json "${STORAGE_NET_DIR}/proxy-${iface}.conf")
         fi
         
-        # Format IPv6 array
         local ipv6_json="[]"
         if [ -n "$ipv6_csv" ]; then
-            # remove trailing comma
             ipv6_csv="${ipv6_csv%,}"
-            # split and json encode
             ipv6_json=$(jq -n -R 'split(",")' <<< "$ipv6_csv")
         fi
 
-        # Safely construct object
         local json_obj
         json_obj=$(jq -n \
             --arg name "$iface" \
@@ -213,16 +197,14 @@ action_status() {
         json_objects+=("$json_obj")
     done
     
-    # Join objects
     local json_ifaces_array
     json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
     
-    # Construct final JSON
     jq -n \
         --arg hn "$hostname" \
         --argjson gp "$global_proxy_json" \
         --argjson ifs "$json_ifaces_array" \
-        '{hostname: $hn, global_proxy: $gp, interfaces: ($ifs | map({(.name): .}) | add)}'
+        '{hostname: $hn, global_proxy: $gp, interfaces: (if $ifs != null then ($ifs | map({(.name): .}) | add) else {} end)}'
 }
 
 action_help() {
@@ -287,16 +269,5 @@ Options:
   --peer-key <key>          WireGuard Peer Public Key
   --endpoint <ip:port>      WireGuard Endpoint
   --allowed-ips <cidrs>     Allowed IPs (default: 0.0.0.0/0)
-
-Examples:
-  # Scan WiFi
-  rxnm scan --interface wlan0
-
-  # Connect securely
-  echo "MyPassword" | rxnm connect --ssid "MyWiFi" --password-stdin
-
-  # Create Bond (Active-Backup)
-  rxnm create-bond --name bond0 --mode active-backup
-  rxnm set-bond-slave --interface eth0 --bond bond0
 EOF
 }
