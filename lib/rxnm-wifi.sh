@@ -132,13 +132,12 @@ _task_set_country() {
 
 action_wps() {
     local iface="$1"
-    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 1; fi
+    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
 
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
-        return 1
+        return 0
     fi
 
     if iwctl station "$iface" wsc start >/dev/null 2>&1; then
@@ -146,15 +145,16 @@ action_wps() {
     else
         json_error "Failed to start WPS. Ensure interface is in station mode."
     fi
+    return 0
 }
 
 action_forget() {
     local ssid="$1"
-    [ -z "$ssid" ] && { json_error "SSID required"; return 1; }
+    [ -z "$ssid" ] && { json_error "SSID required"; return 0; }
 
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
-        return 1
+        return 0
     fi
 
     iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
@@ -170,32 +170,32 @@ action_forget() {
     done
     if [ $removed_count -gt 0 ]; then reload_networkd; fi
     json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
+    return 0
 }
 
 action_scan() {
     local iface="$1"
-    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     if [ -z "$iface" ]; then
         json_error "No WiFi interface found"
-        return 1
+        return 0
     fi
 
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
-        return 1
+        return 0
     fi
 
     local objects_json
     if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD"
-        return 1
+        return 0
     fi
 
     local device_path
     device_path=$(echo "$objects_json" | jq -r --arg iface "$iface" '.data[] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
-    [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 1; }
+    [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
     busctl call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
     
@@ -235,15 +235,15 @@ action_scan() {
             }
         ] | unique_by(.ssid) | sort_by(-.signal)
     '
+    return 0
 }
 
 action_connect() {
     local ssid="$1"; local pass="$2"; local iface="$3"; local hidden="$4"
-    [ -n "$ssid" ] || return 1
-    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -n "$ssid" ] || return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 1; fi
-    if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 1; fi
+    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
+    if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
 
@@ -253,7 +253,7 @@ action_connect() {
     
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
-        return 1
+        return 0
     fi
 
     local cmd="connect"
@@ -292,17 +292,17 @@ action_connect() {
     done
     [ -n "$pass_file" ] && rm -f "$pass_file"
     json_error "Failed to connect: $out"
+    return 0
 }
 
 action_host() {
     local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"
-    [ -z "$ssid" ] && return 1
-    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
+    [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
     if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
-    if ! validate_passphrase "$pass"; then echo "Invalid passphrase" >&2; exit 1; fi
-    if ! validate_ssid "$ssid"; then echo "Invalid SSID" >&2; exit 1; fi
+    if ! validate_passphrase "$pass"; then json_error "Invalid passphrase"; return 0; fi
+    if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
     local use_share="false"
     [ "$mode" == "ap" ] && use_share="true"
@@ -310,23 +310,24 @@ action_host() {
 
     with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel"
     json_success '{"status": "host_started"}'
+    return 0
 }
 
 action_client() {
     local iface="$1"
-    # Guard subshell with || echo "" to prevent set -e exit if get_wifi_iface returns 1
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     with_iface_lock "$iface" _task_client_mode "$iface"
     json_success '{"mode": "client", "iface": "'"$iface"'"}'
+    return 0
 }
 
 action_set_country() {
     local code="$1"
-    ! validate_country "$code" && { json_error "Invalid country"; return 1; }
+    ! validate_country "$code" && { json_error "Invalid country"; return 0; }
     if with_iface_lock "global_country" _task_set_country "$code"; then
         json_success '{"country": "'"$code"'"}'
     else
         json_error "Failed to set country"
-        return 1
     fi
+    return 0
 }

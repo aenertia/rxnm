@@ -54,6 +54,7 @@ action_check_internet() {
     local connected="false"
     [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
     
+    # Construct JSON manually to avoid quoting issues with argjson during intermediate fix
     json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$connected"'}'
 }
 
@@ -62,7 +63,6 @@ action_status() {
     
     local hostname="ROCKNIX"
     if [ -f /etc/hostname ]; then
-        # Guard read to prevent exit 1 on missing newline
         read -r hostname < /etc/hostname || true
     fi
 
@@ -197,14 +197,16 @@ action_status() {
         json_objects+=("$json_obj")
     done
     
-    local json_ifaces_array
-    json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
+    local json_ifaces_array="[]"
+    if [ ${#json_objects[@]} -gt 0 ]; then
+        json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
+    fi
     
     jq -n \
         --arg hn "$hostname" \
         --argjson gp "$global_proxy_json" \
         --argjson ifs "$json_ifaces_array" \
-        '{hostname: $hn, global_proxy: $gp, interfaces: (if $ifs != null then ($ifs | map({(.name): .}) | add) else {} end)}'
+        '{hostname: $hn, global_proxy: $gp, interfaces: (if ($ifs != null and ($ifs | length) > 0) then ($ifs | map({(.name): .}) | add) else {} end)}'
 }
 
 action_help() {

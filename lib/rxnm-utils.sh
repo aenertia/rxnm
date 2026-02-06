@@ -106,8 +106,9 @@ audit_log() {
 }
 
 json_success() {
-    # Fix: Use local variable to avoid brace expansion issues with $1
-    local data="${1:-{}}"
+    # Fix: Explicitly check for unset/empty to avoid shell brace expansion bugs
+    local data="$1"
+    if [ -z "$data" ]; then data="{}"; fi
     jq -n --argjson data "$data" '{success:true} + $data'
 }
 
@@ -116,8 +117,6 @@ json_error() {
     local code="${2:-1}"
     jq -n --arg msg "$msg" --arg code "$code" \
         '{success:false, error:$msg, exit_code:($code|tonumber)}'
-    # Ensure we return 0 so the script can finish its cycle, 
-    # the caller handles the logical error via the JSON response.
     return 0 
 }
 
