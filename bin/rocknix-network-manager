@@ -402,7 +402,7 @@ case "$CMD" in
     start) action_setup ;;
     stop) action_stop ;;
     reload) action_reload ;;
-    status) action_status ;;
+    status) action_status "${ARG_IFACE:-}" ;;
     check-internet) action_check_internet ;;
     check-portal) action_check_portal "${ARG_IFACE:-}" ;;
     scan) action_scan "${ARG_IFACE:-}" ;;

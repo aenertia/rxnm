@@ -54,11 +54,11 @@ action_check_internet() {
     local connected="false"
     [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
     
-    # Construction Fix: success: true is required
     json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$connected"'}'
 }
 
 action_status() {
+    local filter_iface="${1:-}"
     [ -f "$STORAGE_COUNTRY_FILE" ] && iw reg set "$(cat "$STORAGE_COUNTRY_FILE")" 2>/dev/null || true
     
     local hostname="ROCKNIX"
@@ -110,6 +110,11 @@ action_status() {
         local iface=${iface_path##*/}
         [[ "$iface" == "lo" || "$iface" == "sit0" || "$iface" == "*" ]] && continue
         
+        # Performance optimization: skip processing if we are filtering for a specific interface
+        if [ -n "$filter_iface" ] && [ "$iface" != "$filter_iface" ]; then
+            continue
+        fi
+
         local ip="${IP_MAP[$iface]:-}"
         local ipv6_csv="${IPV6_MAP[$iface]:-}"
         local gw="${GW_MAP[$iface]:-}"
@@ -202,12 +207,21 @@ action_status() {
         json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
     fi
     
-    # Fix: success: true
     jq -n \
         --arg hn "$hostname" \
+        --arg filter "$filter_iface" \
         --argjson gp "$global_proxy_json" \
         --argjson ifs "$json_ifaces_array" \
-        '{success: true, hostname: $hn, global_proxy: $gp, interfaces: (if ($ifs != null and ($ifs | length) > 0) then ($ifs | map({(.name): .}) | add) else {} end)}'
+        '{
+            success: true, 
+            hostname: $hn, 
+            global_proxy: $gp, 
+            interfaces: (
+                if ($ifs != null and ($ifs | length) > 0) then 
+                    ($ifs | map({(.name): .}) | add // {}) 
+                else {} end
+            )
+        }'
 }
 
 action_help() {

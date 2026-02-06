@@ -18,7 +18,6 @@ build_network_config() {
     local routes="${12}"
     local mdns="${13:-yes}"
     local llmnr="${14:-yes}"
-    # FIX: Use ${15:-} to prevent 'unbound variable' errors under set -u
     local bond="${15:-}"
 
     # Intelligent conflict avoidance:
@@ -43,8 +42,8 @@ build_network_config() {
     # mDNS and LLMNR controls
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     
-    # Enable Masquerade on Client interfaces for potential tethering scenarios
-    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=yes\n"
+    # Fix: IPMasquerade=yes is deprecated. Use "ipv4" to satisfy systemd-networkd warnings.
+    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=ipv4\n"
 
     if [ -n "$addresses" ]; then
         IFS=',' read -ra ADDRS <<< "$addresses"
