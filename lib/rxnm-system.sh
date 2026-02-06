@@ -17,7 +17,9 @@ cache_service_states() {
         local svc="${services[$i]}"
         SERVICE_STATE_CACHE["$svc"]="$state"
         SERVICE_STATE_TS["$svc"]=$now
-        ((i++))
+        # CRITICAL FIX: Use pre-increment (++i). 
+        # Post-increment (i++) returns 0 (failure) when i=0, killing the script under set -e.
+        ((++i))
     done <<< "$states"
     
     [ "${SERVICE_STATE_CACHE["iwd"]}" == "active" ] && IWD_ACTIVE=true || IWD_ACTIVE=false
