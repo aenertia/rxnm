@@ -1,0 +1,348 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+#
+# ROCKNIX Network Manager (Modular)
+# Entry point for the modularized network manager.
+
+# Ensure no ANSI color codes in output from tools like iwctl
+export TERM=dumb
+
+# Safety options
+set -euo pipefail
+IFS=$'\n\t'
+shopt -s nullglob
+
+# --- BOOTSTRAP ---
+# Resolve the directory of the script to find libraries
+# If installed globally, these might be in /usr/lib/rocknix-network-manager
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# Fallback for system installation if relative path fails
+if [ ! -d "$LIB_DIR" ]; then
+    LIB_DIR="/usr/lib/rocknix-network-manager"
+fi
+
+if [ ! -d "$LIB_DIR" ]; then
+    echo "ERROR: Could not locate library directory at $LIB_DIR" >&2
+    exit 1
+fi
+
+# Source Core Libraries (Order Matters)
+source "${LIB_DIR}/rxnm-constants.sh"
+source "${LIB_DIR}/rxnm-utils.sh"
+source "${LIB_DIR}/rxnm-system.sh"
+source "${LIB_DIR}/rxnm-config-builder.sh"
+
+# Source Modules
+source "${LIB_DIR}/rxnm-wifi.sh"
+source "${LIB_DIR}/rxnm-bluetooth.sh"
+source "${LIB_DIR}/rxnm-interfaces.sh"
+source "${LIB_DIR}/rxnm-profiles.sh"
+source "${LIB_DIR}/rxnm-diagnostics.sh"
+
+# --- INITIALIZATION ---
+
+# Dependency check
+for cmd in jq busctl networkctl ip curl; do
+    if ! command -v "$cmd" >/dev/null; then
+        echo "ERROR: Missing dependency '$cmd'. Install systemd, curl and jq." >&2
+        exit 1
+    fi
+done
+
+# Ensure run directory exists
+mkdir -p "$RUN_DIR"
+
+# Global Lock Check
+LOCKFILE="${RUN_DIR}/network.lock"
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
+    echo "ERROR: Another instance of rocknix-network-manager is running." >&2
+    exit 1
+fi
+
+# Trap cleanup
+trap cleanup EXIT INT TERM
+
+# Initialize Service State Cache
+cache_service_states
+
+# --- ARGUMENT PARSING & DISPATCH ---
+
+CMD=""
+SUB_CMD=""
+: "${EPHEMERAL_CREDS:=false}"
+ARG_MDNS="yes"
+ARG_LLMNR="yes"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --start|start) CMD="start"; shift ;;
+        --stop|stop) CMD="stop"; shift ;;
+        --reload|reload) CMD="reload"; shift ;;
+        --help|-h|help) CMD="help"; shift ;;
+        status) CMD="status"; shift ;;
+        check-internet) CMD="check-internet"; shift ;;
+        check-portal) CMD="check-portal"; shift ;;
+        scan) CMD="scan"; shift ;;
+        wps) CMD="wps"; shift ;;
+        forget) CMD="forget"; shift ;;
+        connect) CMD="connect"; shift ;;
+        disconnect) CMD="disconnect"; shift ;;
+        create-bridge) CMD="create-bridge"; shift ;;
+        create-bond) CMD="create-bond"; shift ;;
+        create-vlan) CMD="create-vlan"; shift ;;
+        connect-wireguard) CMD="connect-wireguard"; shift ;;
+        set-member) CMD="set-member"; shift ;;
+        set-bond-slave) CMD="set-bond-slave"; shift ;;
+        delete-link) CMD="delete-link"; shift ;;
+        pan-net) CMD="pan-net"; shift ;;
+        host) CMD="host"; shift ;;
+        client) CMD="client"; shift ;;
+        set-dhcp) CMD="set-dhcp"; shift ;;
+        set-static) CMD="set-static"; shift ;;
+        set-link) CMD="set-link"; shift ;;
+        set-country) CMD="set-country"; shift ;;
+        set-proxy) CMD="set-proxy"; shift ;;
+        profile) CMD="profile"; shift ;;
+        
+        --ssid)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_SSID="$2"; shift 2
+            else
+                cli_error "--ssid requires a value"
+            fi
+            ;;
+        --password)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_PASS="$2"; shift 2
+            else
+                cli_error "--password requires a value"
+            fi
+            ;;
+        --interface)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_IFACE="$2"; shift 2
+            else
+                cli_error "--interface requires a value"
+            fi
+            ;;
+        --ip|--address)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_IP="$2"; shift 2
+            else
+                cli_error "--ip/--address requires a value"
+            fi
+            ;;
+        --gateway)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_GW="$2"; shift 2
+            else
+                cli_error "--gateway requires a value"
+            fi
+            ;;
+        --dns)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_DNS="$2"; shift 2
+            else
+                cli_error "--dns requires a value"
+            fi
+            ;;
+        --domains)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_DOMAINS="$2"; shift 2
+            else
+                cli_error "--domains requires a value"
+            fi
+            ;;
+        --routes)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_ROUTES="$2"; shift 2
+            else
+                cli_error "--routes requires a value"
+            fi
+            ;;
+        --mdns)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_MDNS="$2"; shift 2
+            else
+                cli_error "--mdns requires a value (yes/no/resolve)"
+            fi
+            ;;
+        --llmnr)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_LLMNR="$2"; shift 2
+            else
+                cli_error "--llmnr requires a value (yes/no/resolve)"
+            fi
+            ;;
+        # WireGuard Args
+        --private-key)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_PRIV_KEY="$2"; shift 2
+            else
+                cli_error "--private-key requires a value"
+            fi
+            ;;
+        --peer-key)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_PEER_KEY="$2"; shift 2
+            else
+                cli_error "--peer-key requires a value"
+            fi
+            ;;
+        --endpoint)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_ENDPOINT="$2"; shift 2
+            else
+                cli_error "--endpoint requires a value"
+            fi
+            ;;
+        --allowed-ips)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_ALLOWED_IPS="$2"; shift 2
+            else
+                cli_error "--allowed-ips requires a value"
+            fi
+            ;;
+        
+        --ipv4)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_V4="$2"; shift 2
+            else
+                cli_error "--ipv4 requires a value"
+            fi
+            ;;
+        --ipv6)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_V6="$2"; shift 2
+            else
+                cli_error "--ipv6 requires a value"
+            fi
+            ;;
+        --pin)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_PIN="$2"; shift 2
+            else
+                cli_error "--pin requires a value"
+            fi
+            ;;
+        --id)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_ID="$2"; shift 2
+            else
+                cli_error "--id requires a value"
+            fi
+            ;;
+        --channel)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_CHANNEL="$2"; shift 2
+            else
+                cli_error "--channel requires a value"
+            fi
+            ;;
+        --code)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_CODE="$2"; shift 2
+            else
+                cli_error "--code requires a value"
+            fi
+            ;;
+        --bridge)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_BRIDGE="$2"; shift 2
+            else
+                cli_error "--bridge requires a value"
+            fi
+            ;;
+        --bond)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_BOND="$2"; shift 2
+            else
+                cli_error "--bond requires a value"
+            fi
+            ;;
+        --parent)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_PARENT="$2"; shift 2
+            else
+                cli_error "--parent requires a value"
+            fi
+            ;;
+        --name)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_NAME="$2"; shift 2
+            else
+                cli_error "--name requires a value"
+            fi
+            ;;
+        --hidden) ARG_HIDDEN="true"; shift ;;
+        --mode)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_MODE="$2"; shift 2
+            else
+                cli_error "--mode requires a value"
+            fi
+            ;;
+        --http)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_HTTP="$2"; shift 2
+            else
+                cli_error "--http requires a value"
+            fi
+            ;;
+        --https)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_HTTPS="$2"; shift 2
+            else
+                cli_error "--https requires a value"
+            fi
+            ;;
+        --noproxy)
+            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
+                ARG_NOPROXY="$2"; shift 2
+            else
+                cli_error "--noproxy requires a value"
+            fi
+            ;;
+        --share) ARG_SHARE="true"; shift ;;
+        enable|disable|save|load|list|delete) SUB_CMD="$1"; shift ;;
+        *) [ -z "$CMD" ] && CMD="status"; shift ;;
+    esac
+done
+
+[ -z "$CMD" ] && { [ -t 0 ] && CMD="status" || CMD="start"; }
+
+case "$CMD" in
+    start) action_setup ;;
+    stop) action_stop ;;
+    reload) action_reload ;;
+    status) action_status ;;
+    check-internet) action_check_internet ;;
+    check-portal) action_check_portal "${ARG_IFACE:-}" ;;
+    scan) action_scan "${ARG_IFACE:-}" ;;
+    wps) action_wps "${ARG_IFACE:-}" ;;
+    forget) action_forget "${ARG_SSID:-}" ;;
+    connect) action_connect "${ARG_SSID:-}" "${ARG_PASS:-}" "${ARG_IFACE:-}" "${ARG_HIDDEN:-}" ;;
+    disconnect) action_client "${ARG_IFACE:-}" ;; 
+    create-bridge) action_create_bridge "${ARG_NAME:-}" ;;
+    create-bond) action_create_bond "${ARG_NAME:-}" "${ARG_MODE:-}" ;;
+    create-vlan) action_create_vlan "${ARG_PARENT:-}" "${ARG_NAME:-}" "${ARG_ID:-}" ;;
+    connect-wireguard) action_connect_wireguard "${ARG_NAME:-}" "${ARG_PRIV_KEY:-}" "${ARG_PEER_KEY:-}" "${ARG_ENDPOINT:-}" "${ARG_ALLOWED_IPS:-}" "${ARG_IP:-}" "${ARG_DNS:-}" ;;
+    set-member) action_set_member "${ARG_IFACE:-}" "${ARG_BRIDGE:-}" ;;
+    set-bond-slave) action_set_bond_slave "${ARG_IFACE:-}" "${ARG_BOND:-}" ;;
+    delete-link) action_delete_netdev "${ARG_NAME:-}" ;;
+    pan-net) action_pan_net "${SUB_CMD:-}" "${ARG_PIN:-}" "${ARG_SSID:-}" "${ARG_IP:-}" "${ARG_MODE:-}" "${ARG_SHARE:-}" ;;
+    host) action_host "${ARG_SSID:-}" "${ARG_PASS:-}" "${ARG_MODE:-}" "${ARG_SHARE:-}" "${ARG_IP:-}" "${ARG_IFACE:-}" "${ARG_CHANNEL:-}" ;;
+    client) action_client "${ARG_IFACE:-}" ;;
+    set-dhcp) action_set_dhcp "${ARG_IFACE:-}" "${ARG_SSID:-}" "${ARG_DNS:-}" "${ARG_DOMAINS:-}" "${ARG_ROUTES:-}" "$ARG_MDNS" "$ARG_LLMNR" ;;
+    set-static) action_set_static "${ARG_IFACE:-}" "${ARG_IP:-}" "${ARG_GW:-}" "${ARG_DNS:-}" "${ARG_SSID:-}" "${ARG_DOMAINS:-}" "${ARG_ROUTES:-}" "$ARG_MDNS" "$ARG_LLMNR" ;;
+    set-link) action_set_link "${ARG_IFACE:-}" "${ARG_V4:-}" "${ARG_V6:-}" ;;
+    set-country) action_set_country "${ARG_CODE:-}" ;;
+    set-proxy) action_set_proxy "${ARG_IFACE:-}" "${ARG_HTTP:-}" "${ARG_HTTPS:-}" "${ARG_NOPROXY:-}" ;;
+    profile) action_profile "${SUB_CMD:-}" "${ARG_NAME:-}" "${ARG_IFACE:-}" ;;
+    help) action_help ;;
+    *) action_help; exit 1 ;;
+esac

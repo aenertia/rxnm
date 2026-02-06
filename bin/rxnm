@@ -1,0 +1,4 @@
+#!/bin/bash
+# Shorthand for rocknix-network-manager
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "${SCRIPT_DIR}/rocknix-network-manager" "$@"

@@ -1,0 +1,36 @@
+[Unit]
+Description=ROCKNIX Network Manager (RXNM)
+Documentation=https://github.com/rocknix/rocknix-network-manager
+
+# Requirement: Filesystem must be online. 
+# We explicitly check for /storage as that is the default location for persistence.
+After=local-fs.target
+RequiresMountsFor=/storage
+
+# Requirement: Start BEFORE network daemons to ensure configs are in place
+# prior to them coming on-line and processing interfaces.
+Before=systemd-networkd.service systemd-resolved.service iwd.service network-online.target
+
+# Bring up the network stack after we have finished configuration
+Wants=systemd-networkd.service systemd-resolved.service iwd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Main lifecycle mapping
+ExecStart=/usr/bin/rocknix-network-manager start
+ExecReload=/usr/bin/rocknix-network-manager reload
+ExecStop=/usr/bin/rocknix-network-manager stop
+
+# Environment configuration (Optional overrides)
+# Environment="CONF_DIR=/storage/.config"
+# Environment="STATE_DIR=/var/lib"
+
+# Security hardening
+#ProtectSystem=full
+#ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
