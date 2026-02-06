@@ -7,7 +7,8 @@
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 get_wifi_iface() {
-    local preferred="$1"
+    # FIX: Use ${1:-} to prevent 'unbound variable' error under set -u
+    local preferred="${1:-}"
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
     
     # Check cache (30s TTL)
@@ -23,7 +24,9 @@ get_wifi_iface() {
     fi
     
     local best_iface=""
-    for iface in /sys/class/net/*; do
+    # FIX: Use nullglob to prevent iterating literal string if no match
+    local interfaces=(/sys/class/net/*)
+    for iface in "${interfaces[@]}"; do
         [ ! -e "$iface" ] && continue
         if [ -d "$iface/wireless" ] || [ -d "$iface/phy80211" ]; then
             local ifname
@@ -34,7 +37,7 @@ get_wifi_iface() {
             fi
             
             local operstate
-            read -r operstate < "$iface/operstate" 2>/dev/null
+            read -r operstate < "$iface/operstate" 2>/dev/null || true
             if [[ "$operstate" != "down" ]]; then
                 best_iface="$ifname"
                 break
@@ -74,7 +77,7 @@ _task_host_mode() {
     
     if ! is_service_active "iwd"; then echo "IWD not running" >&2; exit 1; fi
 
-    iwctl station "$iface" disconnect >/dev/null 2>&1
+    iwctl station "$iface" disconnect >/dev/null 2>&1 || true
     
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
@@ -112,7 +115,7 @@ _task_client_mode() {
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             iwctl ap "$iface" stop >/dev/null 2>&1 || true
-            iwctl station "$iface" scan >/dev/null 2>&1
+            iwctl station "$iface" scan >/dev/null 2>&1 || true
         fi
     fi
 }
@@ -163,11 +166,12 @@ action_forget() {
         return 1
     fi
 
-    iwctl known-networks "$ssid" forget >/dev/null 2>&1
+    iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
     
     local safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
     
+    # Fix nullglob for safety here too
     local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
     for f in "${config_files[@]}"; do
         if [ -f "$f" ]; then
@@ -186,7 +190,12 @@ action_forget() {
 action_scan() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface)
-    [ -z "$iface" ] && return 1
+    
+    # If no interface found, error out gracefully instead of crashing
+    if [ -z "$iface" ]; then
+        json_error "No WiFi interface found"
+        return 1
+    fi
 
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
@@ -204,7 +213,7 @@ action_scan() {
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 1; }
     
-    busctl call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1
+    busctl call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
     
     local sleep_sec
     if (( SCAN_POLL_MS < 1000 )); then
