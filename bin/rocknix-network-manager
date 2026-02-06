@@ -5,6 +5,11 @@
 # ROCKNIX Network Manager (Modular)
 # Entry point for the modularized network manager.
 
+# Debug trigger
+if [ -n "${RXNM_DEBUG:-}" ]; then
+    set -x
+fi
+
 # Ensure no ANSI color codes in output from tools like iwctl
 export TERM=dumb
 
@@ -14,18 +19,28 @@ IFS=$'\n\t'
 shopt -s nullglob
 
 # --- BOOTSTRAP ---
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Robustly find the real source directory, resolving symlinks
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
-# Check for a specific file to confirm we have the right directory.
-# If we are symlinked in /usr/bin, ../lib exists (/usr/lib) but is wrong.
+# Verification with detailed error
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
-    # Fallback to standard install location
+    # Fallback to standard install location just in case
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
 fi
 
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
-    echo "ERROR: Could not locate library directory at $LIB_DIR" >&2
+    echo "ERROR: Could not locate library directory." >&2
+    echo "Debug Info:" >&2
+    echo "  Source: $SOURCE" >&2
+    echo "  Script Dir: $SCRIPT_DIR" >&2
+    echo "  Attempted Lib Dir: $LIB_DIR" >&2
     exit 1
 fi
 

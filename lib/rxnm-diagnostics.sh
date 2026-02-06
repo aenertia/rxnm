@@ -61,22 +61,27 @@ action_status() {
     [ -f "$STORAGE_COUNTRY_FILE" ] && iw reg set "$(cat "$STORAGE_COUNTRY_FILE")" 2>/dev/null
     
     local hostname="ROCKNIX"
-    [ -f /etc/hostname ] && read -r hostname < /etc/hostname
+    # FIX: 'read' returns exit code 1 if file has no newline at EOF. '|| true' prevents set -e crash.
+    [ -f /etc/hostname ] && { read -r hostname < /etc/hostname || true; }
 
     declare -A WIFI_SSID_MAP
     if is_service_active "iwd"; then
         local bus_data
-        bus_data=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+        # FIX: If busctl fails (e.g. dbus error), command sub returns non-zero and assignment crashes script.
+        # We capture error or empty string safely.
+        bus_data=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null || echo "")
         
-        while read -r dev_name ssid; do
-            [ -n "$dev_name" ] && WIFI_SSID_MAP["$dev_name"]="$ssid"
-        done < <(echo "$bus_data" | jq -r '
-            .data[] | to_entries[] | select(.value["net.connman.iwd.Network"] != null) 
-            | select(.value["net.connman.iwd.Network"].Connected.data == true)
-            | .value as $net 
-            | ($net["net.connman.iwd.Network"].Device.data) as $dev_path
-            | .data[0][$dev_path]["net.connman.iwd.Device"].Name.data + " " + $net["net.connman.iwd.Network"].Name.data
-        ' 2>/dev/null)
+        if [ -n "$bus_data" ]; then
+            while read -r dev_name ssid; do
+                [ -n "$dev_name" ] && WIFI_SSID_MAP["$dev_name"]="$ssid"
+            done < <(echo "$bus_data" | jq -r '
+                .data[] | to_entries[] | select(.value["net.connman.iwd.Network"] != null) 
+                | select(.value["net.connman.iwd.Network"].Connected.data == true)
+                | .value as $net 
+                | ($net["net.connman.iwd.Network"].Device.data) as $dev_path
+                | .data[0][$dev_path]["net.connman.iwd.Device"].Name.data + " " + $net["net.connman.iwd.Network"].Name.data
+            ' 2>/dev/null || true)
+        fi
     fi
 
     declare -A IP_MAP
@@ -102,9 +107,11 @@ action_status() {
     # We will build a bash array of JSON objects and join them
     local -a json_objects=()
 
-    for iface_path in /sys/class/net/*; do
+    # FIX: Use nullglob to avoid iterating literal string if no matches
+    local ifaces=(/sys/class/net/*)
+    for iface_path in "${ifaces[@]}"; do
         local iface=${iface_path##*/}
-        [[ "$iface" == "lo" || "$iface" == "sit0" ]] && continue
+        [[ "$iface" == "lo" || "$iface" == "sit0" || "$iface" == "*" ]] && continue
         
         local ip="${IP_MAP[$iface]:-}"
         local ipv6_csv="${IPV6_MAP[$iface]:-}"
@@ -143,7 +150,7 @@ action_status() {
              # Fetch Frequency/Channel
              if command -v iw >/dev/null; then
                  local iw_info
-                 iw_info=$(iw dev "$iface" info 2>/dev/null)
+                 iw_info=$(iw dev "$iface" info 2>/dev/null || true)
                  if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ MHz\) ]]; then
                      channel="${BASH_REMATCH[1]}"
                      frequency="${BASH_REMATCH[2]}"
@@ -152,7 +159,7 @@ action_status() {
              
              if [ -z "$ssid" ] && is_service_active "iwd"; then
                  local ap_output
-                 ap_output=$(iwctl ap "$iface" show 2>/dev/null)
+                 ap_output=$(iwctl ap "$iface" show 2>/dev/null || echo "")
                  if grep -q "Started" <<< "$ap_output"; then
                      type="wifi_ap"
                      ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
