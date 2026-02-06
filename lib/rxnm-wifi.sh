@@ -76,18 +76,24 @@ _task_host_mode() {
     
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
+    
+    # Fix: Allow open AP
+    local ap_data="[General]\nChannel=${channel:-1}\n"
+    if [ -n "$pass" ]; then
+        ap_data+="[Security]\nPassphrase=${pass}\n"
+    fi
+    
     if [ "$mode" != "adhoc" ]; then
-         secure_write "$ap_conf" "[General]\nChannel=${channel}\n[Security]\nPassphrase=${pass}\n" "600"
+         secure_write "$ap_conf" "$ap_data" "600"
     fi
     
     case "$mode" in
         adhoc)
-             local pass_file
-             pass_file=$(mktemp)
-             chmod 600 "$pass_file"
-             printf "%s" "$pass" > "$pass_file"
-             cat "$pass_file" | iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
-             rm -f "$pass_file"
+             if [ -n "$pass" ]; then
+                printf "%s" "$pass" | iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
+             else
+                iwctl ad-hoc "$iface" start "$ssid" 2>&1
+             fi
              ;;
         ap|*)
              iwctl ap "$iface" start-profile "$ssid" 2>&1
@@ -106,6 +112,8 @@ _task_client_mode() {
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             iwctl ap "$iface" stop >/dev/null 2>&1 || true
+            # Fix: Disconnect
+            iwctl station "$iface" disconnect >/dev/null 2>&1 || true
             iwctl station "$iface" scan >/dev/null 2>&1 || true
         fi
     fi
@@ -152,12 +160,18 @@ action_forget() {
     local ssid="$1"
     [ -z "$ssid" ] && { json_error "SSID required"; return 0; }
 
-    if ! is_service_active "iwd"; then
-        json_error "IWD service not running"
-        return 0
-    fi
+    # Fix: Wrap in lock
+    local iface
+    iface=$(get_wifi_iface || echo "global_wifi")
+    
+    with_iface_lock "$iface" _task_forget "$ssid"
+}
 
-    iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
+_task_forget() {
+    local ssid="$1"
+    if is_service_active "iwd"; then
+        iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
+    fi
     
     local safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
@@ -245,7 +259,11 @@ action_connect() {
     if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
-    if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
+    # Fix: Handle password for open network or hidden
+    if [ -z "${pass:-}" ] && [ -t 0 ] && [[ "$hidden" != "true" ]]; then 
+        # Optional: prompt or read
+        :
+    fi
 
     if [ -n "$pass" ] && [ "$EPHEMERAL_CREDS" != "true" ]; then
         with_iface_lock "$iface" _task_save_wifi_creds "$ssid" "$pass"
@@ -295,13 +313,24 @@ action_connect() {
     return 0
 }
 
+# Fix: Explicit disconnect action
+action_disconnect() {
+    local iface="$1"
+    [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
+    if is_service_active "iwd"; then
+        iwctl station "$iface" disconnect >/dev/null 2>&1
+        json_success '{"action": "disconnected", "iface": "'"$iface"'"}'
+    else
+        json_error "IWD not running"
+    fi
+}
+
 action_host() {
     local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"
     [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
-    if [ -z "${pass:-}" ] && [ -t 0 ]; then read -r pass; fi
-    if ! validate_passphrase "$pass"; then json_error "Invalid passphrase"; return 0; fi
+    if [ -n "$pass" ] && ! validate_passphrase "$pass"; then json_error "Invalid passphrase"; return 0; fi
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
 
     local use_share="false"

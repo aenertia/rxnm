@@ -30,7 +30,8 @@ _task_pan_net() {
                 content=$(build_network_config "bnep*" "" "yes" "Bluetooth PAN Client (PANU)" "" "" "" "" "" "" "" "" "yes" "yes")
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 tune_network_stack "client"
-                disable_nat_masquerade
+                # Fix: Don't disable global NAT just because BT is client
+                # disable_nat_masquerade
             fi
             reload_networkd
             ;;

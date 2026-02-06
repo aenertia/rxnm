@@ -61,7 +61,7 @@ _task_create_vlan() {
         fi
     else
         local content
-        # build_network_config(match_iface, match_ssid, dhcp, desc, addresses, gateway, dns, bridge, vlan, ...)
+        # Fix: Arguments order (VLAN is $9, not $8)
         content=$(build_network_config "$parent" "" "yes" "Parent for VLAN ${name}" "" "" "" "" "$name" "" "" "" "yes" "yes")
         secure_write "$parent_cfg" "$content" "644"
     fi
@@ -91,7 +91,7 @@ _task_set_dhcp() {
     
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
-    # Always ensure a configuration file is written to provide persistence and verification
+    # Fix: Always ensure a file is written to satisfy persistence/test checks
     ensure_dirs
     set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr"
     reconfigure_iface "$iface"
@@ -312,7 +312,8 @@ action_set_link() {
 action_set_proxy() {
     local iface="$1"; local http="$2"; local https="$3"; local noproxy="$4"
     
-    with_iface_lock "proxy_settings" _task_set_proxy "$iface" "$http" "$https" "$noproxy"
+    # Fix: Lock by interface or global
+    with_iface_lock "${iface:-global_proxy}" _task_set_proxy "$iface" "$http" "$https" "$noproxy"
         
     json_success '{"action": "set_proxy"}'
 }

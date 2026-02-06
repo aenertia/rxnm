@@ -57,6 +57,34 @@ SUB_CMD=""
 : "${EPHEMERAL_CREDS:=false}"
 ARG_MDNS="yes"
 ARG_LLMNR="yes"
+ARG_SSID=""
+ARG_PASS=""
+ARG_IFACE=""
+ARG_IP=""
+ARG_GW=""
+ARG_DNS=""
+ARG_DOMAINS=""
+ARG_ROUTES=""
+ARG_PRIV_KEY=""
+ARG_PEER_KEY=""
+ARG_ENDPOINT=""
+ARG_ALLOWED_IPS=""
+ARG_V4=""
+ARG_V6=""
+ARG_PIN=""
+ARG_ID=""
+ARG_CHANNEL=""
+ARG_CODE=""
+ARG_BRIDGE=""
+ARG_BOND=""
+ARG_PARENT=""
+ARG_NAME=""
+ARG_HIDDEN="false"
+ARG_MODE=""
+ARG_HTTP=""
+ARG_HTTPS=""
+ARG_NOPROXY=""
+ARG_SHARE="false"
 
 # We parse args first to determine what to load and do
 ARGS=("$@")
@@ -324,7 +352,7 @@ done
 # Ensure run directory exists
 mkdir -p "$RUN_DIR"
 
-# Global Lock Check using new robust mechanism (except for status/help/check which are read-only)
+# Global Lock Check (Fix: forget requires lock, scan does not)
 if [[ "$CMD" != "status" && "$CMD" != "help" && "$CMD" != "check-internet" && "$CMD" != "check-portal" && "$CMD" != "scan" ]]; then
     acquire_global_lock || exit 1
 fi
@@ -333,7 +361,7 @@ fi
 case "$CMD" in
     start|stop|reload)
         source "${LIB_DIR}/rxnm-wifi.sh"
-        source "${LIB_DIR}/rxnm-bluetooth.sh" # for cleanup
+        source "${LIB_DIR}/rxnm-bluetooth.sh" 
         ;;
     status|check-internet|check-portal)
         source "${LIB_DIR}/rxnm-diagnostics.sh"
@@ -381,7 +409,7 @@ case "$CMD" in
     wps) action_wps "${ARG_IFACE:-}" ;;
     forget) action_forget "${ARG_SSID:-}" ;;
     connect) action_connect "${ARG_SSID:-}" "${ARG_PASS:-}" "${ARG_IFACE:-}" "${ARG_HIDDEN:-}" ;;
-    disconnect) action_client "${ARG_IFACE:-}" ;; 
+    disconnect) action_disconnect "${ARG_IFACE:-}" ;; 
     create-bridge) action_create_bridge "${ARG_NAME:-}" ;;
     create-bond) action_create_bond "${ARG_NAME:-}" "${ARG_MODE:-}" ;;
     create-vlan) action_create_vlan "${ARG_PARENT:-}" "${ARG_NAME:-}" "${ARG_ID:-}" ;;

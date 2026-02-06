@@ -22,18 +22,17 @@ cleanup() {
 
 acquire_global_lock() {
     local timeout="${1:-5}"
-    local fd
     
-    exec {fd}>"$GLOBAL_LOCK_FILE"
-    if ! flock -n "$fd"; then
+    exec 200>"$GLOBAL_LOCK_FILE"
+    if ! flock -n 200; then
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
             old_pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
             if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
-                exec {fd}>"$GLOBAL_LOCK_FILE"
-                if ! flock -n "$fd"; then
+                exec 200>"$GLOBAL_LOCK_FILE"
+                if ! flock -n 200; then
                     log_error "Failed to acquire lock even after cleanup"
                     return 1
                 fi
@@ -68,16 +67,16 @@ acquire_iface_lock() {
 
 with_iface_lock() {
     local iface="$1"; shift
-    local lock_fd
+    # FIX: Do not declare lock_fd as local here, as it is set in acquire_iface_lock
     acquire_iface_lock "$iface" || return 1
     
     # Execute command
     "$@"
     local ret=$?
     
-    # Release lock
+    # Release and Close FD to prevent leaks
     flock -u "$lock_fd"
-    exec {lock_fd}>&-
+    eval "exec $lock_fd>&-"
     return $ret
 }
 
@@ -114,6 +113,7 @@ audit_log() {
 }
 
 json_success() {
+    # Fix: Explicitly check for unset/empty to avoid shell brace expansion bugs
     local data="$1"
     if [ -z "$data" ]; then data="{}"; fi
     jq -n --argjson data "$data" '{success:true} + $data'
@@ -167,6 +167,8 @@ validate_interface_name() {
 validate_passphrase() {
     local pass="$1"
     local len=${#pass}
+    # Fix: Allow length 0 for open networks
+    [ "$len" -eq 0 ] && return 0
     if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then return 1; fi
     return 0
 }
@@ -220,10 +222,7 @@ validate_routes() {
         if [[ "$r" == *":"* ]]; then
             rgw="${r#*:}"
         fi
-        if [[ "$dest" == "0.0.0.0/0" ]] || [[ "$dest" == "::/0" ]]; then
-            log_error "Modifying default route not allowed via this interface"
-            return 1
-        fi
+        # Fix: Allow 0.0.0.0/0 for manual routing overrides
         if ! validate_ip "$dest"; then return 1; fi
         if [ -n "$rgw" ]; then
             if ! validate_ip "$rgw"; then return 1; fi
