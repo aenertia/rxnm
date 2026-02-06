@@ -171,7 +171,6 @@ action_forget() {
     local safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
     
-    # Fix nullglob for safety here too
     local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
     for f in "${config_files[@]}"; do
         if [ -f "$f" ]; then

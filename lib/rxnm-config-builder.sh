@@ -18,7 +18,8 @@ build_network_config() {
     local routes="${12}"
     local mdns="${13:-yes}"
     local llmnr="${14:-yes}"
-    local bond="${15}"
+    # FIX: Use ${15:-} to prevent 'unbound variable' errors under set -u
+    local bond="${15:-}"
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then

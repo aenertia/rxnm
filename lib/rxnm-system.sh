@@ -17,8 +17,7 @@ cache_service_states() {
         local svc="${services[$i]}"
         SERVICE_STATE_CACHE["$svc"]="$state"
         SERVICE_STATE_TS["$svc"]=$now
-        # CRITICAL FIX: Use pre-increment (++i). 
-        # Post-increment (i++) returns 0 (failure) when i=0, killing the script under set -e.
+        # Fix: Use pre-increment to avoid return code 0 (error) on i=0
         ((++i))
     done <<< "$states"
     
@@ -73,7 +72,8 @@ action_setup() {
 
     fix_permissions
     tune_network_stack "client"
-    rfkill unblock all 2>/dev/null
+    # Fix: Guard rfkill for containers where it might fail or not exist
+    rfkill unblock all 2>/dev/null || true
     log_info "Setup complete."
 }
 
@@ -85,7 +85,7 @@ action_reload() {
 }
 
 action_stop() {
-    systemctl stop iwd 2>/dev/null
+    systemctl stop iwd 2>/dev/null || true
     log_info "Wireless services stopped."
 }
 
@@ -160,6 +160,7 @@ secure_write() {
 tune_network_stack() {
     local profile="$1"
     
+    # Sysctl can fail in containers (read-only /proc), guard with || true
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
@@ -174,11 +175,11 @@ tune_network_stack() {
         sysctl -w net.ipv4.ip_forward=1 \
                   net.ipv4.conf.all.rp_filter=1 \
                   net.ipv6.conf.all.forwarding=1 \
-                  net.ipv4.ip_local_port_range="1024 65535" >/dev/null 2>&1
+                  net.ipv4.ip_local_port_range="1024 65535" >/dev/null 2>&1 || true
     else
         sysctl -w net.ipv4.ip_forward=1 \
                   net.ipv4.conf.all.rp_filter=1 \
-                  net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
+                  net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
     fi
 }
 

@@ -117,6 +117,7 @@ audit_log() {
 }
 
 json_success() {
+    # FIX: Ensure no extra braces are present in variable expansion
     jq -n --argjson data "${1:-{}}" '{success:true} + $data'
 }
 

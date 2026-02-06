@@ -39,22 +39,26 @@ action_check_portal() {
 action_check_internet() {
     local curl_fmt="%{http_code}:%{time_total}"
     local target="http://clients3.google.com/generate_204"
-    local v4=false v6=false
+    local v4="false" v6="false"
     
     # Parallelize checks slightly
     local out4 out6
     
     if ip -4 route show default | grep -q default; then
         out4=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
-        [[ "${out4%%:*}" == "204" ]] && v4=true
+        [[ "${out4%%:*}" == "204" ]] && v4="true"
     fi
 
     if ip -6 route show default | grep -q default; then
         out6=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || true)
-        [[ "${out6%%:*}" == "204" ]] && v6=true
+        [[ "${out6%%:*}" == "204" ]] && v6="true"
     fi
     
-    json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$(($v4 || $v6 ? "true" : "false"))"'}'
+    local connected="false"
+    [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
+    
+    # FIX: Use string values to avoid arithmetic expansion errors on "true"
+    json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$connected"'}'
 }
 
 action_status() {
