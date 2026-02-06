@@ -1,0 +1,106 @@
+_rxnm_completion() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+    local cmd="${COMP_WORDS[1]}"
+    local subcmd="${COMP_WORDS[2]}"
+
+    local commands="status scan connect disconnect check-internet check-portal wps forget host client set-dhcp set-static set-link set-country set-proxy profile create-bridge create-bond create-vlan connect-wireguard pan-net reload start stop"
+    local global_opts="--interface --ssid --password --password-stdin --password-file --ip --gateway --dns --hidden --share --mdns --llmnr --bond --parent --name --channel --code --bridge --endpoint --peer-key --private-key --allowed-ips"
+    
+    COMPREPLY=()
+
+    case "$COMP_CWORD" in
+        1)
+            # First word completion
+            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+            ;;
+        *)
+            # Handle command-specific completions
+            case "$cmd" in
+                scan|forget|disconnect|wps)
+                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                    ;;
+                connect)
+                    case "$COMP_CWORD" in
+                        2|4|6|8|10|12|14|16)
+                            COMPREPLY=($(compgen -W "--interface --ssid --password --password-stdin --password-file --hidden" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "--interface --ssid --password --password-stdin --password-file --hidden" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                host)
+                    COMPREPLY=($(compgen -W "--interface --ssid --password --share" -- "$cur"))
+                    ;;
+                client)
+                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                    ;;
+                set-dhcp|set-static|set-link|set-country)
+                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                    ;;
+                pan-net)
+                    case "$COMP_CWORD" in
+                        2)
+                            COMPREPLY=($(compgen -W "enable disable" -- "$cur"))
+                            ;;
+                        4|6)
+                            COMPREPLY=($(compgen -W "--interface --ssid --password" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "--interface --ssid --password" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                create-bridge|create-bond|create-vlan)
+                    COMPREPLY=($(compgen -W "--name" -- "$cur"))
+                    ;;
+                set-member)
+                    COMPREPLY=($(compgen -W "--interface --bridge" -- "$cur"))
+                    ;;
+                set-bond-slave)
+                    COMPREPLY=($(compgen -W "--interface --bond" -- "$cur"))
+                    ;;
+                connect-wireguard)
+                    COMPREPLY=($(compgen -W "--name --address --private-key --peer-key --endpoint --allowed-ips" -- "$cur"))
+                    ;;
+                profile)
+                    case "$COMP_CWORD" in
+                        2)
+                            COMPREPLY=($(compgen -W "save load list delete" -- "$cur"))
+                            ;;
+                        3|5)
+                            COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                            ;;
+                    esac
+                    ;;
+                *)
+                    COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
+                    ;;
+            esac
+            ;;
+    esac
+
+    # Special handling for interface completion
+    if [[ "$cur" == --interface ]]; then
+        COMPREPLY=($(compgen -W "$(ls /sys/class/net/)" -- "$cur"))
+    elif [[ "${COMP_WORDS[*]}" == *" --interface "* ]] && [[ "$cur" == --interface ]]; then
+        COMPREPLY=($(compgen -W "$(ls /sys/class/net/)" -- "$cur"))
+    fi
+
+    # Special handling for SSID completion (scan results)
+    if [[ "${COMP_WORDS[*]}" == *" scan "* ]] && [[ "$cur" == --ssid ]]; then
+        COMPREPLY=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
+    fi
+
+    # Special handling for SSID completion in connect
+    if [[ "${COMP_WORDS[*]}" == *" connect "* ]] && [[ "$cur" == --ssid ]]; then
+        COMPREPLY=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
+    fi
+}
+
+complete -F _rxnm_completion rxnm
+complete -F _rxnm_completion rocknix-network-manager
