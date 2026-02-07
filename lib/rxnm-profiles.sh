@@ -25,12 +25,17 @@ _task_profile_save_global() {
     mkdir -p "$profile_dir"
     
     # 1. Save NetworkD files
-    # We explicitly only backup files managed by RXNM or standard systemd-networkd extensions
-    cp "${STORAGE_NET_DIR}"/*.network "$profile_dir/" 2>/dev/null
-    cp "${STORAGE_NET_DIR}"/*.netdev "$profile_dir/" 2>/dev/null
+    # Use array expansion with nullglob (inherited from main) to safely handle empty sets
+    local nets=("${STORAGE_NET_DIR}"/*.network)
+    [ ${#nets[@]} -gt 0 ] && cp "${nets[@]}" "$profile_dir/" 2>/dev/null
+    
+    local devs=("${STORAGE_NET_DIR}"/*.netdev)
+    [ ${#devs[@]} -gt 0 ] && cp "${devs[@]}" "$profile_dir/" 2>/dev/null
     
     # 2. Save Proxy Configs
-    cp "${STORAGE_NET_DIR}"/proxy-*.conf "$profile_dir/" 2>/dev/null
+    local proxies=("${STORAGE_NET_DIR}"/proxy-*.conf)
+    [ ${#proxies[@]} -gt 0 ] && cp "${proxies[@]}" "$profile_dir/" 2>/dev/null
+    
     [ -f "${STORAGE_PROXY_GLOBAL}" ] && cp "${STORAGE_PROXY_GLOBAL}" "$profile_dir/proxy.conf"
     
     # 3. Save WiFi Country
@@ -39,16 +44,18 @@ _task_profile_save_global() {
     # 4. Save DNS/Resolved specific overrides if any
     if [ -d "${STORAGE_RESOLVED_DIR}" ]; then
         mkdir -p "$profile_dir/resolved.conf.d"
-        cp "${STORAGE_RESOLVED_DIR}"/*.conf "$profile_dir/resolved.conf.d/" 2>/dev/null
+        local res_confs=("${STORAGE_RESOLVED_DIR}"/*.conf)
+        [ ${#res_confs[@]} -gt 0 ] && cp "${res_confs[@]}" "$profile_dir/resolved.conf.d/" 2>/dev/null
     fi
 
     # 5. Save WiFi Credentials (IWD)
-    # We backup known networks so the profile contains the keys required to connect.
     if [ -d "$iwd_dir" ]; then
         mkdir -p "$profile_dir/wifi"
-        # Copy PSK (Personal) and 8021x (Enterprise) creds
-        cp "$iwd_dir"/*.psk "$profile_dir/wifi/" 2>/dev/null
-        cp "$iwd_dir"/*.8021x "$profile_dir/wifi/" 2>/dev/null
+        local psks=("${iwd_dir}"/*.psk)
+        [ ${#psks[@]} -gt 0 ] && cp "${psks[@]}" "$profile_dir/wifi/" 2>/dev/null
+        
+        local eaps=("${iwd_dir}"/*.8021x)
+        [ ${#eaps[@]} -gt 0 ] && cp "${eaps[@]}" "$profile_dir/wifi/" 2>/dev/null
     fi
 
     return 0
@@ -60,23 +67,26 @@ _task_profile_load_global() {
     local iwd_dir="${STATE_DIR}/iwd"
     
     # 1. Wipe current active configuration (Strict State Switch)
-    # This removes the "User Overlay", briefly exposing System Defaults before the new profile is copied in.
     find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
     find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
     find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
     rm -f "${STORAGE_PROXY_GLOBAL}"
     
     # 2. Wipe active WiFi credentials
-    # Profiles are strict snapshots. If I load "Work", I don't necessarily want "Home" keys active.
     if [ -d "$iwd_dir" ]; then
         find "$iwd_dir" -maxdepth 1 -type f -name "*.psk" -delete
         find "$iwd_dir" -maxdepth 1 -type f -name "*.8021x" -delete
     fi
     
     # 3. Restore Network Configs from Profile
-    cp "$profile_dir"/*.network "${STORAGE_NET_DIR}/" 2>/dev/null
-    cp "$profile_dir"/*.netdev "${STORAGE_NET_DIR}/" 2>/dev/null
-    cp "$profile_dir"/proxy-*.conf "${STORAGE_NET_DIR}/" 2>/dev/null
+    local nets=("${profile_dir}"/*.network)
+    [ ${#nets[@]} -gt 0 ] && cp "${nets[@]}" "${STORAGE_NET_DIR}/" 2>/dev/null
+    
+    local devs=("${profile_dir}"/*.netdev)
+    [ ${#devs[@]} -gt 0 ] && cp "${devs[@]}" "${STORAGE_NET_DIR}/" 2>/dev/null
+    
+    local proxies=("${profile_dir}"/proxy-*.conf)
+    [ ${#proxies[@]} -gt 0 ] && cp "${proxies[@]}" "${STORAGE_NET_DIR}/" 2>/dev/null
     
     if [ -f "$profile_dir/proxy.conf" ]; then
         cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"
@@ -90,19 +100,22 @@ _task_profile_load_global() {
     fi
     
     if [ -d "$profile_dir/resolved.conf.d" ]; then
-        # Clean existing resolved confs
         find "${STORAGE_RESOLVED_DIR}" -maxdepth 1 -type f -name "*.conf" -delete 2>/dev/null
-        cp "$profile_dir/resolved.conf.d"/*.conf "${STORAGE_RESOLVED_DIR}/" 2>/dev/null
+        local res_confs=("${profile_dir}/resolved.conf.d"/*.conf)
+        [ ${#res_confs[@]} -gt 0 ] && cp "${res_confs[@]}" "${STORAGE_RESOLVED_DIR}/" 2>/dev/null
     fi
 
     # 4. Restore WiFi Credentials
     if [ -d "$profile_dir/wifi" ]; then
         mkdir -p "$iwd_dir"
-        cp "$profile_dir/wifi"/*.psk "$iwd_dir/" 2>/dev/null
-        cp "$profile_dir/wifi"/*.8021x "$iwd_dir/" 2>/dev/null
-        # Important: Restore secure permissions
-        chmod 600 "$iwd_dir"/*.psk 2>/dev/null
-        chmod 600 "$iwd_dir"/*.8021x 2>/dev/null
+        local psks=("${profile_dir}/wifi"/*.psk)
+        [ ${#psks[@]} -gt 0 ] && cp "${psks[@]}" "$iwd_dir/" 2>/dev/null
+        
+        local eaps=("${profile_dir}/wifi"/*.8021x)
+        [ ${#eaps[@]} -gt 0 ] && cp "${eaps[@]}" "$iwd_dir/" 2>/dev/null
+        
+        chmod 600 "$iwd_dir"/*.psk 2>/dev/null || true
+        chmod 600 "$iwd_dir"/*.8021x 2>/dev/null || true
     fi
     
     # 5. Apply
@@ -110,8 +123,6 @@ _task_profile_load_global() {
     if command -v systemctl >/dev/null; then
         systemctl try-reload-or-restart systemd-resolved 2>/dev/null || true
     fi
-    # IWD automatically detects new files, no restart needed typically, 
-    # but strictly speaking, if we deleted connected creds, it might disconnect.
 }
 
 # --- MAIN ACTION ---
@@ -136,7 +147,6 @@ action_profile() {
                 [ -z "$name" ] && { json_error "Profile name required"; return 1; }
                 
                 # Implicit "Default" / Reset handling
-                # If user loads "default" and it doesn't exist as a folder, we treat it as a factory reset.
                 if [ "$name" == "default" ] && [ ! -d "$global_dir/default" ]; then
                      # Wipe settings only
                      find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
@@ -145,9 +155,6 @@ action_profile() {
                      rm -f "${STORAGE_PROXY_GLOBAL}"
                      # Clean resolved
                      find "${STORAGE_RESOLVED_DIR}" -maxdepth 1 -type f -name "*.conf" -delete 2>/dev/null
-                     
-                     # NOTE: We do NOT wipe WiFi credentials on a "default" reset. 
-                     # Users usually want to reset bad IP/DNS configs, not lose all passwords.
                      
                      reload_networkd
                      json_success '{"action": "loaded_default", "note": "reset_config_kept_wifi"}'
@@ -164,7 +171,6 @@ action_profile() {
                 for f in "$global_dir"/*; do
                     [ -d "$f" ] && files+=("$(basename "$f")")
                 done
-                # Add "default" as a virtual option if it doesn't exist explicitly
                 if [ ! -d "$global_dir/default" ]; then
                     files+=("default (system)")
                 fi
@@ -203,19 +209,22 @@ action_profile() {
             ;;
         load)
             [ ! -f "$profile_path" ] && { json_error "Profile not found"; return 1; }
-            # Helper for single load
             cp "$profile_path" "$active_cfg"
             reconfigure_iface "$iface"
             json_success '{"action": "loaded", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
         list)
-            local files=()
-            for f in "$profile_iface_dir"/*.network; do
-                [ -e "$f" ] && files+=("$(basename "$f" .network)")
-            done
+            local files=("${profile_iface_dir}"/*.network)
+            local clean_files=()
+            if [ ${#files[@]} -gt 0 ] && [ -e "${files[0]}" ]; then
+                 for f in "${files[@]}"; do
+                    clean_files+=("$(basename "$f" .network)")
+                 done
+            fi
+            
             local json_list="[]"
-            if [ ${#files[@]} -gt 0 ]; then
-                json_list=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)
+            if [ ${#clean_files[@]} -gt 0 ]; then
+                json_list=$(printf '%s\n' "${clean_files[@]}" | jq -R . | jq -s .)
             fi
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;
