@@ -18,7 +18,15 @@ export LOG_LEVEL_DEBUG=3
 # Optimization: Cache CPU capability check
 # BusyBox Compat: Use -E for extended regex (pipe for OR) instead of GNU specific \|
 IS_LOW_POWER=false
-if grep -qEi "RK3326|RK3566" /proc/cpuinfo 2>/dev/null; then
+
+# Broad "Constrained Device" detection covering:
+# - Rockchip:  RK3326, RK3566, RK3128, RK3036, RK3288
+# - Allwinner: H700 (RG35XX), A133 (TrimUI), A64, H3, H5, H6, sunxi generic
+# - Broadcom:  BCM2835 (Pi Zero/1), BCM2836 (Pi 2), BCM2837 (Pi 3/Zero 2)
+# - Actions:   ATM7051 (Low end Powkiddy)
+# - Amlogic:   S905/Meson (TV Boxes/Handhelds)
+# - Ingenic:   X1830/JZ4770 (MIPS handhelds)
+if grep -qEi "RK3326|RK3566|RK3128|RK3036|RK3288|H700|H616|H3|H5|H6|A64|A133|A33|sunxi|BCM2835|BCM2836|BCM2837|ATM7051|S905|S805|Meson|X1830|JZ4770" /proc/cpuinfo 2>/dev/null; then
     IS_LOW_POWER=true
 fi
 
