@@ -48,6 +48,7 @@ source "${LIB_DIR}/rxnm-constants.sh"
 source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
 source "${LIB_DIR}/rxnm-config-builder.sh"
+source "${LIB_DIR}/rxnm-plugins.sh"
 
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
@@ -77,6 +78,9 @@ expand_alias() {
 }
 
 print_main_help() {
+    local plugins
+    plugins=$(list_plugins)
+    
     cat <<EOF
 Usage: rxnm <category> [target] <action> [options]
 
@@ -91,6 +95,15 @@ Categories:
   bond          Manage Interface Bonding
   vlan          Manage VLANs
   vrf           Manage Virtual Routing Functions
+EOF
+
+    if [ -n "$plugins" ]; then
+        echo ""
+        echo "Plugins / Helpers:"
+        echo "$plugins" | awk '{print "  " $0}'
+    fi
+
+    cat <<EOF
 
 Global Options:
   --format <fmt>  Output format: human (default), json, table
@@ -110,6 +123,17 @@ EOF
 
 print_category_help() {
     local cat="$1"
+    
+    # Check if this category is handled by a plugin
+    local plugin_path
+    plugin_path=$(find_plugin "$cat")
+    if [ -n "$plugin_path" ]; then
+        echo "Help for plugin '$cat':"
+        # Try to invoke the plugin with --help if it supports it
+        exec_plugin "$plugin_path" "--help" || echo "  No help available for this plugin."
+        return
+    fi
+
     case "$cat" in
         wifi)
             cat <<EOF
@@ -269,14 +293,33 @@ fi
 
 # --- HIERARCHY DISPATCHER ---
 
-# Categories
+# Built-in Categories
 CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
 
 # Determine Category
 RAW_CMD="${1:-status}"
 CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
-# Validate Category
+# 1. Plugin Dispatch (Highest Priority)
+# Check if a plugin exists for this category (Extension or Override)
+PLUGIN_EXEC=$(find_plugin "$CATEGORY")
+
+if [ -n "$PLUGIN_EXEC" ]; then
+    # If a plugin is found, we hand over control immediately.
+    # We shift the category argument so the plugin receives only the action/args.
+    shift
+    
+    # Check for help on the plugin itself if requested
+    if [ "$SHOW_HELP" == "true" ]; then
+        exec_plugin "$PLUGIN_EXEC" "--help"
+        exit 0
+    fi
+    
+    exec_plugin "$PLUGIN_EXEC" "$@"
+    # Code execution ends here as exec replaces the process
+fi
+
+# 2. Built-in Dispatch
 if [[ ! " ${CATS[*]} " =~ " ${CATEGORY} " ]]; then
     if [ -z "$RAW_CMD" ] || [ "$RAW_CMD" == "status" ]; then
         CATEGORY="system"
