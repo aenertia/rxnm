@@ -3,7 +3,6 @@
 # ==============================================================================
 
 # Optimized action_check_portal to minimize outbound traffic and latency.
-# Logic: Fast-check first -> Portal check only on failure -> Sequential fallback.
 action_check_portal() {
     local iface="$1"
     local primary_url="http://connectivitycheck.gstatic.com/generate_204"
@@ -13,7 +12,6 @@ action_check_portal() {
     )
     
     # 1. TIER 1: FAST CHECK (Primary URL, No Redirects)
-    # We use -L- but start with a check that expects a 204.
     local curl_base_opts=(-s -o /dev/null --max-time 3)
     [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
 
@@ -24,9 +22,6 @@ action_check_portal() {
     fi
 
     # 2. TIER 2: PORTAL DETECTION (Follow Redirects)
-    # Only run if the fast path failed. We check the primary URL again with redirect tracking.
-    # The -L flag effectively "visits" the portal page, which for some simple gateways
-    # is enough to authorize the session ("View to connect").
     local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
     local result
     result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
@@ -34,35 +29,23 @@ action_check_portal() {
     local code="${result%%:*}"
     local effective_url="${result#*:}"
 
-    # CASE A: Late Success (Tier 1 failed, but Tier 2 got the 204)
-    # This happens if the redirect chain eventually leads back to the success page.
     if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
         json_success '{"portal_detected": false, "status": "online", "method": "tier2_check"}'
         return 0
     fi
 
-    # CASE B: Redirect Detected (Standard Portal) OR DNS Hijack (Code != 204)
     if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
-        
-        # --- POST-INTERACTION VERIFICATION ---
-        # We just visited the portal page via curl -L. For simple "click-through" or 
-        # "view-through" portals, this might have been enough to authorize the MAC.
-        # We try the fast check ONE more time to see if we are now online.
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
              json_success "{\"portal_detected\": true, \"auto_ack\": true, \"status\": \"online\", \"target\": \"$effective_url\", \"note\": \"authorized_by_probe\"}"
              return 0
         fi
-
-        # If still not 204, we are truly locked behind the portal.
         local hijack_flag="false"
         if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
-
         json_success "{\"portal_detected\": true, \"auto_ack\": false, \"status\": \"portal_locked\", \"target\": \"$effective_url\", \"http_code\": \"$code\", \"hijacked\": $hijack_flag}"
         return 0
     fi
 
-    # 3. TIER 3: SEQUENTIAL FALLBACK (Avoid Regional Outages)
-    # If the primary check failed entirely (000/Timeout), try secondary hosts one-by-one.
+    # 3. TIER 3: SEQUENTIAL FALLBACK
     for fallback in "${fallback_urls[@]}"; do
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
             json_success "{\"portal_detected\": false, \"status\": \"online\", \"method\": \"fallback\", \"host\": \"$fallback\"}"
@@ -70,7 +53,6 @@ action_check_portal() {
         fi
     done
 
-    # If everything failed
     json_success '{"portal_detected": false, "status": "offline"}'
 }
 
@@ -149,7 +131,6 @@ action_status() {
         local iface=${iface_path##*/}
         [[ "$iface" == "lo" || "$iface" == "sit0" || "$iface" == "*" ]] && continue
         
-        # Performance optimization: skip processing if we are filtering for a specific interface
         if [ -n "$filter_iface" ] && [ "$iface" != "$filter_iface" ]; then
             continue
         fi
@@ -164,24 +145,28 @@ action_status() {
         
         local connected="false"; [ -n "$ip" ] || [ -n "$ipv6_csv" ] && connected="true"
         
-        local type="ethernet"
-        case "$iface" in
-            wlan*|wlp*) type="wifi" ;;
-            br*) [ -d "$iface_path/bridge" ] && type="bridge" || type="ethernet" ;;
-            wg*) type="vpn" ;;
-            usb*|rndis*) type="gadget" ;;
-            bnep*) type="bluetooth_pan" ;;
-            tun*|tap*) type="tun" ;;
-            *)
-                if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
-                    type="wifi"
-                elif [ -d "$iface_path/bridge" ]; then
-                    type="bridge"
-                else
-                    type="ethernet"
-                fi
-                ;;
-        esac
+        # Optimized Sysfs Type Detection
+        local type="unknown"
+        if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
+            type="wifi"
+        elif [ -d "$iface_path/bridge" ]; then
+            type="bridge"
+        elif [ -d "$iface_path/bonding" ]; then
+            type="bond"
+        elif [ -f "$iface_path/tun_flags" ]; then
+            type="tun"
+        elif [ -d "$iface_path/device" ]; then
+            type="ethernet"
+        else
+            # Fast heuristics for virtual interfaces
+            case "$iface" in
+                wg*) type="wireguard" ;;
+                tailscale*|wt*) type="tailscale" ;;
+                zt*) type="zerotier" ;;
+                veth*) type="veth" ;;
+                *) type="virtual" ;;
+            esac
+        fi
         
         local ssid=""
         local channel=""
@@ -191,7 +176,7 @@ action_status() {
              if command -v iw >/dev/null; then
                  local iw_info
                  iw_info=$(iw dev "$iface" info 2>/dev/null || true)
-                 if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ MHz\) ]]; then
+                 if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ \MHz\) ]]; then
                      channel="${BASH_REMATCH[1]}"
                      frequency="${BASH_REMATCH[2]}"
                  fi
@@ -207,7 +192,9 @@ action_status() {
         fi
 
         local cfg_mode="dhcp"
-        if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ]; then 
+        if [[ "$type" == "tailscale" || "$type" == "zerotier" ]]; then
+            cfg_mode="managed_external"
+        elif [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ]; then 
             if grep -q "Address=" "${STORAGE_NET_DIR}/75-config-${iface}.network"; then cfg_mode="static"; fi
         fi
         
@@ -220,6 +207,11 @@ action_status() {
         if [ -n "$ipv6_csv" ]; then
             ipv6_csv="${ipv6_csv%,}"
             ipv6_json=$(jq -n -R 'split(",")' <<< "$ipv6_csv")
+        fi
+
+        local dns_list=""
+        if command -v resolvectl >/dev/null; then
+            dns_list=$(resolvectl dns "$iface" 2>/dev/null | sed 's/^.*: //')
         fi
 
         local json_obj
@@ -235,8 +227,9 @@ action_status() {
             --arg freq "$frequency" \
             --arg gw "$gw" \
             --arg config "$cfg_mode" \
+            --arg dns "$dns_list" \
             --argjson proxy "$iface_proxy_json" \
-            '{name: $name, type: $type, ip: $ip, ipv6: $ipv6, mac: $mac, connected: $connected, ssid: (if $ssid=="" then null else $ssid end), channel: (if $channel=="" then null else $channel end), frequency: (if $freq=="" then null else $freq end), gateway: $gw, config: $config, proxy: $proxy}')
+            '{name: $name, type: $type, ip: $ip, ipv6: $ipv6, mac: $mac, connected: $connected, ssid: (if $ssid=="" then null else $ssid end), channel: (if $channel=="" then null else $channel end), frequency: (if $freq=="" then null else $freq end), gateway: $gw, config: $config, dns: (if $dns=="" then null else $dns end), proxy: $proxy}')
             
         json_objects+=("$json_obj")
     done
@@ -261,69 +254,4 @@ action_status() {
                 else {} end
             )
         }'
-}
-
-action_help() {
-    cat <<EOF
-ROCKNIX Network Manager
-Usage: rocknix-network-manager [COMMAND] [OPTIONS]
-Short: rxnm [COMMAND] [OPTIONS]
-
-Core Commands:
-  status                    Show current network status (JSON output)
-  scan                      Scan for WiFi networks
-  connect                   Connect to a WiFi network
-  disconnect                Disconnect/Forget current WiFi connection
-  check-internet            Check internet connectivity (IPv4/IPv6)
-  check-portal              Check for captive portal and attempt simple auto-ack
-  wps                       Start WiFi Protected Setup (Push Button)
-  forget                    Forget a known WiFi network and remove configs
-
-Configuration:
-  set-dhcp                  Set interface to DHCP mode (enables mDNS/LLMNR)
-  set-static                Set interface to Static IP (enables mDNS/LLMNR)
-  set-country               Set WiFi regulatory domain (Country Code)
-  set-proxy                 Set global or interface proxy
-  set-link                  Toggle IPv4/IPv6 link local protocols
-
-Hotspot & Tethering:
-  host                      Start WiFi Access Point (AP) or Ad-Hoc mode
-  client                    Revert WiFi interface to Client/Station mode
-  pan-net                   Manage Bluetooth PAN (Tethering)
-
-Virtual Devices:
-  create-bridge             Create a network bridge
-  create-bond               Create a network bond
-  create-vlan               Create a VLAN interface
-  connect-wireguard         Create a WireGuard client interface
-  set-member                Add interface to a bridge
-  set-bond-slave            Add interface to a bond
-  delete-link               Delete a virtual interface
-
-Profiles:
-  profile save              Save current interface config as a named profile
-  profile load              Load a named profile
-  profile list              List available profiles
-
-Options:
-  --interface <iface>       Target interface (e.g., wlan0, eth0)
-  --ssid <ssid>             SSID for connection or AP
-  --password <pass>         WiFi passphrase (Legacy, use --password-stdin preferred)
-  --password-stdin          Read password from standard input
-  --password-file <file>    Read password from a specific file
-  --ip <ip/cidr>            Static IP address (e.g., 192.168.1.10/24)
-  --gateway <ip>            Gateway IP
-  --dns <ip,ip>             Comma-separated DNS servers
-  --hidden                  Connect to hidden network
-  --share                   Enable NAT/Masquerading (for 'host' or 'pan-net')
-  --mdns <yes/no>           Enable MulticastDNS (default: yes)
-  --llmnr <yes/no>          Enable LLMNR (default: yes)
-  --bond <name>             Target bond interface (e.g., bond0)
-  
-  # WireGuard Options
-  --private-key <key>       WireGuard Private Key
-  --peer-key <key>          WireGuard Peer Public Key
-  --endpoint <ip:port>      WireGuard Endpoint
-  --allowed-ips <cidrs>     Allowed IPs (default: 0.0.0.0/0)
-EOF
 }

@@ -87,10 +87,12 @@ log_debug() {
 }
 
 log_info() {
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return; fi
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2 || logger -t rocknix-network "$*"
 }
 
 log_warn() {
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return; fi
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
     logger -t rocknix-network "WARN: $*"
 }
@@ -102,7 +104,11 @@ log_error() {
 
 cli_error() {
     local msg="$1"
-    echo "Error: $msg" >&2
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+        json_error "$msg"
+    else
+        echo "Error: $msg" >&2
+    fi
     exit 1
 }
 
@@ -112,19 +118,120 @@ audit_log() {
     logger -t rocknix-network-audit -p auth.notice "$event: $details"
 }
 
+# --- OUTPUT FORMATTING (PHASE 1) ---
+
 json_success() {
-    # Fix: Explicitly check for unset/empty to avoid shell brace expansion bugs
     local data="$1"
     if [ -z "$data" ]; then data="{}"; fi
-    jq -n --argjson data "$data" '{success:true} + $data'
+    local full_json
+    full_json=$(jq -n --argjson data "$data" '{success:true} + $data')
+    
+    case "${RXNM_FORMAT:-human}" in
+        json)
+            echo "$full_json"
+            ;;
+        table)
+            # Try to extract an array of objects for table view, or key/value for simple objects
+            if echo "$full_json" | jq -e '.results | type == "array"' >/dev/null 2>&1; then
+                # List of results
+                echo "$full_json" | jq -r '.results[] | [to_entries[] | .value] | @tsv' | column -t
+            elif echo "$full_json" | jq -e '.profiles | type == "array"' >/dev/null 2>&1; then
+                echo "$full_json" | jq -r '.profiles[]'
+            elif echo "$full_json" | jq -e '.interfaces | type == "object"' >/dev/null 2>&1; then
+                # Complex interface status object
+                echo "$full_json" | jq -r '.interfaces[] | [.name, .type, .connected, .ip, .ssid // "-"] | @tsv' | \
+                sed '1iNAME TYPE CONNECTED IP SSID' | column -t
+            else
+                # Fallback to human kv
+                echo "$full_json" | jq -r 'to_entries | .[] | "\(.key): \(.value)"'
+            fi
+            ;;
+        *)
+            # Human readable pretty print
+            # Helper to print simple messages or full status
+            if echo "$full_json" | jq -e '.message' >/dev/null 2>&1; then
+                echo "$full_json" | jq -r '.message'
+            elif echo "$full_json" | jq -e '.action' >/dev/null 2>&1; then
+                echo "Success: $(echo "$full_json" | jq -r '.action') performed on $(echo "$full_json" | jq -r '.iface // .ssid // .name // "system"')"
+            elif echo "$full_json" | jq -e '.connected == true' >/dev/null 2>&1; then
+                echo "Successfully connected."
+            elif echo "$full_json" | jq -e '.results' >/dev/null 2>&1; then
+                 # Scan results formatting
+                 printf "%-24s %-8s %-12s %s\n" "SSID" "SIGNAL" "SECURITY" "CONNECTED"
+                 echo "$full_json" | jq -r '.results[] | "\(.ssid)\t\(.strength_pct)%\t\(.security)\t\(.connected)"' | \
+                 while IFS=$'\t' read -r ssid sig sec conn; do
+                    printf "%-24s %-8s %-12s %s\n" "$ssid" "$sig" "$sec" "$conn"
+                 done
+            elif echo "$full_json" | jq -e '.interfaces' >/dev/null 2>&1; then
+                 echo "--- Network Status ---"
+                 echo "$full_json" | jq -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "Connected" else "Disconnected" end)\n  IP: \(.ip // "None")\n  DNS: \(.dns // "None")\n  Details: \(.ssid // "")\n"'
+            else
+                echo "$full_json" | jq .
+            fi
+            ;;
+    esac
 }
 
 json_error() {
     local msg="$1"
     local code="${2:-1}"
-    jq -n --arg msg "$msg" --arg code "$code" \
-        '{success:false, error:$msg, exit_code:($code|tonumber)}'
+    
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+        jq -n --arg msg "$msg" --arg code "$code" \
+            '{success:false, error:$msg, exit_code:($code|tonumber)}'
+    else
+        echo "Error: $msg" >&2
+    fi
+    # Use return instead of exit to allow callers to handle flow, 
+    # but the calling script often exits on error.
     return 0 
+}
+
+# --- INTERACTIVE HELPERS (PHASE 2) ---
+
+confirm_action() {
+    local msg="$1"
+    local force="${2:-false}"
+    
+    if [ "$force" == "true" ]; then return 0; fi
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi # Assume force in JSON mode or fail? better to assume explicit force required
+    
+    # If not interactive, fail safety
+    if [ ! -t 0 ]; then
+        log_error "Destructive action requires confirmation or --yes flag."
+        return 1
+    fi
+    
+    read -p "$msg [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+    return 0
+}
+
+auto_select_interface() {
+    local type="$1" # wifi, ethernet, etc
+    local count=0
+    local candidate=""
+    
+    local ifaces=(/sys/class/net/*)
+    for iface_path in "${ifaces[@]}"; do
+        local ifname=$(basename "$iface_path")
+        if [[ "$type" == "wifi" ]]; then
+            if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
+                candidate="$ifname"
+                count=$((count + 1))
+            fi
+        fi
+    done
+    
+    if [ $count -eq 1 ]; then
+        echo "$candidate"
+        return 0
+    fi
+    return 1
 }
 
 # --- VALIDATION ---

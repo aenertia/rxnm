@@ -270,7 +270,7 @@ action_connect() {
         read -r -p "Passphrase for $ssid: " pass
     fi
 
-    if [ -n "$pass" ] && [ "$EPHEMERAL_CREDS" != "true" ]; then
+    if [ -n "$pass" ] && [ "${EPHEMERAL_CREDS:-false}" != "true" ]; then
         with_iface_lock "$iface" _task_save_wifi_creds "$ssid" "$pass"
     fi
     
@@ -293,15 +293,35 @@ action_connect() {
         printf "%s" "$pass" > "$pass_file"
     fi
     
+    log_info "Connecting to $ssid on $iface..."
     while [ $attempts -lt $max_attempts ]; do
-        if [ "$EPHEMERAL_CREDS" == "true" ] && [ -n "${pass:-}" ]; then
+        if [ "${EPHEMERAL_CREDS:-false}" == "true" ] && [ -n "${pass:-}" ]; then
              out=$(cat "$pass_file" | iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
         else
              out=$(iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi
         if [[ -z "$out" ]]; then
+            # Ensure we have an IP configuration
+            local config_exists="false"
+            if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || \
+               [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
+                config_exists="true"
+            fi
+            
+            # If no RXNM config, apply default DHCP to ensure connectivity
+            if [ "$config_exists" == "false" ]; then
+                 log_info "No network configuration found for $iface. Applying default DHCP."
+                 if type _task_set_dhcp &>/dev/null; then
+                     # Call set_dhcp with defaults.
+                     # Arguments: iface ssid dns domains routes mdns llmnr metric
+                     with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
+                 else
+                     log_warn "Cannot apply default DHCP: Interface library not loaded."
+                 fi
+            fi
+
             audit_log "WIFI_CONNECT" "Connected to $ssid"
-            json_success '{"connected": true}'
+            json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'"}'
             [ -n "$pass_file" ] && rm -f "$pass_file"
             return 0
         fi
@@ -318,7 +338,6 @@ action_connect() {
     return 0
 }
 
-# Fix: Explicit disconnect action added for functional parity
 action_disconnect() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")

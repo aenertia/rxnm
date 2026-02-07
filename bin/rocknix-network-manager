@@ -3,7 +3,7 @@
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 #
 # ROCKNIX Network Manager (Modular)
-# Entry point for the modularized network manager.
+# Phase 2: Hierarchical CLI Implementation
 
 # Debug trigger
 if [ -n "${RXNM_DEBUG:-}" ]; then
@@ -19,7 +19,6 @@ IFS=$'\n\t'
 shopt -s nullglob
 
 # --- BOOTSTRAP ---
-# Robustly find the real source directory, resolving symlinks
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
@@ -29,460 +28,470 @@ done
 SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
-# Verification with detailed error
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
-    # Fallback to standard install location just in case
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
 fi
 
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
     echo "ERROR: Could not locate library directory." >&2
-    echo "Debug Info:" >&2
-    echo "  Source: $SOURCE" >&2
-    echo "  Script Dir: $SCRIPT_DIR" >&2
-    echo "  Attempted Lib Dir: $LIB_DIR" >&2
     exit 1
 fi
 
-# Source Core Libraries (Order Matters)
+# Source Core
 source "${LIB_DIR}/rxnm-constants.sh"
 source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
 source "${LIB_DIR}/rxnm-config-builder.sh"
 
-# --- ARGUMENT PARSING & DISPATCH ---
+# --- GLOBAL VARIABLES & DEFAULTS ---
+export RXNM_FORMAT="human"
+FORCE_ACTION="false"
+CATEGORY=""
+ACTION=""
 
-CMD=""
-SUB_CMD=""
-: "${EPHEMERAL_CREDS:=false}"
-ARG_MDNS="yes"
-ARG_LLMNR="yes"
-ARG_SSID=""
-ARG_PASS=""
-ARG_IFACE=""
-ARG_IP=""
-ARG_GW=""
-ARG_DNS=""
-ARG_DOMAINS=""
-ARG_ROUTES=""
-ARG_PRIV_KEY=""
-ARG_PEER_KEY=""
-ARG_ENDPOINT=""
-ARG_ALLOWED_IPS=""
-ARG_V4=""
-ARG_V6=""
-ARG_PIN=""
-ARG_ID=""
-ARG_CHANNEL=""
-ARG_CODE=""
-ARG_BRIDGE=""
-ARG_BOND=""
-ARG_PARENT=""
-ARG_NAME=""
-ARG_HIDDEN="false"
-ARG_MODE=""
-ARG_HTTP=""
-ARG_HTTPS=""
-ARG_NOPROXY=""
-ARG_SHARE="false"
+# --- ARGUMENT PARSING HELPER ---
+# Simple prefix matcher for short aliases (e.g., 'wi' -> 'wifi')
+expand_alias() {
+    local input="$1"
+    local options=("${@:2}")
+    local match=""
+    
+    for opt in "${options[@]}"; do
+        if [[ "$opt" == "$input" ]]; then
+            echo "$opt"
+            return 0
+        fi
+        if [[ "$opt" == "$input"* ]]; then
+            if [ -n "$match" ]; then return 1; fi # Ambiguous
+            match="$opt"
+        fi
+    done
+    
+    [ -n "$match" ] && echo "$match" || echo "$input"
+}
 
-# Capture positional args for intuitive CLI mapping
-POS_ARGS=()
-
-# We parse args first to determine what to load and do
-ARGS=("$@")
-
+# --- GLOBAL OPTIONS PARSING ---
+# Parse flags that appear before subcommands or anywhere
+ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --start|start) CMD="start"; shift ;;
-        --stop|stop) CMD="stop"; shift ;;
-        --reload|reload) CMD="reload"; shift ;;
-        --help|-h|help) CMD="help"; shift ;;
-        status) CMD="status"; shift ;;
-        check-internet) CMD="check-internet"; shift ;;
-        check-portal) CMD="check-portal"; shift ;;
-        scan) CMD="scan"; shift ;;
-        wps) CMD="wps"; shift ;;
-        forget) CMD="forget"; shift ;;
-        connect) CMD="connect"; shift ;;
-        disconnect) CMD="disconnect"; shift ;;
-        create-bridge) CMD="create-bridge"; shift ;;
-        create-bond) CMD="create-bond"; shift ;;
-        create-vlan) CMD="create-vlan"; shift ;;
-        connect-wireguard) CMD="connect-wireguard"; shift ;;
-        set-member) CMD="set-member"; shift ;;
-        set-bond-slave) CMD="set-bond-slave"; shift ;;
-        delete-link) CMD="delete-link"; shift ;;
-        pan-net) CMD="pan-net"; shift ;;
-        host) CMD="host"; shift ;;
-        client) CMD="client"; shift ;;
-        set-dhcp) CMD="set-dhcp"; shift ;;
-        set-static) CMD="set-static"; shift ;;
-        set-link) CMD="set-link"; shift ;;
-        set-country) CMD="set-country"; shift ;;
-        set-proxy) CMD="set-proxy"; shift ;;
-        profile) CMD="profile"; shift ;;
-        
-        --ssid)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_SSID="$2"; shift 2
-            else
-                cli_error "--ssid requires a value"
-            fi
-            ;;
-        --password)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_PASS="$2"; shift 2
-                log_warn "Passing password as argument is insecure. Use --password-stdin."
-            else
-                cli_error "--password requires a value"
-            fi
-            ;;
-        --password-stdin)
-            # Read from stdin
-            ARG_PASS=$(cat)
-            shift
-            ;;
-        --password-file)
-            if [ -r "${2:-}" ]; then
-                ARG_PASS=$(<"$2")
-                shift 2
-            else
-                cli_error "--password-file requires a readable file"
-            fi
-            ;;
-        --interface)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_IFACE="$2"; shift 2
-            else
-                cli_error "--interface requires a value"
-            fi
-            ;;
-        --ip|--address)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_IP="$2"; shift 2
-            else
-                cli_error "--ip/--address requires a value"
-            fi
-            ;;
-        --gateway)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_GW="$2"; shift 2
-            else
-                cli_error "--gateway requires a value"
-            fi
-            ;;
-        --dns)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_DNS="$2"; shift 2
-            else
-                cli_error "--dns requires a value"
-            fi
-            ;;
-        --domains)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_DOMAINS="$2"; shift 2
-            else
-                cli_error "--domains requires a value"
-            fi
-            ;;
-        --routes)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_ROUTES="$2"; shift 2
-            else
-                cli_error "--routes requires a value"
-            fi
-            ;;
-        --mdns)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_MDNS="$2"; shift 2
-            else
-                cli_error "--mdns requires a value (yes/no/resolve)"
-            fi
-            ;;
-        --llmnr)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_LLMNR="$2"; shift 2
-            else
-                cli_error "--llmnr requires a value (yes/no/resolve)"
-            fi
-            ;;
-        --private-key)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_PRIV_KEY="$2"; shift 2
-            else
-                cli_error "--private-key requires a value"
-            fi
-            ;;
-        --peer-key)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_PEER_KEY="$2"; shift 2
-            else
-                cli_error "--peer-key requires a value"
-            fi
-            ;;
-        --endpoint)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_ENDPOINT="$2"; shift 2
-            else
-                cli_error "--endpoint requires a value"
-            fi
-            ;;
-        --allowed-ips)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_ALLOWED_IPS="$2"; shift 2
-            else
-                cli_error "--allowed-ips requires a value"
-            fi
-            ;;
-        --ipv4)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_V4="$2"; shift 2
-            else
-                cli_error "--ipv4 requires a value"
-            fi
-            ;;
-        --ipv6)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_V6="$2"; shift 2
-            else
-                cli_error "--ipv6 requires a value"
-            fi
-            ;;
-        --pin)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_PIN="$2"; shift 2
-            else
-                cli_error "--pin requires a value"
-            fi
-            ;;
-        --id)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_ID="$2"; shift 2
-            else
-                cli_error "--id requires a value"
-            fi
-            ;;
-        --channel)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_CHANNEL="$2"; shift 2
-            else
-                cli_error "--channel requires a value"
-            fi
-            ;;
-        --code)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_CODE="$2"; shift 2
-            else
-                cli_error "--code requires a value"
-            fi
-            ;;
-        --bridge)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_BRIDGE="$2"; shift 2
-            else
-                cli_error "--bridge requires a value"
-            fi
-            ;;
-        --bond)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_BOND="$2"; shift 2
-            else
-                cli_error "--bond requires a value"
-            fi
-            ;;
-        --parent)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_PARENT="$2"; shift 2
-            else
-                cli_error "--parent requires a value"
-            fi
-            ;;
-        --name)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_NAME="$2"; shift 2
-            else
-                cli_error "--name requires a value"
-            fi
-            ;;
-        --hidden) ARG_HIDDEN="true"; shift ;;
-        --mode)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_MODE="$2"; shift 2
-            else
-                cli_error "--mode requires a value"
-            fi
-            ;;
-        --http)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_HTTP="$2"; shift 2
-            else
-                cli_error "--http requires a value"
-            fi
-            ;;
-        --https)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_HTTPS="$2"; shift 2
-            else
-                cli_error "--https requires a value"
-            fi
-            ;;
-        --noproxy)
-            if [ -n "${2:-}" ] && [[ "$2" != --* ]]; then
-                ARG_NOPROXY="$2"; shift 2
-            else
-                cli_error "--noproxy requires a value"
-            fi
-            ;;
-        --share) ARG_SHARE="true"; shift ;;
-        enable|disable|save|load|list|delete) 
-            # If we already have a subcmd (e.g. pan-net enable), this might be a positional arg for something else?
-            # But usually these keywords are unique subcommands.
-            if [ -n "$CMD" ] && [ -z "$SUB_CMD" ]; then
-                SUB_CMD="$1"
-            elif [ -z "$CMD" ]; then
-                # Handle edge case where subcommand is first? unlikely with this switch structure
-                CMD="$1"
-            else
-                POS_ARGS+=("$1")
-            fi
-            shift 
-            ;;
-        *)
-            # Catch-all for positional arguments
-            if [ -z "$CMD" ]; then
-                # Default to status if no command provided? No, likely an error or 'rxnm status' implied?
-                # But here we assume explicit commands. If $1 is not a flag and not a known command, treat as pos arg.
-                POS_ARGS+=("$1")
-            elif [[ "$1" == -* ]]; then
-                 # Unknown flag
-                 echo "Unknown option: $1" >&2
-                 action_help; exit 1
-            else
-                 # Positional arg for the current command
-                 POS_ARGS+=("$1")
-            fi
-            shift 
-            ;;
+        --json) RXNM_FORMAT="json"; shift ;;
+        --format) RXNM_FORMAT="$2"; shift 2 ;;
+        --yes|-y|--force) FORCE_ACTION="true"; shift ;;
+        --debug) export RXNM_DEBUG=1; set -x; shift ;;
+        --help|-h) ACTION="help"; break ;;
+        *) ARGS+=("$1"); shift ;;
     esac
 done
+set -- "${ARGS[@]}"
 
-[ -z "$CMD" ] && { [ -t 0 ] && CMD="status" || CMD="start"; }
+# --- HIERARCHY DISPATCHER ---
 
-# --- POSITIONAL ARGUMENT MAPPING ---
-# Intuitive CLI: Map positional args to their logical flags based on command context.
+# Categories
+CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
 
-case "$CMD" in
-    connect)
-        # rxnm connect <ssid> [password]
-        [ -z "$ARG_SSID" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_SSID="${POS_ARGS[0]}"
-        [ -z "$ARG_PASS" ] && [ ${#POS_ARGS[@]} -ge 2 ] && ARG_PASS="${POS_ARGS[1]}"
-        ;;
-    forget)
-        # rxnm forget <ssid>
-        [ -z "$ARG_SSID" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_SSID="${POS_ARGS[0]}"
-        ;;
-    profile)
-        # rxnm profile load <name>
-        [ -z "$ARG_NAME" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_NAME="${POS_ARGS[0]}"
-        ;;
-    create-bridge|create-bond|create-vlan|delete-link)
-        # rxnm create-bridge <name>
-        [ -z "$ARG_NAME" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_NAME="${POS_ARGS[0]}"
-        ;;
-    set-country)
-        # rxnm set-country <code/iso>
-        [ -z "$ARG_CODE" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_CODE="${POS_ARGS[0]}"
-        ;;
-esac
+# Determine Category
+RAW_CMD="${1:-status}"
+CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
-# --- INITIALIZATION ---
-
-# Dependency check
-for cmd in jq busctl networkctl ip curl; do
-    if ! command -v "$cmd" >/dev/null; then
-        echo "ERROR: Missing dependency '$cmd'." >&2
+# Validate Category or Handle Default
+if [[ ! " ${CATS[*]} " =~ " ${CATEGORY} " ]]; then
+    # If explicitly status or empty, default to system status
+    if [ -z "$RAW_CMD" ] || [ "$RAW_CMD" == "status" ]; then
+        CATEGORY="system"
+        set -- "status"
+    else
+        echo "Unknown command or category: $RAW_CMD" >&2
+        echo "Available categories: ${CATS[*]}" >&2
         exit 1
     fi
-done
-
-# Ensure run directory exists
-mkdir -p "$RUN_DIR"
-
-# Global Lock Check (Fix: forget requires lock, scan does not)
-if [[ "$CMD" != "status" && "$CMD" != "help" && "$CMD" != "check-internet" && "$CMD" != "check-portal" && "$CMD" != "scan" ]]; then
-    acquire_global_lock || exit 1
+else
+    # Valid category found, shift it off args
+    shift
 fi
 
-# Lazy Load Modules
-case "$CMD" in
-    start|stop|reload)
-        source "${LIB_DIR}/rxnm-wifi.sh"
-        source "${LIB_DIR}/rxnm-bluetooth.sh" 
+# Load dependencies based on category
+case "$CATEGORY" in
+    wifi) 
+        source "${LIB_DIR}/rxnm-wifi.sh" 
+        source "${LIB_DIR}/rxnm-interfaces.sh" # Needed for auto-DHCP on connect
         ;;
-    status|check-internet|check-portal)
-        source "${LIB_DIR}/rxnm-diagnostics.sh"
+    interface|bridge) source "${LIB_DIR}/rxnm-interfaces.sh" ;;
+    vpn|tun|tap) 
+        source "${LIB_DIR}/rxnm-interfaces.sh" # Needs network config builder base
+        source "${LIB_DIR}/rxnm-vpn.sh" 
         ;;
-    scan|wps|forget|connect|disconnect|host|client|set-country)
-        source "${LIB_DIR}/rxnm-wifi.sh"
+    bond|vlan|vrf|macvlan|ipvlan|veth) 
+        source "${LIB_DIR}/rxnm-interfaces.sh" # Needs network config builder and base reconfigure tools
+        source "${LIB_DIR}/rxnm-virt.sh" 
         ;;
-    pan-net)
-        source "${LIB_DIR}/rxnm-bluetooth.sh"
-        ;;
-    create-*|set-*|connect-wireguard|delete-link)
-        source "${LIB_DIR}/rxnm-interfaces.sh"
-        ;;
-    profile)
-        source "${LIB_DIR}/rxnm-profiles.sh"
-        ;;
-    *)
-        # Fallback load all
-        source "${LIB_DIR}/rxnm-wifi.sh"
-        source "${LIB_DIR}/rxnm-bluetooth.sh"
-        source "${LIB_DIR}/rxnm-interfaces.sh"
-        source "${LIB_DIR}/rxnm-profiles.sh"
-        source "${LIB_DIR}/rxnm-diagnostics.sh"
+    bluetooth) source "${LIB_DIR}/rxnm-bluetooth.sh" ;;
+    profile) source "${LIB_DIR}/rxnm-profiles.sh" ;;
+    system|config) 
+        source "${LIB_DIR}/rxnm-diagnostics.sh" 
+        source "${LIB_DIR}/rxnm-wifi.sh" # Status needs wifi maps
         ;;
 esac
 
-# Initialize Service State Cache
-cache_service_states
+# Dispatch to Category Handlers
+case "$CATEGORY" in
+    wifi)
+        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country")
+        shift
+        
+        # Context-aware interface default
+        ARG_IFACE=""
+        ARGS=("$@")
+        # Parse args to see if --interface is provided
+        for ((i=0; i<${#ARGS[@]}; i++)); do
+            if [[ "${ARGS[$i]}" == "--interface" ]]; then
+                ARG_IFACE="${ARGS[$((i+1))]}"
+            fi
+        done
+        # If not provided, try auto-select
+        if [ -z "$ARG_IFACE" ]; then
+             ARG_IFACE=$(auto_select_interface "wifi")
+        fi
 
-# NAT Firewall Warning
-if [[ "${ARG_SHARE:-}" == "true" ]] || [[ "$CMD" == "host" ]] || [[ "$CMD" == "pan-net" ]]; then
-    if [ "$(detect_firewall_tool)" == "none" ]; then
-         log_warn "Sharing requested but no firewall tool found. NAT will NOT be enabled."
-    fi
-fi
+        case "$ACTION" in
+            scan)
+                action_scan "$ARG_IFACE"
+                ;;
+            connect)
+                # Parse: rxnm wifi connect <ssid> [password]
+                SSID="${1:-}"; [ -n "$SSID" ] && shift
+                PASS="${1:-}"; [ -n "$PASS" ] && [[ "$PASS" != --* ]] && shift
+                # Handle flags
+                HIDDEN="false"
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --ssid) SSID="$2"; shift 2 ;;
+                        --password) PASS="$2"; shift 2 ;;
+                        --password-stdin) PASS=$(cat); shift ;;
+                        --hidden) HIDDEN="true"; shift ;;
+                        --interface) ARG_IFACE="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                action_connect "$SSID" "$PASS" "$ARG_IFACE" "$HIDDEN"
+                ;;
+            disconnect)
+                 while [[ $# -gt 0 ]]; do
+                    case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
+                done
+                action_disconnect "$ARG_IFACE"
+                ;;
+            ap)
+                SUBCMD="${1:-}"; shift
+                case "$SUBCMD" in
+                    start)
+                        SSID="${1:-}"; [ -n "$SSID" ] && shift
+                        PASS="${1:-}"; [ -n "$PASS" ] && [[ "$PASS" != --* ]] && shift
+                        MODE="ap"; SHARE="false"; IP=""
+                         while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --ssid) SSID="$2"; shift 2 ;;
+                                --password) PASS="$2"; shift 2 ;;
+                                --mode) MODE="$2"; shift 2 ;;
+                                --share) SHARE="true"; shift ;;
+                                --ip) IP="$2"; shift 2 ;;
+                                --interface) ARG_IFACE="$2"; shift 2 ;;
+                                *) shift ;;
+                            esac
+                        done
+                        action_host "$SSID" "$PASS" "$MODE" "$SHARE" "$IP" "$ARG_IFACE" ""
+                        ;;
+                    stop)
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
+                        done
+                        action_client "$ARG_IFACE"
+                        ;;
+                esac
+                ;;
+            wps)
+                action_wps "$ARG_IFACE"
+                ;;
+            networks)
+                SUBCMD="${1:-}"; shift
+                if [ "$SUBCMD" == "forget" ]; then
+                    SSID="${1:-}"; [ -n "$SSID" ] && shift
+                    confirm_action "Forget network '$SSID'?" "$FORCE_ACTION"
+                    action_forget "$SSID"
+                fi
+                ;;
+            country)
+                CODE="${1:-}"
+                action_set_country "$CODE"
+                ;;
+        esac
+        ;;
 
-case "$CMD" in
-    start) action_setup ;;
-    stop) action_stop ;;
-    reload) action_reload ;;
-    status) action_status "${ARG_IFACE:-}" ;;
-    check-internet) action_check_internet ;;
-    check-portal) action_check_portal "${ARG_IFACE:-}" ;;
-    scan) action_scan "${ARG_IFACE:-}" ;;
-    wps) action_wps "${ARG_IFACE:-}" ;;
-    forget) action_forget "${ARG_SSID:-}" ;;
-    connect) action_connect "${ARG_SSID:-}" "${ARG_PASS:-}" "${ARG_IFACE:-}" "${ARG_HIDDEN:-}" ;;
-    disconnect) action_disconnect "${ARG_IFACE:-}" ;; 
-    create-bridge) action_create_bridge "${ARG_NAME:-}" ;;
-    create-bond) action_create_bond "${ARG_NAME:-}" "${ARG_MODE:-}" ;;
-    create-vlan) action_create_vlan "${ARG_PARENT:-}" "${ARG_NAME:-}" "${ARG_ID:-}" ;;
-    connect-wireguard) action_connect_wireguard "${ARG_NAME:-}" "${ARG_PRIV_KEY:-}" "${ARG_PEER_KEY:-}" "${ARG_ENDPOINT:-}" "${ARG_ALLOWED_IPS:-}" "${ARG_IP:-}" "${ARG_DNS:-}" ;;
-    set-member) action_set_member "${ARG_IFACE:-}" "${ARG_BRIDGE:-}" ;;
-    set-bond-slave) action_set_bond_slave "${ARG_IFACE:-}" "${ARG_BOND:-}" ;;
-    delete-link) action_delete_netdev "${ARG_NAME:-}" ;;
-    pan-net) action_pan_net "${SUB_CMD:-}" "${ARG_PIN:-}" "${ARG_SSID:-}" "${ARG_IP:-}" "${ARG_MODE:-}" "${ARG_SHARE:-}" ;;
-    host) action_host "${ARG_SSID:-}" "${ARG_PASS:-}" "${ARG_MODE:-}" "${ARG_SHARE:-}" "${ARG_IP:-}" "${ARG_IFACE:-}" "${ARG_CHANNEL:-}" ;;
-    client) action_client "${ARG_IFACE:-}" ;;
-    set-dhcp) action_set_dhcp "${ARG_IFACE:-}" "${ARG_SSID:-}" "${ARG_DNS:-}" "${ARG_DOMAINS:-}" "${ARG_ROUTES:-}" "$ARG_MDNS" "$ARG_LLMNR" ;;
-    set-static) action_set_static "${ARG_IFACE:-}" "${ARG_IP:-}" "${ARG_GW:-}" "${ARG_DNS:-}" "${ARG_SSID:-}" "${ARG_DOMAINS:-}" "${ARG_ROUTES:-}" "$ARG_MDNS" "$ARG_LLMNR" ;;
-    set-link) action_set_link "${ARG_IFACE:-}" "${ARG_V4:-}" "${ARG_V6:-}" ;;
-    set-country) action_set_country "${ARG_CODE:-}" ;;
-    set-proxy) action_set_proxy "${ARG_IFACE:-}" "${ARG_HTTP:-}" "${ARG_HTTPS:-}" "${ARG_NOPROXY:-}" ;;
-    profile) action_profile "${SUB_CMD:-}" "${ARG_NAME:-}" "${ARG_IFACE:-}" ;;
-    help) action_help ;;
-    *) action_help; exit 1 ;;
+    interface)
+        ACTION=$(expand_alias "${1:-show}" "show" "set" "enable" "disable")
+        shift
+        # Format: rxnm interface <name> <action> or rxnm interface <action> --interface <name>
+        ARG_IFACE=""
+        if [[ "$1" != "show" && "$1" != "set" && "$1" != "enable" && "$1" != "disable" && "$1" != -* ]]; then
+             ARG_IFACE="$1"; shift
+        fi
+        
+        case "$ACTION" in
+            show)
+                action_status "$ARG_IFACE"
+                ;;
+            set)
+                SUBCMD="${1:-}"; shift
+                METRIC=""
+                case "$SUBCMD" in
+                    dhcp)
+                         # Parse args for metric overrides
+                         while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --metric) METRIC="$2"; shift 2 ;;
+                                --interface) ARG_IFACE="$2"; shift 2 ;;
+                                *) shift ;;
+                            esac
+                        done
+                         action_set_dhcp "$ARG_IFACE" "" "" "" "" "yes" "yes" "$METRIC"
+                         ;;
+                    static)
+                         IP="${1:-}"; [ -n "$IP" ] && [[ "$IP" != --* ]] && shift
+                         # Parse rest
+                         GW=""; DNS=""
+                         while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --ip) IP="$2"; shift 2 ;;
+                                --gateway) GW="$2"; shift 2 ;;
+                                --dns) DNS="$2"; shift 2 ;;
+                                --metric) METRIC="$2"; shift 2 ;;
+                                --interface) ARG_IFACE="$2"; shift 2 ;;
+                                *) shift ;;
+                            esac
+                        done
+                         action_set_static "$ARG_IFACE" "$IP" "$GW" "$DNS" "" "" "" "yes" "yes" "$METRIC"
+                         ;;
+                esac
+                ;;
+        esac
+        ;;
+        
+    system)
+        ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload")
+        shift
+        case "$ACTION" in
+            status)
+                action_status "${1:-}"
+                ;;
+            check)
+                SUBCMD="${1:-}"; shift
+                if [ "$SUBCMD" == "internet" ]; then action_check_internet; fi
+                if [ "$SUBCMD" == "portal" ]; then action_check_portal "${1:-}"; fi
+                ;;
+            proxy)
+                 SUBCMD="${1:-}"; shift
+                 if [ "$SUBCMD" == "set" ]; then
+                    HTTP=""; HTTPS=""; NO=""
+                    IFACE=""
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --http) HTTP="$2"; shift 2 ;;
+                            --https) HTTPS="$2"; shift 2 ;;
+                            --noproxy) NO="$2"; shift 2 ;;
+                            --interface) IFACE="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                    done
+                    action_set_proxy "$IFACE" "$HTTP" "$HTTPS" "$NO"
+                 fi
+                 ;;
+            reload)
+                 action_reload
+                 ;;
+        esac
+        ;;
+        
+    bluetooth)
+        ACTION="${1:-}"; shift
+        case "$ACTION" in
+            pan)
+                SUBCMD="${1:-}"; shift
+                MODE="client"; SHARE="false"; IP=""
+                # Mapping enable/disable/status
+                case "$SUBCMD" in
+                    enable)
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --mode) MODE="$2"; shift 2 ;;
+                                --share) SHARE="true"; shift ;;
+                                --ip) IP="$2"; shift 2 ;;
+                                *) shift ;;
+                            esac
+                        done
+                        action_pan_net "enable" "" "" "$IP" "$MODE" "$SHARE"
+                        ;;
+                    disable)
+                        action_pan_net "disable" "" "" "" "" ""
+                        ;;
+                esac
+                ;;
+        esac
+        ;;
+
+    bridge|bond|vrf|vlan|macvlan|ipvlan|veth)
+         # Simplified dispatch for virtual devices
+         ACTION="${1:-}"; shift
+         NAME="${1:-}"; [ -n "$NAME" ] && [[ "$NAME" != --* ]] && shift
+         
+         case "$CATEGORY" in
+            bridge)
+                if [ "$ACTION" == "create" ]; then action_create_bridge "$NAME"; fi
+                if [ "$ACTION" == "add-member" ]; then
+                     IFACE="${1:-}"; shift
+                     action_set_member "$IFACE" "$NAME"
+                fi
+                ;;
+            bond)
+                if [ "$ACTION" == "create" ]; then action_create_bond "$NAME" "active-backup"; fi
+                if [ "$ACTION" == "add-slave" ]; then
+                     IFACE="${1:-}"; shift
+                     action_set_bond_slave "$IFACE" "$NAME"
+                fi
+                ;;
+            vrf)
+                if [ "$ACTION" == "create" ]; then
+                     TABLE=""
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in --table) TABLE="$2"; shift 2 ;; *) shift ;; esac
+                     done
+                     action_create_vrf "$NAME" "$TABLE"
+                fi
+                if [ "$ACTION" == "add-member" ]; then
+                     IFACE="${1:-}"; shift
+                     action_set_vrf_member "$IFACE" "$NAME"
+                fi
+                ;;
+            macvlan)
+                if [ "$ACTION" == "create" ]; then
+                     PARENT=""; MODE="bridge"
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in 
+                            --parent) PARENT="$2"; shift 2 ;;
+                            --mode) MODE="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                     done
+                     [ -z "$PARENT" ] && { echo "Error: --parent required"; exit 1; }
+                     action_create_macvlan "$NAME" "$PARENT" "$MODE"
+                     # json_success handled in action
+                fi
+                ;;
+            ipvlan)
+                if [ "$ACTION" == "create" ]; then
+                     PARENT=""; MODE="L2"
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in 
+                            --parent) PARENT="$2"; shift 2 ;;
+                            --mode) MODE="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                     done
+                     [ -z "$PARENT" ] && { echo "Error: --parent required"; exit 1; }
+                     action_create_ipvlan "$NAME" "$PARENT" "$MODE"
+                fi
+                ;;
+            veth)
+                if [ "$ACTION" == "create" ]; then
+                     PEER=""
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in --peer) PEER="$2"; shift 2 ;; *) shift ;; esac
+                     done
+                     [ -z "$PEER" ] && { echo "Error: --peer required"; exit 1; }
+                     action_create_veth "$NAME" "$PEER"
+                fi
+                ;;
+            vlan)
+                if [ "$ACTION" == "create" ]; then
+                     PARENT=""; ID=""
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in 
+                            --parent) PARENT="$2"; shift 2 ;;
+                            --id) ID="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                     done
+                     [ -z "$PARENT" ] && { echo "Error: --parent required"; exit 1; }
+                     [ -z "$ID" ] && { echo "Error: --id required"; exit 1; }
+                     action_create_vlan "$PARENT" "$NAME" "$ID"
+                fi
+                ;;
+         esac
+         ;;
+
+    vpn|tun|tap)
+        if [ "$ACTION" == "wireguard" ]; then
+             SUBCMD="${1:-}"; shift
+             NAME="${1:-}"; shift
+             if [ "$SUBCMD" == "connect" ]; then
+                PRIV=""; PEER=""; ENDP=""; IPS=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --private-key) PRIV="$2"; shift 2 ;;
+                        --peer-key) PEER="$2"; shift 2 ;;
+                        --endpoint) ENDP="$2"; shift 2 ;;
+                        --allowed-ips) IPS="$2"; shift 2 ;;
+                        --address) IP="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                action_connect_wireguard "$NAME" "$PRIV" "$PEER" "$ENDP" "$IPS" "$IP" ""
+             fi
+        elif [ "$ACTION" == "tun" ] || [ "$CATEGORY" == "tun" ]; then
+             if [ "$ACTION" == "create" ] || [ "$1" == "create" ]; then
+                 # Handle rxnm vpn tun create vs rxnm tun create
+                 [[ "$ACTION" == "create" ]] && shift || { shift; shift; }
+                 NAME="${1:-}"; shift
+                 USER=""; GROUP=""
+                 while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --user) USER="$2"; shift 2 ;;
+                        --group) GROUP="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                 done
+                 [ -z "$NAME" ] && { echo "Error: Name required"; exit 1; }
+                 action_create_tun "$NAME" "$USER" "$GROUP"
+             fi
+        elif [ "$ACTION" == "tap" ] || [ "$CATEGORY" == "tap" ]; then
+             if [ "$ACTION" == "create" ] || [ "$1" == "create" ]; then
+                 [[ "$ACTION" == "create" ]] && shift || { shift; shift; }
+                 NAME="${1:-}"; shift
+                 USER=""; GROUP=""
+                 while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --user) USER="$2"; shift 2 ;;
+                        --group) GROUP="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                 done
+                 [ -z "$NAME" ] && { echo "Error: Name required"; exit 1; }
+                 action_create_tap "$NAME" "$USER" "$GROUP"
+             fi
+        fi
+        ;;
+
+    profile)
+        ACTION="${1:-}"; shift
+        NAME="${1:-}"; [ -n "$NAME" ] && [[ "$NAME" != --* ]] && shift
+        IFACE=""
+        while [[ $# -gt 0 ]]; do
+             case "$1" in --interface) IFACE="$2"; shift 2 ;; *) shift ;; esac
+        done
+        action_profile "$ACTION" "$NAME" "$IFACE"
+        ;;
+        
+    *)
+        echo "Command category '$CATEGORY' not implemented yet."
+        exit 1
+        ;;
 esac

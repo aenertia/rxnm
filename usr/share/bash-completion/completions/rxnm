@@ -2,104 +2,93 @@ _rxnm_completion() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local cmd="${COMP_WORDS[1]}"
-    local subcmd="${COMP_WORDS[2]}"
 
-    local commands="status scan connect disconnect check-internet check-portal wps forget host client set-dhcp set-static set-link set-country set-proxy profile create-bridge create-bond create-vlan connect-wireguard pan-net reload start stop"
-    local global_opts="--interface --ssid --password --password-stdin --password-file --ip --gateway --dns --hidden --share --mdns --llmnr --bond --parent --name --channel --code --bridge --endpoint --peer-key --private-key --allowed-ips"
+    # Top Level Categories
+    local categories="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
+    local wifi_cmds="scan connect disconnect ap wps networks country"
+    local iface_cmds="show set enable disable"
+    local system_cmds="status check proxy reload"
     
-    COMPREPLY=()
+    # Flags that can appear anywhere
+    if [[ "$cur" == --* ]]; then
+        COMPREPLY=($(compgen -W "--json --format --yes --force --debug --help --interface --metric --table --parent --mode --peer --user --group" -- "$cur"))
+        return 0
+    fi
 
-    case "$COMP_CWORD" in
-        1)
-            # First word completion
-            COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+    # Level 1: Category Selection
+    if [ $COMP_CWORD -eq 1 ]; then
+        COMPREPLY=($(compgen -W "$categories" -- "$cur"))
+        return 0
+    fi
+
+    # Level 2: Action Selection based on Category
+    case "$cmd" in
+        wifi)
+            if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$wifi_cmds" -- "$cur"))
+            else
+                 # Level 3: Wifi Arguments
+                 case "${COMP_WORDS[2]}" in
+                    connect)
+                        COMPREPLY=($(compgen -W "--ssid --password --hidden --interface" -- "$cur"))
+                        # SSID auto-complete from scan if possible
+                        if [[ "$cur" != -* ]]; then
+                             COMPREPLY+=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
+                        fi
+                        ;;
+                    disconnect|scan)
+                        COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                        ;;
+                    networks)
+                        COMPREPLY=($(compgen -W "forget list" -- "$cur"))
+                        ;;
+                 esac
+            fi
             ;;
+        interface)
+            if [ $COMP_CWORD -eq 2 ]; then
+                 COMPREPLY=($(compgen -W "$(ls /sys/class/net/) show set enable disable" -- "$cur"))
+            elif [ $COMP_CWORD -eq 3 ]; then
+                 case "${COMP_WORDS[2]}" in
+                    set) COMPREPLY=($(compgen -W "dhcp static" -- "$cur")) ;;
+                 esac
+            elif [ $COMP_CWORD -ge 4 ]; then
+                 case "${COMP_WORDS[2]}" in
+                    set) COMPREPLY=($(compgen -W "--ip --gateway --dns --metric --interface" -- "$cur")) ;;
+                 esac
+            fi
+            ;;
+        system)
+            if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$system_cmds" -- "$cur"))
+            fi
+            ;;
+        bluetooth)
+             if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "pan" -- "$cur"))
+             elif [ $COMP_CWORD -eq 3 ]; then
+                COMPREPLY=($(compgen -W "enable disable" -- "$cur"))
+             fi
+             ;;
+        bridge|bond|vrf|macvlan|ipvlan|veth)
+             if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "create add-member" -- "$cur"))
+             fi
+             ;;
+        vpn|tun|tap)
+             if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "wireguard tun tap" -- "$cur"))
+             elif [ $COMP_CWORD -eq 3 ]; then
+                if [[ "${COMP_WORDS[2]}" == "tun" ]] || [[ "${COMP_WORDS[2]}" == "tap" ]]; then
+                    COMPREPLY=($(compgen -W "create" -- "$cur"))
+                elif [[ "${COMP_WORDS[2]}" == "wireguard" ]]; then
+                    COMPREPLY=($(compgen -W "connect" -- "$cur"))
+                fi
+             fi
+             ;;
         *)
-            # Handle command-specific completions
-            case "$cmd" in
-                scan|forget|disconnect|wps)
-                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                    ;;
-                connect)
-                    case "$COMP_CWORD" in
-                        2|4|6|8|10|12|14|16)
-                            COMPREPLY=($(compgen -W "--interface --ssid --password --password-stdin --password-file --hidden" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "--interface --ssid --password --password-stdin --password-file --hidden" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                host)
-                    COMPREPLY=($(compgen -W "--interface --ssid --password --share" -- "$cur"))
-                    ;;
-                client)
-                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                    ;;
-                set-dhcp|set-static|set-link|set-country)
-                    COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                    ;;
-                pan-net)
-                    case "$COMP_CWORD" in
-                        2)
-                            COMPREPLY=($(compgen -W "enable disable" -- "$cur"))
-                            ;;
-                        4|6)
-                            COMPREPLY=($(compgen -W "--interface --ssid --password" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "--interface --ssid --password" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                create-bridge|create-bond|create-vlan)
-                    COMPREPLY=($(compgen -W "--name" -- "$cur"))
-                    ;;
-                set-member)
-                    COMPREPLY=($(compgen -W "--interface --bridge" -- "$cur"))
-                    ;;
-                set-bond-slave)
-                    COMPREPLY=($(compgen -W "--interface --bond" -- "$cur"))
-                    ;;
-                connect-wireguard)
-                    COMPREPLY=($(compgen -W "--name --address --private-key --peer-key --endpoint --allowed-ips" -- "$cur"))
-                    ;;
-                profile)
-                    case "$COMP_CWORD" in
-                        2)
-                            COMPREPLY=($(compgen -W "save load list delete" -- "$cur"))
-                            ;;
-                        3|5)
-                            COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                            ;;
-                        *)
-                            COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                            ;;
-                    esac
-                    ;;
-                *)
-                    COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
-                    ;;
-            esac
             ;;
     esac
-
-    # Special handling for interface completion
-    if [[ "$cur" == --interface ]]; then
-        COMPREPLY=($(compgen -W "$(ls /sys/class/net/)" -- "$cur"))
-    elif [[ "${COMP_WORDS[*]}" == *" --interface "* ]] && [[ "$cur" == --interface ]]; then
-        COMPREPLY=($(compgen -W "$(ls /sys/class/net/)" -- "$cur"))
-    fi
-
-    # Special handling for SSID completion (scan results)
-    if [[ "${COMP_WORDS[*]}" == *" scan "* ]] && [[ "$cur" == --ssid ]]; then
-        COMPREPLY=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
-    fi
-
-    # Special handling for SSID completion in connect
-    if [[ "${COMP_WORDS[*]}" == *" connect "* ]] && [[ "$cur" == --ssid ]]; then
-        COMPREPLY=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
-    fi
 }
 
 complete -F _rxnm_completion rxnm

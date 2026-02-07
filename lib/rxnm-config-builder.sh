@@ -19,6 +19,8 @@ build_network_config() {
     local mdns="${13:-yes}"
     local llmnr="${14:-yes}"
     local bond="${15:-}"
+    local metric="${16:-}"
+    local vrf="${17:-}"
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then
@@ -37,12 +39,17 @@ build_network_config() {
     [ -n "$dhcp" ] && config+="DHCP=${dhcp}\n"
     [ -n "$bridge" ] && config+="Bridge=${bridge}\n"
     [ -n "$bond" ] && config+="Bond=${bond}\n"
+    [ -n "$vrf" ] && config+="VRF=${vrf}\n"
     [ -n "$vlan" ] && config+="VLAN=${vlan}\n"
+    
+    # Metric setting (applies to DHCP and static routes in [Network] context)
+    [ -n "$metric" ] && config+="RouteMetric=${metric}\n"
     
     # mDNS and LLMNR controls
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     
     # Fix: IPMasquerade=yes is deprecated. Use "ipv4" to satisfy systemd-networkd warnings.
+    # RFC Compliance: LinkLocalAddressing=yes enables both IPv4LL (169.254/16) and IPv6LL (fe80::/10)
     config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=ipv4\n"
 
     if [ -n "$addresses" ]; then
@@ -71,8 +78,10 @@ build_network_config() {
                 local dest="${r%%:*}"
                 local rgw="${r#*:}"
                 config+="\n[Route]\nDestination=${dest}\nGateway=${rgw}\n"
+                [ -n "$metric" ] && config+="Metric=${metric}\n"
             else
                 config+="\n[Route]\nDestination=${r}\n"
+                [ -n "$metric" ] && config+="Metric=${metric}\n"
             fi
         done
     fi
@@ -96,11 +105,14 @@ build_gateway_config() {
     # Auto-IP Strategy
     if [ -z "$ip" ]; then
         if [ "$share" == "true" ]; then
-             ip="$DEFAULT_GW_V4"
+             # Use configured default or fall back to original RXNM default (192.168.212.1/24)
+             # This avoids common conflicts (0.1, 1.1, 8.1, 42.1, 100.1, 254.1)
+             ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
         else
              # Local/No-Share: Link Local strategy
              if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
-                 ip="169.254.0.2/24"
+                 # RFC 3927: Avoid 169.254.0.0/24 and 169.254.255.0/24
+                 ip="169.254.10.2/24"
              else
                  ip="169.254.1.1/16" 
              fi
@@ -112,16 +124,24 @@ build_gateway_config() {
     
     [ -n "$ip" ] && config+="Address=${ip}\n"
     
+    # Ensure IPv6 Link Local is ALWAYS enabled (RFC Compliance)
+    config+="LinkLocalAddressing=yes\n"
+    
     if [ "$share" == "true" ]; then
         # --- SHARING ENABLED (Gateway/Router) ---
         config+="IPForwarding=yes\n"
         config+="IPv6SendRA=yes\nDHCPPrefixDelegation=yes\n"
-        config+="LinkLocalAddressing=no\n"
+        
+        # Add a stable ULA Address for isolated IPv6 connectivity (RFC 4193)
+        # This ensures local IPv6 reachability even without upstream PD
+        # Suffix "arcade" in hexspeak: a7ca:de
+        config+="Address=fd00:cafe:feed::a7ca:de/64\n"
+        
         config+="DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
         config+="[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
     else
         # --- SHARING DISABLED (Local/Link-Local) ---
-        config+="LinkLocalAddressing=no\nIPv6AcceptRA=no\n"
+        config+="IPv6AcceptRA=no\n" # We are not a client on this isolated link
         config+="DHCPServer=yes\n\n[DHCPServer]\n"
         config+="EmitDNS=yes\n"
         config+="EmitRouter=no\n"
