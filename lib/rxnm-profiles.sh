@@ -128,7 +128,7 @@ _task_profile_load_global() {
 # --- MAIN ACTION ---
 
 action_profile() {
-    local cmd="$1"; local name="$2"; local iface="$3"
+    local cmd="$1"; local name="$2"; local iface="$3"; local file_path="$4"
     
     ensure_dirs
     
@@ -140,6 +140,7 @@ action_profile() {
         case "$cmd" in
             save)
                 [ -z "$name" ] && { json_error "Profile name required"; return 1; }
+                confirm_action "Overwrite existing global profile '$name'?" "$FORCE_ACTION"
                 _task_profile_save_global "$name"
                 json_success '{"action": "saved_global", "name": "'"$name"'"}'
                 ;;
@@ -148,6 +149,7 @@ action_profile() {
                 
                 # Implicit "Default" / Reset handling
                 if [ "$name" == "default" ] && [ ! -d "$global_dir/default" ]; then
+                     confirm_action "Reset network configuration to system defaults?" "$FORCE_ACTION"
                      # Wipe settings only
                      find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                      find "${STORAGE_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
@@ -161,8 +163,8 @@ action_profile() {
                      return 0
                 fi
 
-                [ ! -d "$global_dir/$name" ] && { json_error "Profile not found"; return 1; }
-                
+                [ ! -d "$global_dir/$name" ] && { json_error "Profile not found: $name"; return 1; }
+                confirm_action "Load global profile '$name' (will overwrite current config)?" "$FORCE_ACTION"
                 _task_profile_load_global "$name"
                 json_success '{"action": "loaded_global", "name": "'"$name"'"}'
                 ;;
@@ -182,14 +184,30 @@ action_profile() {
                 json_success '{"profiles": '"$json_list"', "scope": "global"}'
                 ;;
             delete)
-                [ -z "$name" ] && return 1
+                [ -z "$name" ] && { json_error "Profile name required"; return 1; }
                 if [ -d "$global_dir/$name" ]; then
+                    confirm_action "Delete global profile '$name'?" "$FORCE_ACTION"
                     rm -rf "$global_dir/$name"
                     json_success '{"action": "deleted", "name": "'"$name"'"}'
                 else
                     json_error "Profile not found"
                 fi
                 ;;
+            export)
+                [ -z "$name" ] && { json_error "Profile name required"; return 1; }
+                [ ! -d "$global_dir/$name" ] && { json_error "Profile '$name' does not exist"; return 1; }
+                local out_file="${file_path:-${name}.tar.gz}"
+                tar -czf "$out_file" -C "$global_dir" "$name"
+                json_success '{"action": "exported", "profile": "'"$name"'", "file": "'"$out_file"'"}'
+                ;;
+            import)
+                 [ -z "$file_path" ] && { json_error "File path required"; return 1; }
+                 [ ! -f "$file_path" ] && { json_error "File not found: $file_path"; return 1; }
+                 confirm_action "Import profile from '$file_path'?" "$FORCE_ACTION"
+                 mkdir -p "$global_dir"
+                 tar -xzf "$file_path" -C "$global_dir"
+                 json_success '{"action": "imported", "file": "'"$file_path"'"}'
+                 ;;
         esac
         return 0
     fi
@@ -209,6 +227,7 @@ action_profile() {
             ;;
         load)
             [ ! -f "$profile_path" ] && { json_error "Profile not found"; return 1; }
+            confirm_action "Load profile '$name' on interface '$iface'?" "$FORCE_ACTION"
             cp "$profile_path" "$active_cfg"
             reconfigure_iface "$iface"
             json_success '{"action": "loaded", "name": "'"$name"'", "iface": "'"$iface"'"}'
@@ -229,7 +248,7 @@ action_profile() {
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;
         delete)
-            rm -f "$profile_path"
+             [ -f "$profile_path" ] && rm -f "$profile_path"
             json_success '{"action": "deleted", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
     esac

@@ -51,10 +51,18 @@ _task_create_macvlan() {
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
     if [ -f "$parent_cfg" ]; then
         if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-            if grep -q "\[Network\]" "$parent_cfg"; then
-                sed -i "/\[Network\]/a MACVLAN=${name}" "$parent_cfg"
+            # Safe Read-Modify-Write for BusyBox/OverlayFS
+            local current_content
+            current_content=$(cat "$parent_cfg")
+            if [[ "$current_content" == *"[Network]"* ]]; then
+                 # Append to [Network] block using sed for stream editing, but write via secure_write
+                 # Using standard sed syntax compatible with BusyBox
+                 local new_content
+                 new_content=$(echo "$current_content" | sed "/\[Network\]/a MACVLAN=${name}")
+                 secure_write "$parent_cfg" "$new_content" "644"
             else
-                printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+                 # Append block
+                 printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
         fi
     else
@@ -81,10 +89,14 @@ _task_create_ipvlan() {
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
     if [ -f "$parent_cfg" ]; then
         if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
-            if grep -q "\[Network\]" "$parent_cfg"; then
-                sed -i "/\[Network\]/a IPVLAN=${name}" "$parent_cfg"
+            local current_content
+            current_content=$(cat "$parent_cfg")
+            if [[ "$current_content" == *"[Network]"* ]]; then
+                 local new_content
+                 new_content=$(echo "$current_content" | sed "/\[Network\]/a IPVLAN=${name}")
+                 secure_write "$parent_cfg" "$new_content" "644"
             else
-                printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
         fi
     else
@@ -164,8 +176,12 @@ _task_create_vlan() {
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
     if [ -f "$parent_cfg" ]; then
         if ! grep -q "VLAN=${name}" "$parent_cfg"; then
-            if grep -q "\[Network\]" "$parent_cfg"; then
-                sed -i "/\[Network\]/a VLAN=${name}" "$parent_cfg"
+            local current_content
+            current_content=$(cat "$parent_cfg")
+             if [[ "$current_content" == *"[Network]"* ]]; then
+                 local new_content
+                 new_content=$(echo "$current_content" | sed "/\[Network\]/a VLAN=${name}")
+                 secure_write "$parent_cfg" "$new_content" "644"
             else
                 printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
@@ -185,7 +201,7 @@ action_create_vrf() {
     local table="$2"
     ! validate_interface_name "$name" && { json_error "Invalid VRF name"; return 1; }
     [ -z "$table" ] && { json_error "Routing table ID required for VRF"; return 1; }
-    if ! [[ "$table" =~ ^[0-9]+$ ]]; then json_error "Table ID must be a number"; return 1; fi
+    if ! validate_integer "$table"; then json_error "Table ID must be a number"; return 1; fi
     
     _task_create_vrf "$name" "$table"
     json_success '{"type": "vrf", "iface": "'"$name"'", "table": '"$table"'}'
@@ -248,9 +264,10 @@ action_set_bond_slave() {
 action_create_vlan() {
     local parent="$1"; local name="$2"; local id="$3"
     ! validate_interface_name "$name" && { json_error "Invalid vlan name"; return 1; }
+    ! validate_vlan_id "$id" && { json_error "Invalid VLAN ID (1-4094)"; return 1; }
     
     with_iface_lock "$parent" _task_create_vlan "$parent" "$name" "$id"
     
     reload_networkd
-    json_success '{"type": "vlan", "iface": "'"$name"'"}'
+    json_success '{"type": "vlan", "iface": "'"$name"'", "id": '"$id"'}'
 }

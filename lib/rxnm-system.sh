@@ -240,11 +240,14 @@ enable_nat_masquerade() {
         
     elif [ "$fw_tool" == "nft" ]; then
         nft add table ip rocknix_nat 2>/dev/null
+        # Ensure idempotency by flushing or recreating chains
         nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
+        nft flush chain ip rocknix_nat postrouting
         nft add rule ip rocknix_nat postrouting oifname "$wan_iface" masquerade
         
         nft add table ip rocknix_filter 2>/dev/null
         nft add chain ip rocknix_filter forward "{ type filter hook forward priority 0 ; }" 2>/dev/null
+        nft flush chain ip rocknix_filter forward
         nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
         nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
         nft add rule ip rocknix_filter forward tcp flags syn tcp option maxseg size set rt mtu

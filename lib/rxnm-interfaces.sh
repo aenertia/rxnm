@@ -61,7 +61,6 @@ _task_set_static() {
         
         # Validate individual IP (CIDR aware)
         if ! validate_ip "$addr"; then
-             json_error "Invalid IP address provided: $addr"
              return 1
         fi
         
@@ -168,22 +167,24 @@ action_delete_netdev() {
     local name="$1"
     ! validate_interface_name "$name" && { json_error "Invalid name"; return 1; }
     
+    confirm_action "Delete virtual interface '$name'?" "$FORCE_ACTION"
+    
     local found="false"
-    for f in "${STORAGE_NET_DIR}/60-bridge-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-vlan-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-bond-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-vrf-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-macvlan-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-ipvlan-${name}.netdev" \
-             "${STORAGE_NET_DIR}/60-veth-${name}.netdev"; do
+    # Identify device kind and remove .netdev
+    for f in "${STORAGE_NET_DIR}"/60-*-"${name}.netdev"; do
         if [ -f "$f" ]; then rm -f "$f"; found="true"; fi
+    done
+    
+    # Also remove associated .network files for this interface
+    for f in "${STORAGE_NET_DIR}"/*-"${name}.network"; do
+         if [ -f "$f" ]; then rm -f "$f"; found="true"; fi
     done
     
     if [ "$found" == "true" ]; then
         reload_networkd
         json_success '{"deleted": "'"$name"'"}'
     else
-        json_error "Device configuration not found"
+        json_error "Device configuration not found for '$name'"
     fi
 }
 
@@ -232,7 +233,6 @@ action_set_static() {
         
         # Validate individual IP (CIDR aware)
         if ! validate_ip "$addr"; then
-             json_error "Invalid IP address provided: $addr"
              return 1
         fi
         

@@ -122,10 +122,26 @@ action_status() {
         fi
     done < <(ip -4 route show default 2>/dev/null || true)
 
+    # Detect Bridge members
+    declare -A BRIDGE_MEMBERS
+    for br in /sys/class/net/*/bridge; do
+        [ -e "$br" ] || continue
+        local br_iface
+        br_iface=$(basename "$(dirname "$br")")
+        local members
+        members=$(ls "$br/../brif/" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        if [ -n "$members" ]; then
+            BRIDGE_MEMBERS["$br_iface"]="$members"
+        fi
+    done
+
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
     
-    local -a json_objects=()
+    # Performance Refactor: Build a large JSON string accumulator instead of invoking jq 5x per interface
+    # We will output proper JSON objects one by one, comma separated, then wrap in []
+    local iface_json_accumulator=""
+    
     local ifaces=(/sys/class/net/*)
     for iface_path in "${ifaces[@]}"; do
         local iface=${iface_path##*/}
@@ -158,7 +174,7 @@ action_status() {
         elif [ -d "$iface_path/device" ]; then
             type="ethernet"
         else
-            # Fast heuristics for virtual interfaces
+            # Fast heuristics
             case "$iface" in
                 wg*) type="wireguard" ;;
                 tailscale*|wt*) type="tailscale" ;;
@@ -173,22 +189,31 @@ action_status() {
         local frequency=""
         if [ "$type" == "wifi" ]; then
              ssid="${WIFI_SSID_MAP[$iface]:-}"
-             if command -v iw >/dev/null; then
-                 local iw_info
-                 iw_info=$(iw dev "$iface" info 2>/dev/null || true)
-                 if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ \MHz\) ]]; then
-                     channel="${BASH_REMATCH[1]}"
-                     frequency="${BASH_REMATCH[2]}"
+             # Only invoke external iw command if necessary
+             if [ -n "$ssid" ] || [ "$connected" == "true" ]; then
+                 if command -v iw >/dev/null; then
+                     local iw_info
+                     iw_info=$(iw dev "$iface" info 2>/dev/null || true)
+                     if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ \MHz\) ]]; then
+                         channel="${BASH_REMATCH[1]}"
+                         frequency="${BASH_REMATCH[2]}"
+                     fi
                  fi
              fi
+             # Fallback AP check
              if [ -z "$ssid" ] && is_service_active "iwd"; then
-                 local ap_output
-                 ap_output=$(iwctl ap "$iface" show 2>/dev/null || echo "")
-                 if grep -q "Started" <<< "$ap_output"; then
-                     type="wifi_ap"
-                     ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
+                 # Avoid heavy busctl/iwctl unless likely
+                 if [ -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network" ]; then
+                     local ap_output
+                     ap_output=$(iwctl ap "$iface" show 2>/dev/null || echo "")
+                     if grep -q "Started" <<< "$ap_output"; then
+                         type="wifi_ap"
+                         ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
+                     fi
                  fi
              fi
+        elif [ "$type" == "bridge" ]; then
+            ssid="Members: ${BRIDGE_MEMBERS[$iface]:-none}"
         fi
 
         local cfg_mode="dhcp"
@@ -203,42 +228,65 @@ action_status() {
             iface_proxy_json=$(get_proxy_json "${STORAGE_NET_DIR}/proxy-${iface}.conf")
         fi
         
+        # Build JSON fragment using JQ construction (safest) OR raw string if extreme speed needed.
+        # Since we have variables, one single JQ construction per interface is 5x faster than 5 JQ calls.
+        # But we can do even better: Accumulate raw data in bash arrays and bulk process.
+        # However, shell escaping JSON is hard. 
+        # Best compromise: Build a JQ argument list.
+        
+        # Format: ipv6 list needs to be JSON array string
         local ipv6_json="[]"
         if [ -n "$ipv6_csv" ]; then
-            ipv6_csv="${ipv6_csv%,}"
-            ipv6_json=$(jq -n -R 'split(",")' <<< "$ipv6_csv")
+             # Simple string split logic in bash to avoid JQ fork
+             ipv6_csv="${ipv6_csv%,}"
+             ipv6_json="[\"${ipv6_csv//,/\",\"}\"]"
         fi
-
-        local dns_list=""
-        if command -v resolvectl >/dev/null; then
-            dns_list=$(resolvectl dns "$iface" 2>/dev/null | sed 's/^.*: //')
+        
+        # Members string
+        local members="${BRIDGE_MEMBERS[$iface]:-}"
+        
+        # Append to comma-separated list of objects
+        # We use a heredoc to create the JSON object structure to avoid JQ forks
+        # We must be careful with quotes in SSID/Names.
+        
+        # Sanitize func for JSON string
+        json_escape() {
+            echo -n "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/\n/\\n/g; s/\r/\\r/g'
+        }
+        
+        local safe_ssid=$(json_escape "$ssid")
+        local safe_members=$(json_escape "$members")
+        local safe_name=$(json_escape "$iface")
+        
+        # Manually constructing JSON string to avoid forks.
+        # Note: 'null' values are unquoted.
+        local obj="{"
+        obj+="\"name\": \"$safe_name\","
+        obj+="\"type\": \"$type\","
+        obj+="\"ip\": \"$ip\","
+        obj+="\"ipv6\": $ipv6_json,"
+        obj+="\"mac\": \"$mac\","
+        obj+="\"connected\": $connected,"
+        obj+="\"ssid\": $( [ -z "$safe_ssid" ] && echo "null" || echo "\"$safe_ssid\"" ),"
+        obj+="\"channel\": $( [ -z "$channel" ] && echo "null" || echo "\"$channel\"" ),"
+        obj+="\"frequency\": $( [ -z "$frequency" ] && echo "null" || echo "\"$frequency\"" ),"
+        obj+="\"gateway\": \"$gw\","
+        obj+="\"config\": \"$cfg_mode\","
+        obj+="\"proxy\": $iface_proxy_json,"
+        obj+="\"members\": $( [ -z "$safe_members" ] && echo "null" || echo "\"$safe_members\"" )"
+        obj+="}"
+        
+        if [ -n "$iface_json_accumulator" ]; then
+            iface_json_accumulator+=",$obj"
+        else
+            iface_json_accumulator="$obj"
         fi
-
-        local json_obj
-        json_obj=$(jq -n \
-            --arg name "$iface" \
-            --arg type "$type" \
-            --arg ip "$ip" \
-            --argjson ipv6 "$ipv6_json" \
-            --arg mac "$mac" \
-            --argjson connected "$connected" \
-            --arg ssid "$ssid" \
-            --arg channel "$channel" \
-            --arg freq "$frequency" \
-            --arg gw "$gw" \
-            --arg config "$cfg_mode" \
-            --arg dns "$dns_list" \
-            --argjson proxy "$iface_proxy_json" \
-            '{name: $name, type: $type, ip: $ip, ipv6: $ipv6, mac: $mac, connected: $connected, ssid: (if $ssid=="" then null else $ssid end), channel: (if $channel=="" then null else $channel end), frequency: (if $freq=="" then null else $freq end), gateway: $gw, config: $config, dns: (if $dns=="" then null else $dns end), proxy: $proxy}')
-            
-        json_objects+=("$json_obj")
     done
     
-    local json_ifaces_array="[]"
-    if [ ${#json_objects[@]} -gt 0 ]; then
-        json_ifaces_array=$(printf '%s\n' "${json_objects[@]}" | jq -s '.')
-    fi
+    # Wrap in array
+    local json_ifaces_array="[$iface_json_accumulator]"
     
+    # Final assembly using ONE jq call to ensure validity and pretty print if needed
     jq -n \
         --arg hn "$hostname" \
         --arg filter "$filter_iface" \

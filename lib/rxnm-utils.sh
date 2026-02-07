@@ -80,26 +80,25 @@ with_iface_lock() {
     return $ret
 }
 
-# --- LOGGING ---
+# --- LOGGING & OUTPUT ---
 
+# CRITICAL for ES Integration:
+# Info/Warn logs MUST go to stderr to avoid breaking JSON parsing on stdout.
 log_debug() {
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
 }
 
 log_info() {
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return; fi
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2 || logger -t rocknix-network "$*"
+    # Even if format is human, prefer stderr for logs so stdout is clean for piping
+    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
 }
 
 log_warn() {
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return; fi
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
-    logger -t rocknix-network "WARN: $*"
 }
 
 log_error() {
     echo "[ERROR] $*" >&2
-    logger -t rocknix-network "ERROR [${FUNCNAME[1]:-main}]: $*"
 }
 
 cli_error() {
@@ -118,11 +117,60 @@ audit_log() {
     logger -t rocknix-network-audit -p auth.notice "$event: $details"
 }
 
-# --- OUTPUT FORMATTING (PHASE 1) ---
+# --- OUTPUT FORMATTING ---
+
+print_table() {
+    local json_input="$1"
+    local columns="$2" # "KEY:Header,KEY2:Header2"
+    
+    local jq_query="["
+    local header_row=""
+    
+    IFS=',' read -ra COLS <<< "$columns"
+    for col in "${COLS[@]}"; do
+        local key="${col%%:*}"
+        local hdr="${col#*:}"
+        jq_query+=" .${key} // \"-\","
+        header_row+="${hdr}\t"
+    done
+    jq_query="${jq_query%,}] | @tsv"
+    
+    # Generate Tab-Separated Values
+    local tsv_data
+    tsv_data=$(echo -e "${header_row}"; echo "$json_input" | jq -r ".[]? | $jq_query" 2>/dev/null)
+    if [ -z "$tsv_data" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
+        # Handle single object case if array filter failed
+        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | jq -r "$jq_query" 2>/dev/null)
+    fi
+
+    # Formatting: Use column if available, else awk for embedded fallback
+    if command -v column >/dev/null; then
+        echo "$tsv_data" | column -t -s $'\t'
+    else
+        # BusyBox/Embedded friendly fallback
+        echo "$tsv_data" | awk -F'\t' '{
+            for(i=1;i<=NF;i++) {
+                if(length($i) > max[i]) max[i] = length($i)
+            }
+            lines[NR] = $0
+        }
+        END {
+            for(i=1;i<=NR;i++) {
+                split(lines[i], fields, "\t")
+                for(j=1;j<=NF;j++) {
+                    printf "%-" (max[j]+2) "s", fields[j]
+                }
+                printf "\n"
+            }
+        }'
+    fi
+}
 
 json_success() {
     local data="$1"
     if [ -z "$data" ]; then data="{}"; fi
+    
+    # PERFORMANCE: Minimal JQ usage. Merge success field.
     local full_json
     full_json=$(jq -n --argjson data "$data" '{success:true} + $data')
     
@@ -131,42 +179,47 @@ json_success() {
             echo "$full_json"
             ;;
         table)
-            # Try to extract an array of objects for table view, or key/value for simple objects
-            if echo "$full_json" | jq -e '.results | type == "array"' >/dev/null 2>&1; then
-                # List of results
-                echo "$full_json" | jq -r '.results[] | [to_entries[] | .value] | @tsv' | column -t
-            elif echo "$full_json" | jq -e '.profiles | type == "array"' >/dev/null 2>&1; then
-                echo "$full_json" | jq -r '.profiles[]'
-            elif echo "$full_json" | jq -e '.interfaces | type == "object"' >/dev/null 2>&1; then
-                # Complex interface status object
-                echo "$full_json" | jq -r '.interfaces[] | [.name, .type, .connected, .ip, .ssid // "-"] | @tsv' | \
-                sed '1iNAME TYPE CONNECTED IP SSID' | column -t
+            # Route based on content type for tabular display
+            if echo "$full_json" | jq -e '.results' >/dev/null 2>&1; then
+                print_table "$(echo "$full_json" | jq '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
+            elif echo "$full_json" | jq -e '.networks' >/dev/null 2>&1; then
+                print_table "$(echo "$full_json" | jq '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
+            elif echo "$full_json" | jq -e '.interfaces' >/dev/null 2>&1; then
+                local arr_data
+                arr_data=$(echo "$full_json" | jq '[.interfaces[]]')
+                print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
+            elif echo "$full_json" | jq -e '.profiles' >/dev/null 2>&1; then
+                if echo "$full_json" | jq -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
+                     echo "$full_json" | jq -r '.profiles[]' | sed '1iPROFILE_NAME'
+                else
+                     print_table "$(echo "$full_json" | jq '.profiles')" "name:NAME,iface:INTERFACE"
+                fi
+            elif echo "$full_json" | jq -e '.devices' >/dev/null 2>&1; then
+                 print_table "$(echo "$full_json" | jq '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
             else
-                # Fallback to human kv
+                # Fallback to Key-Value
                 echo "$full_json" | jq -r 'to_entries | .[] | "\(.key): \(.value)"'
             fi
             ;;
         *)
-            # Human readable pretty print
-            # Helper to print simple messages or full status
+            # Human readable pretty print (Default)
             if echo "$full_json" | jq -e '.message' >/dev/null 2>&1; then
                 echo "$full_json" | jq -r '.message'
             elif echo "$full_json" | jq -e '.action' >/dev/null 2>&1; then
-                echo "Success: $(echo "$full_json" | jq -r '.action') performed on $(echo "$full_json" | jq -r '.iface // .ssid // .name // "system"')"
+                local action=$(echo "$full_json" | jq -r '.action')
+                local target=$(echo "$full_json" | jq -r '.iface // .ssid // .name // "system"')
+                echo "✓ Success: $action performed on $target"
             elif echo "$full_json" | jq -e '.connected == true' >/dev/null 2>&1; then
-                echo "Successfully connected."
+                echo "✓ Successfully connected to $(echo "$full_json" | jq -r '.ssid')."
             elif echo "$full_json" | jq -e '.results' >/dev/null 2>&1; then
-                 # Scan results formatting
-                 printf "%-24s %-8s %-12s %s\n" "SSID" "SIGNAL" "SECURITY" "CONNECTED"
-                 echo "$full_json" | jq -r '.results[] | "\(.ssid)\t\(.strength_pct)%\t\(.security)\t\(.connected)"' | \
-                 while IFS=$'\t' read -r ssid sig sec conn; do
-                    printf "%-24s %-8s %-12s %s\n" "$ssid" "$sig" "$sec" "$conn"
-                 done
+                 print_table "$(echo "$full_json" | jq '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
+            elif echo "$full_json" | jq -e '.networks' >/dev/null 2>&1; then
+                 print_table "$(echo "$full_json" | jq '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
             elif echo "$full_json" | jq -e '.interfaces' >/dev/null 2>&1; then
                  echo "--- Network Status ---"
-                 echo "$full_json" | jq -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "Connected" else "Disconnected" end)\n  IP: \(.ip // "None")\n  DNS: \(.dns // "None")\n  Details: \(.ssid // "")\n"'
+                 echo "$full_json" | jq -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
             else
-                echo "$full_json" | jq .
+                echo "$full_json" | jq -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
             fi
             ;;
     esac
@@ -175,37 +228,36 @@ json_success() {
 json_error() {
     local msg="$1"
     local code="${2:-1}"
+    local hint="${3:-}"
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
-        jq -n --arg msg "$msg" --arg code "$code" \
-            '{success:false, error:$msg, exit_code:($code|tonumber)}'
+        jq -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" \
+            '{success:false, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
     else
-        echo "Error: $msg" >&2
+        echo "✗ Error: $msg" >&2
+        [ -n "$hint" ] && echo "  hint: $hint" >&2
     fi
-    # Use return instead of exit to allow callers to handle flow, 
-    # but the calling script often exits on error.
-    return 0 
+    return 0
 }
 
-# --- INTERACTIVE HELPERS (PHASE 2) ---
+# --- INTERACTIVE HELPERS ---
 
 confirm_action() {
     local msg="$1"
     local force="${2:-false}"
     
     if [ "$force" == "true" ]; then return 0; fi
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi # Assume force in JSON mode or fail? better to assume explicit force required
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi 
     
-    # If not interactive, fail safety
     if [ ! -t 0 ]; then
         log_error "Destructive action requires confirmation or --yes flag."
         return 1
     fi
     
-    read -p "$msg [y/N] " -n 1 -r
+    read -p "⚠ $msg [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
+        echo "Cancelled."
         exit 0
     fi
     return 0
@@ -252,11 +304,11 @@ validate_ssid() {
     local ssid="$1"
     local len=${#ssid}
     if (( len < 1 || len > 32 )); then
-        log_error "Invalid SSID length: $len"
+        json_error "Invalid SSID length: $len" "1" "SSID must be 1-32 chars"
         return 1
     fi
     if [[ "$ssid" =~ [\$\`\\\!\;] ]]; then
-        log_error "SSID contains forbidden characters"
+        json_error "SSID contains forbidden characters" "1" "Avoid shell special chars"
         return 1
     fi
     return 0
@@ -265,7 +317,7 @@ validate_ssid() {
 validate_interface_name() {
     local iface="$1"
     if [[ ! "$iface" =~ ^[a-zA-Z0-9_:.-]{1,15}$ ]]; then
-        log_error "Invalid interface name: $iface"
+        json_error "Invalid interface name: $iface" "1" "Must be alphanumeric, max 15 chars"
         return 1
     fi
     return 0
@@ -274,9 +326,11 @@ validate_interface_name() {
 validate_passphrase() {
     local pass="$1"
     local len=${#pass}
-    # Fix: Allow length 0 for open networks
     [ "$len" -eq 0 ] && return 0
-    if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then return 1; fi
+    if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then 
+        json_error "Invalid passphrase length ($len)" "1" "WPA2 requires 8-63 characters"
+        return 1
+    fi
     return 0
 }
 
@@ -295,29 +349,33 @@ validate_channel() {
     return 0
 }
 
+validate_integer() {
+    local val="$1"
+    if [[ "$val" =~ ^[0-9]+$ ]]; then return 0; fi
+    return 1
+}
+
+validate_vlan_id() {
+    local id="$1"
+    if ! validate_integer "$id"; then return 1; fi
+    if [ "$id" -lt 1 ] || [ "$id" -gt 4094 ]; then return 1; fi
+    return 0
+}
+
 validate_ip() {
     local ip="$1"
     local clean_ip="${ip%/*}"
-    if command -v ip >/dev/null; then
-        if ip route get "$clean_ip" >/dev/null 2>&1; then
-            return 0
-        fi
-        if [[ "$clean_ip" =~ : ]] && [[ "$clean_ip" =~ ^[0-9a-fA-F:]+$ ]]; then
-            return 0
-        fi
-        if [[ "$clean_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            return 0
-        fi
-        return 1
-    else
-        if [[ "$clean_ip" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; then
-            return 0
-        fi
-        if [[ "$clean_ip" =~ : ]]; then
-            return 0
-        fi
+    if [[ ! "$ip" =~ ^[0-9a-fA-F:.]+(/[0-9]+)?$ ]]; then
+        json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
     fi
+    if command -v ip >/dev/null; then
+        if ! ip route get "$clean_ip" >/dev/null 2>&1; then
+             json_error "Invalid IP address: $clean_ip" "1"
+             return 1
+        fi
+    fi
+    return 0
 }
 
 validate_routes() {
@@ -329,7 +387,6 @@ validate_routes() {
         if [[ "$r" == *":"* ]]; then
             rgw="${r#*:}"
         fi
-        # Fix: Allow 0.0.0.0/0 for manual routing overrides
         if ! validate_ip "$dest"; then return 1; fi
         if [ -n "$rgw" ]; then
             if ! validate_ip "$rgw"; then return 1; fi
@@ -364,7 +421,10 @@ validate_proxy_url() {
 
 validate_country() {
     local code="$1"
-    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then return 1; fi
+    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then 
+        json_error "Invalid country code: $code" "1" "Use ISO 3166-1 alpha-2 format (e.g., US, JP, DE)"
+        return 1
+    fi
     return 0
 }
 

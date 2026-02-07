@@ -2,16 +2,19 @@ _rxnm_completion() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     local cmd="${COMP_WORDS[1]}"
+    local subcmd="${COMP_WORDS[2]}"
 
     # Top Level Categories
     local categories="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
-    local wifi_cmds="scan connect disconnect ap wps networks country"
-    local iface_cmds="show set enable disable"
+    local wifi_cmds="scan connect disconnect ap wps networks list forget country"
+    local iface_cmds="show set enable disable list"
     local system_cmds="status check proxy reload"
+    local profile_cmds="save load list delete export import"
+    local virt_cmds="create delete add-member list"
     
     # Flags that can appear anywhere
     if [[ "$cur" == --* ]]; then
-        COMPREPLY=($(compgen -W "--json --format --yes --force --debug --help --interface --metric --table --parent --mode --peer --user --group" -- "$cur"))
+        COMPREPLY=($(compgen -W "--json --format --yes --force --debug --help --interface --metric --table --parent --mode --peer --user --group --ssid --password --hidden --share --ip --gateway --dns --http --https --noproxy" -- "$cur"))
         return 0
     fi
 
@@ -21,41 +24,45 @@ _rxnm_completion() {
         return 0
     fi
 
-    # Level 2: Action Selection based on Category
+    # Level 2+: Action Selection
     case "$cmd" in
         wifi)
             if [ $COMP_CWORD -eq 2 ]; then
                 COMPREPLY=($(compgen -W "$wifi_cmds" -- "$cur"))
             else
-                 # Level 3: Wifi Arguments
-                 case "${COMP_WORDS[2]}" in
-                    connect)
-                        COMPREPLY=($(compgen -W "--ssid --password --hidden --interface" -- "$cur"))
-                        # SSID auto-complete from scan if possible
+                 case "$subcmd" in
+                    connect|forget)
+                        # SSID auto-complete from IWD scan/known networks
                         if [[ "$cur" != -* ]]; then
-                             COMPREPLY+=($(compgen -W "$(iwctl station wlan0 scan >/dev/null 2>&1 && iwctl station wlan0 list-networks 2>/dev/null)" -- "$cur"))
+                             local ssids
+                             if command -v iwctl >/dev/null; then
+                                 # Try to get known networks first
+                                 ssids=$(iwctl known-networks list 2>/dev/null | tail -n +5 | awk '{print $1}' | sed 's/\x1b\[[0-9;]*m//g')
+                             fi
+                             COMPREPLY=($(compgen -W "$ssids" -- "$cur"))
                         fi
                         ;;
-                    disconnect|scan)
+                    disconnect|scan|ap)
                         COMPREPLY=($(compgen -W "--interface" -- "$cur"))
-                        ;;
-                    networks)
-                        COMPREPLY=($(compgen -W "forget list" -- "$cur"))
                         ;;
                  esac
             fi
             ;;
         interface)
             if [ $COMP_CWORD -eq 2 ]; then
-                 COMPREPLY=($(compgen -W "$(ls /sys/class/net/) show set enable disable" -- "$cur"))
+                 # Suggest interfaces OR subcommands
+                 local ifaces=$(ls /sys/class/net/ 2>/dev/null)
+                 COMPREPLY=($(compgen -W "$iface_cmds $ifaces" -- "$cur"))
             elif [ $COMP_CWORD -eq 3 ]; then
-                 case "${COMP_WORDS[2]}" in
-                    set) COMPREPLY=($(compgen -W "dhcp static" -- "$cur")) ;;
-                 esac
-            elif [ $COMP_CWORD -ge 4 ]; then
-                 case "${COMP_WORDS[2]}" in
-                    set) COMPREPLY=($(compgen -W "--ip --gateway --dns --metric --interface" -- "$cur")) ;;
-                 esac
+                 # If previous was an interface name, now we need a command
+                 if [[ -d "/sys/class/net/$subcmd" ]]; then
+                     COMPREPLY=($(compgen -W "$iface_cmds" -- "$cur"))
+                 else
+                     # Previous was a command, maybe 'set'
+                     case "$subcmd" in
+                        set) COMPREPLY=($(compgen -W "dhcp static" -- "$cur")) ;;
+                     esac
+                 fi
             fi
             ;;
         system)
@@ -65,27 +72,39 @@ _rxnm_completion() {
             ;;
         bluetooth)
              if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "pan" -- "$cur"))
+                COMPREPLY=($(compgen -W "pan scan pair unpair" -- "$cur"))
              elif [ $COMP_CWORD -eq 3 ]; then
-                COMPREPLY=($(compgen -W "enable disable" -- "$cur"))
+                case "$subcmd" in
+                    pan) COMPREPLY=($(compgen -W "enable disable" -- "$cur")) ;;
+                esac
              fi
              ;;
         bridge|bond|vrf|macvlan|ipvlan|veth)
              if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "create add-member" -- "$cur"))
+                COMPREPLY=($(compgen -W "$virt_cmds" -- "$cur"))
              fi
              ;;
         vpn|tun|tap)
              if [ $COMP_CWORD -eq 2 ]; then
                 COMPREPLY=($(compgen -W "wireguard tun tap" -- "$cur"))
              elif [ $COMP_CWORD -eq 3 ]; then
-                if [[ "${COMP_WORDS[2]}" == "tun" ]] || [[ "${COMP_WORDS[2]}" == "tap" ]]; then
-                    COMPREPLY=($(compgen -W "create" -- "$cur"))
-                elif [[ "${COMP_WORDS[2]}" == "wireguard" ]]; then
-                    COMPREPLY=($(compgen -W "connect" -- "$cur"))
+                if [[ "$subcmd" == "wireguard" ]]; then
+                    COMPREPLY=($(compgen -W "connect disconnect delete" -- "$cur"))
                 fi
              fi
              ;;
+        profile)
+            if [ $COMP_CWORD -eq 2 ]; then
+                COMPREPLY=($(compgen -W "$profile_cmds" -- "$cur"))
+            elif [ $COMP_CWORD -eq 3 ]; then
+                case "$subcmd" in
+                    load|delete|export)
+                        local profiles=$(find /storage/.config/network/profiles/global -maxdepth 1 -type d -exec basename {} \; 2>/dev/null)
+                        COMPREPLY=($(compgen -W "$profiles default" -- "$cur"))
+                        ;;
+                esac
+            fi
+            ;;
         *)
             ;;
     esac

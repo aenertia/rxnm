@@ -253,8 +253,38 @@ action_scan() {
         ] | unique_by(.ssid) | sort_by(-.signal)
     ')
     
-    # Fix: Wrap array result in an object to prevent "object + array" jq errors in json_success
     json_success "{\"results\": $result}"
+    return 0
+}
+
+action_list_known_networks() {
+    if ! is_service_active "iwd"; then
+        json_error "IWD service not running"
+        return 0
+    fi
+
+    local objects_json
+    if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
+        json_error "Failed to query IWD"
+        return 0
+    fi
+
+    # Extract KnownNetwork objects
+    local networks
+    networks=$(echo "$objects_json" | jq -r '
+        [
+            .data[] | to_entries[] |
+            select(.value["net.connman.iwd.KnownNetwork"] != null) |
+            {
+                ssid: .value["net.connman.iwd.KnownNetwork"].Name.data,
+                security: .value["net.connman.iwd.KnownNetwork"].Type.data,
+                hidden: (.value["net.connman.iwd.KnownNetwork"].Hidden.data == true),
+                last_connected: (.value["net.connman.iwd.KnownNetwork"].LastConnectedTime.data // "Never")
+            }
+        ] | sort_by(.ssid)
+    ')
+
+    json_success "{\"networks\": $networks}"
     return 0
 }
 

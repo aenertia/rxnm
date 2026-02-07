@@ -59,6 +59,40 @@ _task_create_tuntap() {
     reload_networkd
 }
 
+_task_delete_vpn() {
+    local name="$1"
+    local found="false"
+    
+    # Remove WireGuard files
+    if [ -f "${STORAGE_NET_DIR}/90-${name}.netdev" ]; then
+        rm -f "${STORAGE_NET_DIR}/90-${name}.netdev"
+        found="true"
+    fi
+    if [ -f "${STORAGE_NET_DIR}/90-${name}.network" ]; then
+        rm -f "${STORAGE_NET_DIR}/90-${name}.network"
+        found="true"
+    fi
+    
+    # Remove Tun/Tap files
+    for kind in tun tap; do
+        if [ -f "${STORAGE_NET_DIR}/60-${kind}-${name}.netdev" ]; then
+            rm -f "${STORAGE_NET_DIR}/60-${kind}-${name}.netdev"
+            found="true"
+        fi
+    done
+    
+    # Cleanup generic configs
+    if [ -f "${STORAGE_NET_DIR}/75-config-${name}.network" ]; then
+        rm -f "${STORAGE_NET_DIR}/75-config-${name}.network"
+    fi
+    
+    if [ "$found" == "true" ]; then
+        reload_networkd
+    else
+        return 1
+    fi
+}
+
 # --- ACTIONS ---
 
 action_connect_wireguard() {
@@ -71,7 +105,21 @@ action_connect_wireguard() {
 
     with_iface_lock "$name" _task_connect_wireguard "$name" "$priv" "$peer" "$endp" "$ips" "$addr" "$dns"
 
-    json_success '{"type": "wireguard", "iface": "'"$name"'"}'
+    json_success '{"type": "wireguard", "iface": "'"$name"'", "status": "connected"}'
+}
+
+action_disconnect_wireguard() {
+    local name="$1"
+    ! validate_interface_name "$name" && { json_error "Invalid interface name"; return 1; }
+    
+    # WireGuard in this context is stateless config, so disconnect = delete config
+    confirm_action "Disconnect and remove VPN interface '$name'?" "$FORCE_ACTION"
+    
+    if with_iface_lock "$name" _task_delete_vpn "$name"; then
+        json_success '{"action": "disconnected", "iface": "'"$name"'"}'
+    else
+        json_error "VPN interface configuration not found"
+    fi
 }
 
 action_create_tun() {
@@ -88,4 +136,17 @@ action_create_tap() {
     
     _task_create_tuntap "$name" "tap" "$user" "$group"
     json_success '{"type": "tap", "iface": "'"$name"'", "user": "'"${user:-root}"'", "group": "'"${group:-root}"'"}'
+}
+
+action_delete_vpn() {
+    local name="$1"
+    ! validate_interface_name "$name" && { json_error "Invalid interface name"; return 1; }
+    
+    confirm_action "Delete VPN interface '$name'?" "$FORCE_ACTION"
+    
+    if with_iface_lock "$name" _task_delete_vpn "$name"; then
+        json_success '{"action": "deleted", "iface": "'"$name"'"}'
+    else
+        json_error "VPN interface configuration not found"
+    fi
 }

@@ -16,8 +16,9 @@ export LOG_LEVEL_DEBUG=3
 : "${LOG_LEVEL:=$LOG_LEVEL_INFO}"
 
 # Optimization: Cache CPU capability check
+# BusyBox Compat: Use -E for extended regex (pipe for OR) instead of GNU specific \|
 IS_LOW_POWER=false
-if grep -qi "RK3326\|RK3566" /proc/cpuinfo 2>/dev/null; then
+if grep -qEi "RK3326|RK3566" /proc/cpuinfo 2>/dev/null; then
     IS_LOW_POWER=true
 fi
 
