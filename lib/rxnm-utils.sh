@@ -300,6 +300,23 @@ sanitize_ssid() {
     echo "$safe"
 }
 
+# Safe JSON escape without process forking (sed is too slow/buggy on BusyBox)
+json_escape() {
+    local s="$1"
+    # Remove null bytes first (invalid in JSON strings)
+    s="${s//$'\0'/}"
+    # Pure bash replacement for speed and safety
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    # Rare control chars
+    s="${s//$'\f'/\\f}"
+    s="${s//$'\b'/\\b}"
+    printf '%s' "$s"
+}
+
 validate_ssid() {
     local ssid="$1"
     local len=${#ssid}

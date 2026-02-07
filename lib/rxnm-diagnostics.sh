@@ -111,7 +111,8 @@ action_status() {
         if [[ "$family" == "inet" ]]; then
              IP_MAP["$iface_name"]="${ip_addr%/*}"
         elif [[ "$family" == "inet6" ]]; then
-             IPV6_MAP["$iface_name"]="${IPV6_MAP[$iface_name]:-}${ip_addr%/*},"
+             # Optimized append (linear, not quadratic)
+             IPV6_MAP["$iface_name"]+="${IPV6_MAP[$iface_name]:+,}${ip_addr%/*}"
         fi
     done < <(ip -o addr show 2>/dev/null || true)
 
@@ -122,16 +123,19 @@ action_status() {
         fi
     done < <(ip -4 route show default 2>/dev/null || true)
 
-    # Detect Bridge members
+    # Detect Bridge members with safe globbing (no ls)
     declare -A BRIDGE_MEMBERS
     for br in /sys/class/net/*/bridge; do
         [ -e "$br" ] || continue
         local br_iface
         br_iface=$(basename "$(dirname "$br")")
-        local members
-        members=$(ls "$br/../brif/" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-        if [ -n "$members" ]; then
-            BRIDGE_MEMBERS["$br_iface"]="$members"
+        local members_list=""
+        for m in "$br/../brif/"*; do
+            [ -e "$m" ] || continue
+            members_list+="${members_list:+,}$(basename "$m")"
+        done
+        if [ -n "$members_list" ]; then
+            BRIDGE_MEMBERS["$br_iface"]="$members_list"
         fi
     done
 
@@ -228,38 +232,37 @@ action_status() {
             iface_proxy_json=$(get_proxy_json "${STORAGE_NET_DIR}/proxy-${iface}.conf")
         fi
         
-        # Build JSON fragment using JQ construction (safest) OR raw string if extreme speed needed.
-        # Since we have variables, one single JQ construction per interface is 5x faster than 5 JQ calls.
-        # But we can do even better: Accumulate raw data in bash arrays and bulk process.
-        # However, shell escaping JSON is hard. 
-        # Best compromise: Build a JQ argument list.
-        
-        # Format: ipv6 list needs to be JSON array string
+        # Build JSON fragment using pure bash to avoid forks
         local ipv6_json="[]"
         if [ -n "$ipv6_csv" ]; then
-             # Simple string split logic in bash to avoid JQ fork
-             ipv6_csv="${ipv6_csv%,}"
-             ipv6_json="[\"${ipv6_csv//,/\",\"}\"]"
+             # Safely build array by iterating and escaping each address
+             local ipv6_arr=()
+             local escaped_addrs=""
+             IFS=',' read -ra ipv6_arr <<< "$ipv6_csv"
+             for addr in "${ipv6_arr[@]}"; do
+                 [ -z "$addr" ] && continue
+                 local esc_addr
+                 esc_addr=$(json_escape "$addr")
+                 if [ -z "$escaped_addrs" ]; then
+                     escaped_addrs="\"$esc_addr\""
+                 else
+                     escaped_addrs="$escaped_addrs,\"$esc_addr\""
+                 fi
+             done
+             [ -n "$escaped_addrs" ] && ipv6_json="[$escaped_addrs]"
         fi
         
-        # Members string
         local members="${BRIDGE_MEMBERS[$iface]:-}"
         
-        # Append to comma-separated list of objects
-        # We use a heredoc to create the JSON object structure to avoid JQ forks
-        # We must be careful with quotes in SSID/Names.
+        # Safe escaping without sed
+        local safe_ssid
+        safe_ssid=$(json_escape "$ssid")
+        local safe_members
+        safe_members=$(json_escape "$members")
+        local safe_name
+        safe_name=$(json_escape "$iface")
         
-        # Sanitize func for JSON string
-        json_escape() {
-            echo -n "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/\n/\\n/g; s/\r/\\r/g'
-        }
-        
-        local safe_ssid=$(json_escape "$ssid")
-        local safe_members=$(json_escape "$members")
-        local safe_name=$(json_escape "$iface")
-        
-        # Manually constructing JSON string to avoid forks.
-        # Note: 'null' values are unquoted.
+        # Manually constructing JSON string
         local obj="{"
         obj+="\"name\": \"$safe_name\","
         obj+="\"type\": \"$type\","
@@ -267,13 +270,33 @@ action_status() {
         obj+="\"ipv6\": $ipv6_json,"
         obj+="\"mac\": \"$mac\","
         obj+="\"connected\": $connected,"
-        obj+="\"ssid\": $( [ -z "$safe_ssid" ] && echo "null" || echo "\"$safe_ssid\"" ),"
-        obj+="\"channel\": $( [ -z "$channel" ] && echo "null" || echo "\"$channel\"" ),"
-        obj+="\"frequency\": $( [ -z "$frequency" ] && echo "null" || echo "\"$frequency\"" ),"
+        
+        # Safe Null handling without subshells. Empty SSID = null unless we suspect hidden.
+        local val_ssid="null"
+        if [ -n "$safe_ssid" ]; then
+            val_ssid="\"$safe_ssid\""
+        elif [ "$type" == "wifi" ] && [ "$connected" == "true" ]; then
+            # Connected but hidden/empty SSID
+            val_ssid="\"\""
+        fi
+        obj+="\"ssid\": $val_ssid,"
+        
+        local val_chan="null"
+        [ -n "$channel" ] && val_chan="\"$channel\""
+        obj+="\"channel\": $val_chan,"
+
+        local val_freq="null"
+        [ -n "$frequency" ] && val_freq="\"$frequency\""
+        obj+="\"frequency\": $val_freq,"
+        
         obj+="\"gateway\": \"$gw\","
         obj+="\"config\": \"$cfg_mode\","
         obj+="\"proxy\": $iface_proxy_json,"
-        obj+="\"members\": $( [ -z "$safe_members" ] && echo "null" || echo "\"$safe_members\"" )"
+        
+        local val_memb="null"
+        [ -n "$safe_members" ] && val_memb="\"$safe_members\""
+        obj+="\"members\": $val_memb"
+        
         obj+="}"
         
         if [ -n "$iface_json_accumulator" ]; then

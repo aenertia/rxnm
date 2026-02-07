@@ -5,6 +5,12 @@
 # ROCKNIX Network Manager (Modular)
 # Phase 3: UX Refactor (Target-First, Help System, Formatting)
 
+# CRITICAL: Verify we are running under Bash, not BusyBox Ash
+if [ -z "$BASH_VERSION" ]; then
+    echo "Error: This script requires bash (busybox ash not supported)" >&2
+    exit 1
+fi
+
 # Debug trigger
 if [ -n "${RXNM_DEBUG:-}" ]; then
     set -x
