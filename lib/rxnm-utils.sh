@@ -45,6 +45,9 @@ cleanup() {
 acquire_global_lock() {
     local timeout="${1:-5}"
     
+    # Ensure RUN_DIR exists before locking
+    [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
+
     exec 200>"$GLOBAL_LOCK_FILE"
     if ! flock -n 200; then
         if [ -f "$GLOBAL_PID_FILE" ]; then
@@ -80,6 +83,9 @@ with_iface_lock() {
     local lock_file="${RUN_DIR}/${iface}.lock"
     local lock_fd
     
+    # Ensure RUN_DIR exists before locking
+    [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
+
     # Open FD in local scope
     exec {lock_fd}>"$lock_file" || {
         log_error "Failed to open lock file for $iface"
@@ -322,23 +328,16 @@ sanitize_ssid() {
     echo "$safe"
 }
 
-# Safe JSON escape without process forking for speed, but strips invalid chars
+# Refined json_escape: Use JQ for robust encoding if string is complex
 json_escape() {
     local s="$1"
-    
-    # 1. Handle common control characters manually (RFC 8259)
-    s="${s//\\/\\\\}"  # Reverse solidus
-    s="${s//\"/\\\"}"  # Quotation mark
-    s="${s//$'\n'/\\n}" # Line feed
-    s="${s//$'\r'/\\r}" # Carriage return
-    s="${s//$'\t'/\\t}" # Tab
-    s="${s//$'\b'/\\b}" # Backspace
-    s="${s//$'\f'/\\f}" # Form feed
-    
-    # 2. Safety Strip: Remove remaining unescaped control characters (0x00-0x1F)
-    s=$(printf '%s' "$s" | tr -d '[:cntrl:]')
-    
-    printf '%s' "$s"
+    # Simple strings can be handled via bash for speed
+    if [[ ! "$s" =~ [^a-zA-Z0-9._-] ]]; then
+        printf '%s' "$s"
+        return
+    fi
+    # Complex strings use JQ to ensure UTF-8 and control char compliance
+    printf '%s' "$s" | jq -R . | sed 's/^"//;s/"$//'
 }
 
 validate_ssid() {
