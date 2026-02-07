@@ -1,0 +1,20 @@
+# 70-br-usb-host.network
+[Match]
+Name=br-usb
+
+[Network]
+Description=Rocknix USB Bridge Host (Legacy+Modern)
+# Consistent RXNM default
+Address=169.254.10.2/24
+DHCPServer=yes
+LinkLocalAddressing=yes
+# Disabled to avoid conflict with Avahi
+MulticastDNS=no
+LLMNR=yes
+
+[DHCPServer]
+PoolOffset=1
+PoolSize=2
+EmitDNS=no
+# Required for Windows to classify network as Private/Trusted
+EmitRouter=yes

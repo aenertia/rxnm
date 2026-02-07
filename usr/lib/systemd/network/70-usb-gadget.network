@@ -1,0 +1,24 @@
+# 70-usb-gadget.network
+[Match]
+Name=usb*
+Type=gadget
+
+[Link]
+# Consistent "ROCKNX" MAC for standalone mode
+MACAddress=52:4F:43:4B:4E:58
+
+[Network]
+Description=Rocknix Gadget Network (Link-Local Host)
+# Consistent RXNM default
+Address=169.254.10.2/24
+DHCPServer=yes
+LinkLocalAddressing=yes
+MulticastDNS=no
+LLMNR=yes
+
+[DHCPServer]
+PoolOffset=1
+PoolSize=2
+EmitDNS=no
+# Required for Windows to classify network as Private/Trusted
+EmitRouter=yes

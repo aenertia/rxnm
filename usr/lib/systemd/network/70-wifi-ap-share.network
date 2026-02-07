@@ -1,0 +1,27 @@
+# 70-wifi-ap-share.network
+[Match]
+Name=wlan*
+Type=wlan
+WLANInterfaceType=ap
+
+[Network]
+Description=Rocknix AP Host (Shared)
+Address=192.168.212.1/24
+DHCPServer=yes
+LinkLocalAddressing=yes
+# Disabled to avoid conflict with Avahi
+MulticastDNS=no
+LLMNR=yes
+Address=fd00:a7c:ade:50::1/64
+IPv6SendRA=yes
+# NAT Features
+IPMasquerade=ipv4
+IPForwarding=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=50
+EmitDNS=yes
+
+[IPv6SendRA]
+Managed=no

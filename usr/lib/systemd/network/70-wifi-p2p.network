@@ -1,0 +1,11 @@
+# 70-wifi-p2p.network
+[Match]
+Name=p2p*
+WLANInterfaceType=p2p-client p2p-go
+
+[Network]
+Description=Rocknix Wi-Fi P2P
+LinkLocalAddressing=yes
+# Disabled to avoid conflict with Avahi
+MulticastDNS=no
+LLMNR=yes

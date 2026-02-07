@@ -1,0 +1,18 @@
+# 70-bluetooth-pan.network
+[Match]
+Name=bnep*
+
+[Network]
+Description=Rocknix Bluetooth PAN Host
+Address=192.168.44.1/24
+DHCPServer=yes
+IPMasquerade=yes
+IPForwarding=yes
+# Disabled to avoid conflict with Avahi
+MulticastDNS=no
+LLMNR=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=50
+EmitDNS=yes

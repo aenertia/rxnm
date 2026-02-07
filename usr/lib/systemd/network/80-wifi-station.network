@@ -1,0 +1,18 @@
+# 80-wifi-station.network
+[Match]
+Name=wlan* mlan*
+Type=wlan
+WLANInterfaceType=station
+
+[Network]
+Description=Rocknix Wi-Fi Default
+DHCP=yes
+LinkLocalAddressing=yes
+# MulticastDNS=no: Delegates mDNS handling to the running avahi-daemon.
+MulticastDNS=no
+LLMNR=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+# Higher metric than wired to prefer ethernet
+RouteMetric=20

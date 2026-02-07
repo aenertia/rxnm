@@ -1,0 +1,17 @@
+# 80-tethering.network
+[Match]
+Name=usb* rndis*
+# the USB controller operates in Host mode, making this a standard network device.
+
+[Network]
+Description=Rocknix USB Tethering Client
+DHCP=yes
+LinkLocalAddressing=yes
+# Handled by Avahi (Daemon) to avoid port 5353 conflicts
+MulticastDNS=no
+LLMNR=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+# Metric 30: Fallback if WiFi/Eth are unavailable
+RouteMetric=30

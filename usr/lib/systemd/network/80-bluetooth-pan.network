@@ -1,0 +1,15 @@
+# 80-bluetooth-pan.network
+[Match]
+Name=bnep*
+
+[Network]
+Description=Rocknix Bluetooth Tethering Client
+DHCP=yes
+LinkLocalAddressing=yes
+# MulticastDNS=no: Delegates mDNS handling to the running avahi-daemon.
+MulticastDNS=no
+LLMNR=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+RouteMetric=30

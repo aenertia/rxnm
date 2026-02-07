@@ -1,0 +1,5 @@
+# 60-br-usb.netdev
+[NetDev]
+Name=br-usb
+Kind=bridge
+MACAddress=52:4F:43:4B:4E:58
