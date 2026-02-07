@@ -8,13 +8,35 @@ cleanup() {
     if [ ${#temp_files[@]} -gt 0 ]; then
         rm -f "${temp_files[@]}" 2>/dev/null
     fi
-    # Remove PID file if we own the lock
+    
+    # Remove PID file if we own the global lock
     if [ -f "$GLOBAL_PID_FILE" ]; then
         local pid
         pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
         if [ "$pid" == "$$" ]; then
             rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
         fi
+    fi
+
+    # Clean any interface locks owned by this PID
+    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
+        # Check if fuser is available, otherwise just try to clean known locks
+        if command -v fuser >/dev/null; then
+            find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while read -r lock; do
+                if [ -f "$lock" ]; then
+                    local lock_pid
+                    lock_pid=$(fuser "$lock" 2>/dev/null | awk '{print $1}')
+                    # If no process holds it, or we hold it, remove it
+                    if [ -z "$lock_pid" ] || [ "$lock_pid" == "$$" ]; then
+                        rm -f "$lock" 2>/dev/null
+                    fi
+                fi
+            done
+        fi
+    fi
+    
+    if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
+        rm -rf "$TMPDIR" 2>/dev/null
     fi
 }
 
@@ -51,32 +73,32 @@ acquire_global_lock() {
     return 0
 }
 
-acquire_iface_lock() {
-    local iface="$1"
-    local timeout="${2:-10}"
+# Fixed: Local scoping of lock_fd to prevent leaks
+with_iface_lock() {
+    local iface="$1"; shift
+    local timeout="${TIMEOUT:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
+    local lock_fd
     
-    exec {lock_fd}>"$lock_file" || return 1
+    # Open FD in local scope
+    exec {lock_fd}>"$lock_file" || {
+        log_error "Failed to open lock file for $iface"
+        return 1
+    }
     
     if ! flock -w "$timeout" "$lock_fd"; then
         log_error "Failed to acquire lock for $iface after ${timeout}s"
         exec {lock_fd}>&-
         return 1
     fi
-}
-
-with_iface_lock() {
-    local iface="$1"; shift
-    # FIX: Do not declare lock_fd as local here, as it is set in acquire_iface_lock
-    acquire_iface_lock "$iface" || return 1
     
     # Execute command
-    "$@"
-    local ret=$?
+    local ret=0
+    "$@" || ret=$?
     
-    # Release and Close FD to prevent leaks
+    # Release and Close FD
     flock -u "$lock_fd"
-    eval "exec $lock_fd>&-"
+    exec {lock_fd}>&-
     return $ret
 }
 
@@ -314,13 +336,6 @@ json_escape() {
     s="${s//$'\f'/\\f}" # Form feed
     
     # 2. Safety Strip: Remove remaining unescaped control characters (0x00-0x1F)
-    # This prevents invalid JSON structure if an odd character like \v or \a slips in.
-    # While we lose that specific character, we preserve the integrity of the JSON payload.
-    # Using 'tr' here is slightly slower than pure bash but guarantees validity.
-    # To optimize: only run tr if necessary? No, just pipe.
-    # Actually, to minimize forking, we can rely on bash pattern matching removal if 4.4+
-    # But tr is safest for embedded compliance.
-    
     s=$(printf '%s' "$s" | tr -d '[:cntrl:]')
     
     printf '%s' "$s"

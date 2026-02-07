@@ -110,12 +110,32 @@ action_bt_pair() {
     
     confirm_action "Pair with device $mac?" "$FORCE_ACTION"
     
-    if bluetoothctl pair "$mac"; then
-        bluetoothctl trust "$mac"
-        json_success '{"action": "paired", "mac": "'"$mac"'"}'
-    else
-        json_error "Pairing failed"
+    local timeout=30
+    local elapsed=0
+    
+    # Initiate pairing
+    if ! bluetoothctl pair "$mac"; then
+        json_error "Failed to initiate pairing with $mac"
+        return 1
     fi
+    
+    # Poll for completion instead of fixed sleep
+    while [ $elapsed -lt $timeout ]; do
+        if bluetoothctl info "$mac" | grep -q "Paired: yes"; then
+            bluetoothctl trust "$mac"
+            json_success '{"action": "paired", "mac": "'"$mac"'"}'
+            return 0
+        fi
+        
+        # Check for failure states (requires parsing output, assuming bluetoothctl logs to stdout/err or inspecting info)
+        # bluetoothctl info output is cleaner check
+        
+        sleep 1
+        ((elapsed++))
+    done
+    
+    json_error "Pairing timeout for $mac after ${timeout}s"
+    return 1
 }
 
 action_bt_unpair() {

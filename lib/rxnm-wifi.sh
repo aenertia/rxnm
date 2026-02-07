@@ -228,12 +228,17 @@ action_scan() {
     fi
     
     local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
+    
+    # Improved Scan Wait Logic
     for ((i=1; i<=max_polls; i++)); do
         local scanning
         scanning=$(busctl get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | jq -r '.data')
         [ "$scanning" != "true" ] && break
         sleep "$sleep_sec"
     done
+    
+    # Scan settling time
+    sleep 0.5
     
     # Re-fetch objects after scan completion
     if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
@@ -329,6 +334,7 @@ action_connect() {
     
     local attempts=0
     local max_attempts=3
+    local retry_delay=2
     local out=""
     local pass_file=""
     
@@ -345,6 +351,7 @@ action_connect() {
         else
              out=$(iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi
+        
         if [[ -z "$out" ]]; then
             # Ensure we have an IP configuration
             local config_exists="false"
@@ -357,8 +364,6 @@ action_connect() {
             if [ "$config_exists" == "false" ]; then
                  log_info "No network configuration found for $iface. Applying default DHCP."
                  if type _task_set_dhcp &>/dev/null; then
-                     # Call set_dhcp with defaults.
-                     # Arguments: iface ssid dns domains routes mdns llmnr metric
                      with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
                  else
                      log_warn "Cannot apply default DHCP: Interface library not loaded."
@@ -370,13 +375,25 @@ action_connect() {
             [ -n "$pass_file" ] && rm -f "$pass_file"
             return 0
         fi
-        case "$out" in
-            *"Not found"*|*"No such network"*) break ;;
-            *"Authentication failed"*) break ;;
-            *"Operation already in progress"*) sleep 2 ;;
-        esac
+        
+        # Robust Error Handling
+        if echo "$out" | grep -qi "passphrase\|password\|not correct"; then
+             [ -n "$pass_file" ] && rm -f "$pass_file"
+             json_error "Authentication failed - check password"
+             return 0
+        elif echo "$out" | grep -qi "not found\|no network"; then
+             [ -n "$pass_file" ] && rm -f "$pass_file"
+             json_error "Network '$ssid' not found"
+             return 0
+        elif echo "$out" | grep -qi "already in progress"; then
+             log_warn "Connection in progress, waiting..."
+             sleep 3
+        else
+             log_warn "Connection failed (attempt $((attempts+1))/$max_attempts): $out"
+             sleep $((retry_delay * (attempts + 1))) # Exponential backoff
+        fi
+        
         attempts=$((attempts+1))
-        sleep 1
     done
     [ -n "$pass_file" ] && rm -f "$pass_file"
     json_error "Failed to connect: $out"

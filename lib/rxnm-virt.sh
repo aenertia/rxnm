@@ -47,16 +47,20 @@ _task_create_macvlan() {
     
     secure_write "$netdev_file" "$netdev_content" "644"
     
-    # Bind to parent network file
+    # Bind to parent network file with specific lock to prevent race conditions
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
+    local lock_file="${RUN_DIR}/${parent}.cfg.lock"
+    local lock_fd
+    
+    exec {lock_fd}>"$lock_file" || { log_error "Cannot open lock file"; return 1; }
+    if ! flock -w 5 "$lock_fd"; then log_error "Timeout waiting for config lock"; exec {lock_fd}>&-; return 1; fi
+
     if [ -f "$parent_cfg" ]; then
         if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-            # Safe Read-Modify-Write for BusyBox/OverlayFS
+            # Safe Read-Modify-Write
             local current_content
             current_content=$(cat "$parent_cfg")
             if [[ "$current_content" == *"[Network]"* ]]; then
-                 # Append to [Network] block using sed for stream editing, but write via secure_write
-                 # Using standard sed syntax compatible with BusyBox
                  local new_content
                  new_content=$(echo "$current_content" | sed "/\[Network\]/a MACVLAN=${name}")
                  secure_write "$parent_cfg" "$new_content" "644"
@@ -72,6 +76,10 @@ _task_create_macvlan() {
         content="${content/\[Network\]/[Network]\nMACVLAN=${name}}"
         secure_write "$parent_cfg" "$content" "644"
     fi
+    
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    
     reload_networkd
 }
 
@@ -86,7 +94,14 @@ _task_create_ipvlan() {
     
     secure_write "$netdev_file" "$netdev_content" "644"
     
+    # Bind to parent network file with specific lock
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
+    local lock_file="${RUN_DIR}/${parent}.cfg.lock"
+    local lock_fd
+    
+    exec {lock_fd}>"$lock_file" || { log_error "Cannot open lock file"; return 1; }
+    if ! flock -w 5 "$lock_fd"; then log_error "Timeout waiting for config lock"; exec {lock_fd}>&-; return 1; fi
+
     if [ -f "$parent_cfg" ]; then
         if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
             local current_content
@@ -105,6 +120,10 @@ _task_create_ipvlan() {
         content="${content/\[Network\]/[Network]\nIPVLAN=${name}}"
         secure_write "$parent_cfg" "$content" "644"
     fi
+    
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    
     reload_networkd
 }
 
@@ -221,6 +240,7 @@ action_create_macvlan() {
     ! validate_interface_name "$name" && { json_error "Invalid name"; return 1; }
     ! validate_interface_name "$parent" && { json_error "Invalid parent"; return 1; }
     
+    # We use a dedicated config lock in the task, but we still lock the interface operations
     with_iface_lock "$parent" _task_create_macvlan "$name" "$parent" "$mode"
     json_success '{"type": "macvlan", "iface": "'"$name"'", "parent": "'"$parent"'", "mode": "'"$mode"'"}'
 }

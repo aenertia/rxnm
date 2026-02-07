@@ -58,20 +58,15 @@ action_check_portal() {
 
 action_check_internet() {
     # 0. TIER 0: NETWORKCTL STATUS (FASTEST)
-    # Check if we even have a routable link before attempting curl
     if command -v networkctl >/dev/null; then
          local operstate
          operstate=$(networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
-         # States: routable, degraded (sometimes ok), online.
-         # Bad states: off, no-carrier, dormant, carrier (no IP).
          case "$operstate" in
             off|no-carrier|dormant|carrier)
-                # No IP or No Link - Fail fast (0ms latency)
                 json_success '{"ipv4": false, "ipv6": false, "connected": false, "reason": "local_link_down", "state": "'"$operstate"'"}'
                 return 0
                 ;;
             routable|online)
-                # We have IP and Route, proceed to verify upstream
                 ;;
          esac
     fi
@@ -95,6 +90,18 @@ action_check_internet() {
     [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
     
     json_success '{"ipv4": '"$v4"', "ipv6": '"$v6"', "connected": '"$connected"'}'
+}
+
+# Estimate Signal Quality from RSSI
+get_signal_quality() {
+    local rssi="$1"
+    [ -z "$rssi" ] && echo "unknown" && return
+    
+    # -30 dBm = excellent, -67 dBm = good, -70 dBm = fair, -80 dBm = poor
+    if [ "$rssi" -gt -50 ]; then echo "excellent";
+    elif [ "$rssi" -gt -67 ]; then echo "good";
+    elif [ "$rssi" -gt -70 ]; then echo "fair";
+    else echo "poor"; fi
 }
 
 action_status() {
@@ -124,16 +131,37 @@ action_status() {
         fi
     fi
 
+    # Optimization: Batch WiFi Info
+    declare -A WIFI_CHANNEL_MAP
+    declare -A WIFI_FREQ_MAP
+    declare -A WIFI_RSSI_MAP
+    if command -v iw >/dev/null 2>&1; then
+        # Parse 'iw dev' output once
+        while read -r iface_name chan freq; do
+            WIFI_CHANNEL_MAP["$iface_name"]="$chan"
+            WIFI_FREQ_MAP["$iface_name"]="$freq"
+        done < <(iw dev 2>/dev/null | awk '
+            /Interface/ {iface=$2}
+            /channel/ {print iface, $2, $4; iface=""}
+        ')
+        
+        # Parse station dump for RSSI (one call per iface is unavoidable if connected, but we can skip unrelated)
+    fi
+
     declare -A IP_MAP
     declare -A IPV6_MAP
+    
+    # Optimization: Filter IP check if specific interface requested
+    local ip_cmd_args=(-o addr show)
+    [ -n "$filter_iface" ] && ip_cmd_args+=(dev "$filter_iface")
+    
     while read -r _ iface_name family ip_addr _; do
         if [[ "$family" == "inet" ]]; then
              IP_MAP["$iface_name"]="${ip_addr%/*}"
         elif [[ "$family" == "inet6" ]]; then
-             # Optimized append (linear, not quadratic)
              IPV6_MAP["$iface_name"]+="${IPV6_MAP[$iface_name]:+,}${ip_addr%/*}"
         fi
-    done < <(ip -o addr show 2>/dev/null || true)
+    done < <(ip "${ip_cmd_args[@]}" 2>/dev/null || true)
 
     declare -A GW_MAP
     while read -r _ _ gw_addr _ gw_dev _ ; do
@@ -161,9 +189,8 @@ action_status() {
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
     
-    # Performance Refactor: Build a large JSON string accumulator instead of invoking jq 5x per interface
-    # We will output proper JSON objects one by one, comma separated, then wrap in []
-    local iface_json_accumulator=""
+    # Memory Optimization: Use array instead of string concatenation
+    local iface_json_array=()
     
     local ifaces=(/sys/class/net/*)
     for iface_path in "${ifaces[@]}"; do
@@ -210,28 +237,36 @@ action_status() {
         local ssid=""
         local channel=""
         local frequency=""
+        local quality="unknown"
+        local rssi=""
+        
         if [ "$type" == "wifi" ]; then
              ssid="${WIFI_SSID_MAP[$iface]:-}"
-             # Only invoke external iw command if necessary
+             
+             # Use batched info
              if [ -n "$ssid" ] || [ "$connected" == "true" ]; then
+                 channel="${WIFI_CHANNEL_MAP[$iface]:-}"
+                 frequency="${WIFI_FREQ_MAP[$iface]:-}"
+                 
+                 # Get RSSI only if connected (requires live query)
                  if command -v iw >/dev/null; then
-                     local iw_info
-                     iw_info=$(iw dev "$iface" info 2>/dev/null || true)
-                     if [[ "$iw_info" =~ channel\ ([0-9]+)\ \(([0-9]+)\ \MHz\) ]]; then
-                         channel="${BASH_REMATCH[1]}"
-                         frequency="${BASH_REMATCH[2]}"
-                     fi
+                     rssi=$(iw dev "$iface" station dump 2>/dev/null | awk '/signal:/{print $2}' | head -1)
+                     quality=$(get_signal_quality "$rssi")
                  fi
              fi
-             # Fallback AP check
-             if [ -z "$ssid" ] && is_service_active "iwd"; then
-                 # Avoid heavy busctl/iwctl unless likely
-                 if [ -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network" ]; then
-                     local ap_output
-                     ap_output=$(iwctl ap "$iface" show 2>/dev/null || echo "")
-                     if grep -q "Started" <<< "$ap_output"; then
+             
+             # Fallback AP check (Optimized: Check file first)
+             if [ -z "$ssid" ] && [ -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network" ]; then
+                 if is_service_active "iwd"; then
+                     # Use busctl directly (faster than iwctl wrapper)
+                     local ap_status
+                     ap_status=$(busctl get-property net.connman.iwd "/net/connman/iwd/${iface}" \
+                               net.connman.iwd.AccessPoint Started 2>/dev/null | awk '{print $2}')
+                     
+                     if [ "$ap_status" == "true" ]; then
                          type="wifi_ap"
-                         ssid=$(awk '/Started/{print $2}' <<< "$ap_output")
+                         # Get SSID from config file to avoid another DBus call
+                         ssid=$(grep "^SSID=" "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network" | cut -d= -f2)
                      fi
                  fi
              fi
@@ -308,6 +343,9 @@ action_status() {
         [ -n "$frequency" ] && val_freq="\"$frequency\""
         obj+="\"frequency\": $val_freq,"
         
+        obj+="\"signal_quality\": \"$quality\","
+        [ -n "$rssi" ] && obj+="\"rssi\": \"$rssi\","
+        
         obj+="\"gateway\": \"$gw\","
         obj+="\"config\": \"$cfg_mode\","
         obj+="\"proxy\": $iface_proxy_json,"
@@ -318,15 +356,16 @@ action_status() {
         
         obj+="}"
         
-        if [ -n "$iface_json_accumulator" ]; then
-            iface_json_accumulator+=",$obj"
-        else
-            iface_json_accumulator="$obj"
-        fi
+        # Add to array
+        iface_json_array+=("$obj")
     done
     
-    # Wrap in array
-    local json_ifaces_array="[$iface_json_accumulator]"
+    # Join array with jq (single allocation, reliable)
+    # If array is empty, default to []
+    local json_ifaces_array="[]"
+    if [ ${#iface_json_array[@]} -gt 0 ]; then
+        json_ifaces_array=$(printf '%s\n' "${iface_json_array[@]}" | jq -s '.')
+    fi
     
     # Final assembly using ONE jq call to ensure validity and pretty print if needed
     jq -n \

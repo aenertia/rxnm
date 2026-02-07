@@ -1,0 +1,51 @@
+#!/bin/bash
+# RXNM Suspend/Resume Handler for WiFi Reconnection
+# Place in /usr/lib/systemd/system-sleep/ and ensure executable permissions
+
+case "$1/$2" in
+  pre/*)
+    # Before suspend - save current connection state
+    if [ -d /run/rocknix ]; then
+        mkdir -p /run/rocknix/resume_state
+        
+        # Check all wireless interfaces
+        for iface in /sys/class/net/*/wireless; do
+            [ -e "$iface" ] || continue
+            iface_name=$(basename "$(dirname "$iface")")
+            
+            # If connected, save the SSID
+            if command -v iwctl >/dev/null; then
+                if iwctl station "$iface_name" show 2>/dev/null | grep -q "Connected network"; then
+                    ssid=$(iwctl station "$iface_name" show 2>/dev/null | awk '/Connected network/{print $3}')
+                    if [ -n "$ssid" ]; then
+                        echo "$ssid" > "/run/rocknix/resume_state/${iface_name}.ssid"
+                    fi
+                fi
+            fi
+        done
+    fi
+    ;;
+    
+  post/*)
+    # After resume - restore connections
+    # Wait briefly for hardware/modules to wake up
+    sleep 2
+    
+    if [ -d /run/rocknix/resume_state ]; then
+        for state_file in /run/rocknix/resume_state/*.ssid; do
+            [ -e "$state_file" ] || continue
+            
+            iface_name=$(basename "$state_file" .ssid)
+            ssid=$(cat "$state_file")
+            
+            if [ -n "$ssid" ] && command -v iwctl >/dev/null; then
+                # Trigger reconnection in background (passphrase already in iwd config)
+                logger -t rxnm-resume "Restoring connection to $ssid on $iface_name"
+                iwctl station "$iface_name" connect "$ssid" >/dev/null 2>&1 &
+            fi
+            
+            rm -f "$state_file"
+        done
+    fi
+    ;;
+esac
