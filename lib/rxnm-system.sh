@@ -58,10 +58,13 @@ action_setup() {
     
     [ -d /run/systemd/netif ] && chown -R systemd-network:systemd-network /run/systemd/netif 2>/dev/null
 
-    # Optimization: Batch copy wireless profiles
-    if [ -d "$STORAGE_WIFI_DIR" ]; then
-        local psk_files=("${STORAGE_WIFI_DIR}"/*.psk)
-        [ ${#psk_files[@]} -gt 0 ] && cp "${psk_files[@]}" "${STATE_DIR}/iwd/" 2>/dev/null
+    # Initial Precedence Sync: Profile (Level 1) + Manual Root (Level 2) -> RAM (Active)
+    if type action_profile &>/dev/null; then
+        action_profile "boot"
+    else
+        # Fallback if profile lib not loaded yet (e.g. direct setup call)
+        source "${LIB_DIR}/rxnm-profiles.sh"
+        action_profile "boot"
     fi
 
     if [ -f "${CONF_DIR}/hosts.conf" ]; then
@@ -91,23 +94,26 @@ action_stop() {
 
 # --- FILE OPERATIONS ---
 ensure_dirs() {
-    [ -d "$STORAGE_NET_DIR" ] || mkdir -p "$STORAGE_NET_DIR"
+    # Active State (RAM)
+    [ -d "$EPHEMERAL_NET_DIR" ] || mkdir -p "$EPHEMERAL_NET_DIR"
+    
+    # Persistent Storage (Disk)
+    [ -d "$PERSISTENT_NET_DIR" ] || mkdir -p "$PERSISTENT_NET_DIR"
     [ -d "${STATE_DIR}/iwd" ] || mkdir -p "${STATE_DIR}/iwd"
     [ -d "${STORAGE_PROFILES_DIR}" ] || mkdir -p "${STORAGE_PROFILES_DIR}"
     [ -d "${STORAGE_RESOLVED_DIR}" ] || mkdir -p "${STORAGE_RESOLVED_DIR}"
 }
 
 check_paths() {
-    if [ ! -L "$ETC_NET_DIR" ] && [ "$ETC_NET_DIR" != "$STORAGE_NET_DIR" ]; then
-        if [ "$(stat -c %i "$ETC_NET_DIR")" != "$(stat -c %i "$STORAGE_NET_DIR" 2>/dev/null)" ]; then
-            log_warn "$ETC_NET_DIR does not point to $STORAGE_NET_DIR. Persistence may fail."
-        fi
+    # Verify that networkd is actually looking at our ephemeral dir
+    if [ ! -L "$ETC_NET_DIR" ] && [ "$ETC_NET_DIR" != "$EPHEMERAL_NET_DIR" ]; then
+        log_warn "$ETC_NET_DIR is not pointing to $EPHEMERAL_NET_DIR. Ephemeral state may not apply."
     fi
 }
 
 fix_permissions() {
-    if [ -d "$STORAGE_NET_DIR" ]; then
-        find "$STORAGE_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' \) -exec chmod 644 {} + 2>/dev/null
+    if [ -d "$EPHEMERAL_NET_DIR" ]; then
+        find "$EPHEMERAL_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' \) -exec chmod 644 {} + 2>/dev/null
     fi
     if [ -d "${STATE_DIR}/iwd" ]; then
         find "${STATE_DIR}/iwd" -type f \( -name '*.psk' -o -name '*.8021x' \) -exec chmod 600 {} + 2>/dev/null
@@ -138,13 +144,16 @@ secure_write() {
     local content="$2"
     local perms="${3:-644}"
     
-    # Hardened path check
-    if [[ "$dest" != "${STORAGE_NET_DIR}/"* ]] && \
+    # Path guard: only allow writes to Ephemeral, State, or Config paths
+    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
        [[ "$dest" != "${STATE_DIR}/"* ]] && \
        [[ "$dest" != "${CONF_DIR}/"* ]]; then
          log_error "Illegal file write attempted: $dest"
          return 1
     fi
+    
+    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
     
     # Use mktemp for atomicity
     local tmp

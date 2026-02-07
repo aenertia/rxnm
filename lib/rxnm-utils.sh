@@ -331,12 +331,12 @@ sanitize_ssid() {
 # Refined json_escape: Use JQ for robust encoding if string is complex
 json_escape() {
     local s="$1"
-    # Simple strings can be handled via bash for speed
+    # Simple alphanumeric strings can be handled via bash for speed
     if [[ ! "$s" =~ [^a-zA-Z0-9._-] ]]; then
         printf '%s' "$s"
         return
     fi
-    # Complex strings use JQ to ensure UTF-8 and control char compliance
+    # Complex strings use JQ to ensure UTF-8 and control char compliance (RFC 8259)
     printf '%s' "$s" | jq -R . | sed 's/^"//;s/"$//'
 }
 

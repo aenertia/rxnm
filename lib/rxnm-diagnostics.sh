@@ -48,12 +48,12 @@ action_check_portal() {
     # 3. TIER 3: SEQUENTIAL FALLBACK
     for fallback in "${fallback_urls[@]}"; do
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
-            json_success "{\"portal_detected\": false, "status": "online", "method": "fallback", "host": "$fallback"}"
+            json_success "{\"portal_detected\": false, \"status\": \"online\", \"method\": \"fallback\", \"host\": \"$fallback\"}"
             return 0
         fi
     done
 
-    json_success '{"portal_detected": false, "status": "offline"}'
+    json_success '{"portal_detected": false, \"status\": \"offline\"}'
 }
 
 action_check_internet() {
@@ -144,8 +144,6 @@ action_status() {
             /Interface/ {iface=$2}
             /channel/ {print iface, $2, $4; iface=""}
         ')
-        
-        # Parse station dump for RSSI (one call per iface is unavoidable if connected, but we can skip unrelated)
     fi
 
     declare -A IP_MAP
@@ -274,16 +272,27 @@ action_status() {
             ssid="Members: ${BRIDGE_MEMBERS[$iface]:-none}"
         fi
 
-        local cfg_mode="dhcp"
+        local cfg_mode="system_default"
+        local storage_origin="ephemeral"
+        
+        # Detect Configuration State (Active RAM vs Persistent Base)
+        if [ -f "${EPHEMERAL_NET_DIR}/75-config-${iface}.network" ]; then
+            cfg_mode="active_ephemeral"
+            # Check if this RAM file actually matches a persistent manual override
+            if [ -f "${PERSISTENT_NET_DIR}/75-config-${iface}.network" ]; then
+                storage_origin="persistent_root"
+            fi
+        elif [ -f "${PERSISTENT_NET_DIR}/75-config-${iface}.network" ]; then
+            cfg_mode="manual_root_only"
+        fi
+
         if [[ "$type" == "tailscale" || "$type" == "zerotier" ]]; then
             cfg_mode="managed_external"
-        elif [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ]; then 
-            if grep -q "Address=" "${STORAGE_NET_DIR}/75-config-${iface}.network"; then cfg_mode="static"; fi
         fi
         
         local iface_proxy_json="null"
-        if [ -f "${STORAGE_NET_DIR}/proxy-${iface}.conf" ]; then
-            iface_proxy_json=$(get_proxy_json "${STORAGE_NET_DIR}/proxy-${iface}.conf")
+        if [ -f "${EPHEMERAL_NET_DIR}/proxy-${iface}.conf" ]; then
+            iface_proxy_json=$(get_proxy_json "${EPHEMERAL_NET_DIR}/proxy-${iface}.conf")
         fi
         
         # Build JSON fragment using pure bash to avoid forks
@@ -308,7 +317,7 @@ action_status() {
         
         local members="${BRIDGE_MEMBERS[$iface]:-}"
         
-        # Safe escaping without sed
+        # Safe escaping
         local safe_ssid
         safe_ssid=$(json_escape "$ssid")
         local safe_members
@@ -348,6 +357,7 @@ action_status() {
         
         obj+="\"gateway\": \"$gw\","
         obj+="\"config\": \"$cfg_mode\","
+        obj+="\"origin\": \"$storage_origin\","
         obj+="\"proxy\": $iface_proxy_json,"
         
         local val_memb="null"

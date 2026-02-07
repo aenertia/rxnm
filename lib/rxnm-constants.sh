@@ -8,6 +8,10 @@
 : "${ETC_NET_DIR:=/etc/systemd/network}"
 : "${RUN_DIR:=/run/rocknix}"
 
+# Ephemeral Configuration (RAM-backed for speed and NAND longevity)
+# systemd-networkd processes /run/systemd/network with higher priority than /usr/lib
+: "${EPHEMERAL_NET_DIR:=/run/systemd/network}"
+
 # Logging Levels
 export LOG_LEVEL_ERROR=0
 export LOG_LEVEL_WARN=1
@@ -61,16 +65,20 @@ fi
 : "${DEFAULT_GW_V4:=192.168.212.1/24}"
 
 # Derived Paths
-STORAGE_NET_DIR="${CONF_DIR}/network"
-STORAGE_PROFILES_DIR="${STORAGE_NET_DIR}/profiles"
-STORAGE_WIFI_DIR="${STORAGE_NET_DIR}/wifi"
+# NOTE: For "Ephemeral by Default", STORAGE_NET_DIR for active ops points to RAM.
+# Persistent storage is now accessed explicitly via PERSISTENT_NET_DIR.
+PERSISTENT_NET_DIR="${CONF_DIR}/network"
+STORAGE_NET_DIR="${EPHEMERAL_NET_DIR}"
+
+STORAGE_PROFILES_DIR="${PERSISTENT_NET_DIR}/profiles"
+STORAGE_WIFI_DIR="${PERSISTENT_NET_DIR}/wifi"
 STORAGE_RESOLVED_DIR="${CONF_DIR}/resolved.conf.d"
 STORAGE_RESOLVED_FILE="${STORAGE_RESOLVED_DIR}/global-dns.conf"
 STORAGE_COUNTRY_FILE="${STORAGE_WIFI_DIR}/country"
 STORAGE_PROXY_GLOBAL="${CONF_DIR}/proxy.conf"
-STORAGE_HOST_NET_FILE="${STORAGE_NET_DIR}/70-wifi-host.network"
-STORAGE_PAN_NET_FILE="${STORAGE_NET_DIR}/70-bluetooth-pan.network"
-STORAGE_BT_PIN_FILE="${STORAGE_NET_DIR}/bluetooth.pin"
+STORAGE_HOST_NET_FILE="${PERSISTENT_NET_DIR}/70-wifi-host.network"
+STORAGE_PAN_NET_FILE="${PERSISTENT_NET_DIR}/70-bluetooth-pan.network"
+STORAGE_BT_PIN_FILE="${PERSISTENT_NET_DIR}/bluetooth.pin"
 
 # Locking
 GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
