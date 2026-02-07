@@ -86,6 +86,9 @@ ARG_HTTPS=""
 ARG_NOPROXY=""
 ARG_SHARE="false"
 
+# Capture positional args for intuitive CLI mapping
+POS_ARGS=()
+
 # We parse args first to determine what to load and do
 ARGS=("$@")
 
@@ -332,12 +335,66 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         --share) ARG_SHARE="true"; shift ;;
-        enable|disable|save|load|list|delete) SUB_CMD="$1"; shift ;;
-        *) [ -z "$CMD" ] && CMD="status"; shift ;;
+        enable|disable|save|load|list|delete) 
+            # If we already have a subcmd (e.g. pan-net enable), this might be a positional arg for something else?
+            # But usually these keywords are unique subcommands.
+            if [ -n "$CMD" ] && [ -z "$SUB_CMD" ]; then
+                SUB_CMD="$1"
+            elif [ -z "$CMD" ]; then
+                # Handle edge case where subcommand is first? unlikely with this switch structure
+                CMD="$1"
+            else
+                POS_ARGS+=("$1")
+            fi
+            shift 
+            ;;
+        *)
+            # Catch-all for positional arguments
+            if [ -z "$CMD" ]; then
+                # Default to status if no command provided? No, likely an error or 'rxnm status' implied?
+                # But here we assume explicit commands. If $1 is not a flag and not a known command, treat as pos arg.
+                POS_ARGS+=("$1")
+            elif [[ "$1" == -* ]]; then
+                 # Unknown flag
+                 echo "Unknown option: $1" >&2
+                 action_help; exit 1
+            else
+                 # Positional arg for the current command
+                 POS_ARGS+=("$1")
+            fi
+            shift 
+            ;;
     esac
 done
 
 [ -z "$CMD" ] && { [ -t 0 ] && CMD="status" || CMD="start"; }
+
+# --- POSITIONAL ARGUMENT MAPPING ---
+# Intuitive CLI: Map positional args to their logical flags based on command context.
+
+case "$CMD" in
+    connect)
+        # rxnm connect <ssid> [password]
+        [ -z "$ARG_SSID" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_SSID="${POS_ARGS[0]}"
+        [ -z "$ARG_PASS" ] && [ ${#POS_ARGS[@]} -ge 2 ] && ARG_PASS="${POS_ARGS[1]}"
+        ;;
+    forget)
+        # rxnm forget <ssid>
+        [ -z "$ARG_SSID" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_SSID="${POS_ARGS[0]}"
+        ;;
+    profile)
+        # rxnm profile load <name>
+        [ -z "$ARG_NAME" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_NAME="${POS_ARGS[0]}"
+        ;;
+    create-bridge|create-bond|create-vlan|delete-link)
+        # rxnm create-bridge <name>
+        [ -z "$ARG_NAME" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_NAME="${POS_ARGS[0]}"
+        ;;
+    set-country)
+        # rxnm set-country <code/iso>
+        [ -z "$ARG_CODE" ] && [ ${#POS_ARGS[@]} -ge 1 ] && ARG_CODE="${POS_ARGS[0]}"
+        ;;
+esac
 
 # --- INITIALIZATION ---
 

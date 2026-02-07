@@ -253,7 +253,8 @@ action_scan() {
         ] | unique_by(.ssid) | sort_by(-.signal)
     ')
     
-    json_success "$result"
+    # Fix: Wrap array result in an object to prevent "object + array" jq errors in json_success
+    json_success "{\"results\": $result}"
     return 0
 }
 
