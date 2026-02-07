@@ -1,38 +1,77 @@
 # ==============================================================================
-# STATUS & DIAGNOSTICS
+# REFINED STATUS & DIAGNOSTICS
 # ==============================================================================
 
+# Optimized action_check_portal to minimize outbound traffic and latency.
+# Logic: Fast-check first -> Portal check only on failure -> Sequential fallback.
 action_check_portal() {
     local iface="$1"
-    local url="http://connectivitycheck.gstatic.com/generate_204"
-    local curl_opts=(-s -o /dev/null -w "%{http_code}" --max-time 5)
+    local primary_url="http://connectivitycheck.gstatic.com/generate_204"
+    local fallback_urls=(
+        "http://nmcheck.gnome.org/check_network_status.txt"
+        "http://detectportal.firefox.com/success.txt"
+    )
     
-    if [ -n "$iface" ]; then
-        curl_opts+=(--interface "$iface")
+    # 1. TIER 1: FAST CHECK (Primary URL, No Redirects)
+    # We use -L- but start with a check that expects a 204.
+    local curl_base_opts=(-s -o /dev/null --max-time 3)
+    [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
+
+    # Quick probe: Is the internet just "working"?
+    if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
+        json_success '{"portal_detected": false, "status": "online", "method": "fast_path"}'
+        return 0
     fi
+
+    # 2. TIER 2: PORTAL DETECTION (Follow Redirects)
+    # Only run if the fast path failed. We check the primary URL again with redirect tracking.
+    # The -L flag effectively "visits" the portal page, which for some simple gateways
+    # is enough to authorize the session ("View to connect").
+    local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
+    local result
+    result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
     
-    local http_code
-    http_code=$(curl "${curl_opts[@]}" "$url" 2>/dev/null || echo "000")
-    
-    if [ "$http_code" == "204" ]; then
-        json_success '{"portal_detected": false, "status": "online"}'
-    elif [ "$http_code" == "000" ]; then
-        json_success '{"portal_detected": false, "status": "offline"}'
-    else
-        local ack_attempt="failed"
-        if curl -L "${curl_opts[@]}" "$url" >/dev/null 2>&1; then
-             http_code=$(curl "${curl_opts[@]}" "$url" 2>/dev/null || echo "000")
-             if [ "$http_code" == "204" ]; then
-                 ack_attempt="success"
-             fi
-        fi
+    local code="${result%%:*}"
+    local effective_url="${result#*:}"
+
+    # CASE A: Late Success (Tier 1 failed, but Tier 2 got the 204)
+    # This happens if the redirect chain eventually leads back to the success page.
+    if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
+        json_success '{"portal_detected": false, "status": "online", "method": "tier2_check"}'
+        return 0
+    fi
+
+    # CASE B: Redirect Detected (Standard Portal) OR DNS Hijack (Code != 204)
+    if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
         
-        if [ "$ack_attempt" == "success" ]; then
-             json_success '{"portal_detected": true, "auto_ack": true, "status": "online"}'
-        else
-             json_success '{"portal_detected": true, "auto_ack": false, "status": "portal_locked", "http_code": "'"$http_code"'"}'
+        # --- POST-INTERACTION VERIFICATION ---
+        # We just visited the portal page via curl -L. For simple "click-through" or 
+        # "view-through" portals, this might have been enough to authorize the MAC.
+        # We try the fast check ONE more time to see if we are now online.
+        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
+             json_success "{\"portal_detected\": true, \"auto_ack\": true, \"status\": \"online\", \"target\": \"$effective_url\", \"note\": \"authorized_by_probe\"}"
+             return 0
         fi
+
+        # If still not 204, we are truly locked behind the portal.
+        local hijack_flag="false"
+        if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
+
+        json_success "{\"portal_detected\": true, \"auto_ack\": false, \"status\": \"portal_locked\", \"target\": \"$effective_url\", \"http_code\": \"$code\", \"hijacked\": $hijack_flag}"
+        return 0
     fi
+
+    # 3. TIER 3: SEQUENTIAL FALLBACK (Avoid Regional Outages)
+    # If the primary check failed entirely (000/Timeout), try secondary hosts one-by-one.
+    for fallback in "${fallback_urls[@]}"; do
+        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
+            json_success "{\"portal_detected\": false, \"status\": \"online\", \"method\": \"fallback\", \"host\": \"$fallback\"}"
+            return 0
+        fi
+    done
+
+    # If everything failed
+    json_success '{"portal_detected": false, "status": "offline"}'
 }
 
 action_check_internet() {
