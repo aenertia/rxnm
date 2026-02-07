@@ -129,6 +129,8 @@ Options:
   --password-stdin      Read password from stdin (Secure)
   --hidden              Connect to hidden SSID
   --interface <iface>   Target interface (Auto-detected if omitted)
+  --ip <cidr>           Custom IP for AP mode
+  --share               Enable NAT/Masquerading for AP
 EOF
             ;;
         interface)
@@ -140,6 +142,7 @@ Actions:
   set dhcp              Enable DHCP
   set static <ip>       Set Static IP (CIDR format)
   enable / disable      Set link state
+  list                  List all interfaces
 
 Options:
   --gateway <ip>        Set Gateway
@@ -163,17 +166,21 @@ Options:
   --interface <iface>   Scope profile to specific interface
 EOF
             ;;
-        bridge|bond|vlan|vrf)
+        bridge|bond|vlan|vrf|macvlan|ipvlan|veth)
             cat <<EOF
 Usage: rxnm $cat <action> <name> [options]
 
 Actions:
   create <name>         Create new virtual device
   delete <name>         Delete device
-  add-member <iface>    Add interface to $cat
-  list                  List devices
+  add-member <iface>    Add interface to $cat (Bridge/Bond/VRF only)
+  list                  List devices (via rxnm interface list)
 
-Options vary by type (e.g., --id for VLAN, --mode for Bond).
+Options:
+  --parent <iface>      Parent interface (VLAN/MacVLAN/IPVLAN)
+  --id <vlan-id>        VLAN ID (1-4094)
+  --mode <mode>         Mode for Bond (active-backup, etc) or MacVLAN
+  --table <id>          Routing table ID for VRF
 EOF
             ;;
         vpn)
@@ -186,7 +193,49 @@ Actions:
   delete <name>         Alias for disconnect
 
 Options:
-  --private-key, --peer-key, --endpoint, --allowed-ips, --address
+  --private-key <key>   WireGuard Private Key
+  --peer-key <key>      Peer Public Key
+  --endpoint <addr:port> Remote Endpoint
+  --allowed-ips <cidr>  Allowed IPs (e.g. 0.0.0.0/0)
+  --address <cidr>      Interface Address
+EOF
+            ;;
+        tun|tap)
+             cat <<EOF
+Usage: rxnm $cat create <name> [options]
+       rxnm $cat delete <name>
+
+Options:
+  --user <user>         Owner of the interface
+  --group <group>       Group owner
+EOF
+            ;;
+        bluetooth)
+            cat <<EOF
+Usage: rxnm bluetooth <action> [options]
+
+Actions:
+  scan                  Scan for devices
+  pair <mac>            Pair with device
+  unpair <mac>          Unpair device
+  pan enable            Enable PAN Tethering
+  pan disable           Disable PAN Tethering
+
+Options (for pan enable):
+  --mode <client|host>  Client (connect to phone) or Host (share net)
+  --share               Enable NAT (Host mode only)
+EOF
+            ;;
+        system)
+            cat <<EOF
+Usage: rxnm system <action> [options]
+
+Actions:
+  status                Show network status
+  check internet        Check internet connectivity
+  check portal          Check for captive portal
+  reload                Reload network configuration
+  proxy set             Configure global/interface proxy
 EOF
             ;;
         *)

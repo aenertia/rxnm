@@ -300,20 +300,29 @@ sanitize_ssid() {
     echo "$safe"
 }
 
-# Safe JSON escape without process forking (sed is too slow/buggy on BusyBox)
+# Safe JSON escape without process forking for speed, but strips invalid chars
 json_escape() {
     local s="$1"
-    # Remove null bytes first (invalid in JSON strings)
-    s="${s//$'\0'/}"
-    # Pure bash replacement for speed and safety
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\t'/\\t}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    # Rare control chars
-    s="${s//$'\f'/\\f}"
-    s="${s//$'\b'/\\b}"
+    
+    # 1. Handle common control characters manually (RFC 8259)
+    s="${s//\\/\\\\}"  # Reverse solidus
+    s="${s//\"/\\\"}"  # Quotation mark
+    s="${s//$'\n'/\\n}" # Line feed
+    s="${s//$'\r'/\\r}" # Carriage return
+    s="${s//$'\t'/\\t}" # Tab
+    s="${s//$'\b'/\\b}" # Backspace
+    s="${s//$'\f'/\\f}" # Form feed
+    
+    # 2. Safety Strip: Remove remaining unescaped control characters (0x00-0x1F)
+    # This prevents invalid JSON structure if an odd character like \v or \a slips in.
+    # While we lose that specific character, we preserve the integrity of the JSON payload.
+    # Using 'tr' here is slightly slower than pure bash but guarantees validity.
+    # To optimize: only run tr if necessary? No, just pipe.
+    # Actually, to minimize forking, we can rely on bash pattern matching removal if 4.4+
+    # But tr is safest for embedded compliance.
+    
+    s=$(printf '%s' "$s" | tr -d '[:cntrl:]')
+    
     printf '%s' "$s"
 }
 

@@ -201,9 +201,15 @@ action_scan() {
         return 0
     fi
 
-    local objects_json
+    # Fix: Safe busctl execution to prevent crashes on empty output or errors
+    local objects_json=""
     if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
-        json_error "Failed to query IWD"
+        json_error "Failed to query IWD via DBus"
+        return 0
+    fi
+    
+    if [ -z "$objects_json" ]; then
+        json_error "IWD returned empty data"
         return 0
     fi
 
@@ -229,7 +235,11 @@ action_scan() {
         sleep "$sleep_sec"
     done
     
-    objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+    # Re-fetch objects after scan completion
+    if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
+        json_error "Failed to fetch scan results"
+        return 0
+    fi
     
     # Standardize output for status checks
     local result
@@ -263,10 +273,15 @@ action_list_known_networks() {
         return 0
     fi
 
-    local objects_json
+    local objects_json=""
     if ! objects_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD"
         return 0
+    fi
+    
+    if [ -z "$objects_json" ]; then
+         json_success '{"networks": []}'
+         return 0
     fi
 
     # Extract KnownNetwork objects

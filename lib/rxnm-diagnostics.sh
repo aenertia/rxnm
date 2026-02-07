@@ -48,7 +48,7 @@ action_check_portal() {
     # 3. TIER 3: SEQUENTIAL FALLBACK
     for fallback in "${fallback_urls[@]}"; do
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
-            json_success "{\"portal_detected\": false, \"status\": \"online\", \"method\": \"fallback\", \"host\": \"$fallback\"}"
+            json_success "{\"portal_detected\": false, "status": "online", "method": "fallback", "host": "$fallback"}"
             return 0
         fi
     done
@@ -57,6 +57,25 @@ action_check_portal() {
 }
 
 action_check_internet() {
+    # 0. TIER 0: NETWORKCTL STATUS (FASTEST)
+    # Check if we even have a routable link before attempting curl
+    if command -v networkctl >/dev/null; then
+         local operstate
+         operstate=$(networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
+         # States: routable, degraded (sometimes ok), online.
+         # Bad states: off, no-carrier, dormant, carrier (no IP).
+         case "$operstate" in
+            off|no-carrier|dormant|carrier)
+                # No IP or No Link - Fail fast (0ms latency)
+                json_success '{"ipv4": false, "ipv6": false, "connected": false, "reason": "local_link_down", "state": "'"$operstate"'"}'
+                return 0
+                ;;
+            routable|online)
+                # We have IP and Route, proceed to verify upstream
+                ;;
+         esac
+    fi
+
     local curl_fmt="%{http_code}:%{time_total}"
     local target="http://clients3.google.com/generate_204"
     local v4="false" v6="false"
