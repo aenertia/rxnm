@@ -48,53 +48,32 @@ _task_set_static() {
     local ssid="$5"
     local domains="$6"
     local routes="$7"
-    local mdns="${8:-yes}"
-    local llmnr="${9:-yes}"
+    local mdns="$8"
+    local llmnr="$9"
     local metric="${10}"
     local mtu="${11}"
     local mac="${12}"
     local ipv6_priv="${13}"
     local dhcp_id="${14}"
-    # Static interfaces usually don't do client PD, so we don't expose it here yet.
 
-    [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
+    # 1. Cleanup conflicting configs
+    # Remove generic/DHCP config if it exists
+    rm -f "${STORAGE_NET_DIR}/75-config-${iface}.network" 2>/dev/null
+    rm -f "${STORAGE_NET_DIR}/75-config-${iface}-"*.network 2>/dev/null
     
-    # Handle Multiple IPs (Aliases) by iterating through comma-separated list
-    local final_ips=""
-    local IFS=','
-    read -ra ADDR_LIST <<< "$ip"
-    for addr in "${ADDR_LIST[@]}"; do
-        # Trim spaces
-        addr="${addr// /}"
-        [ -z "$addr" ] && continue
-        
-        # Default CIDR /24 if missing
-        if [[ "$addr" != *"/"* ]]; then addr="${addr}/24"; fi
-        
-        # Validate individual IP (CIDR aware)
-        if ! validate_ip "$addr"; then
-             return 1
-        fi
-        
-        if [ -z "$final_ips" ]; then final_ips="$addr"; else final_ips="$final_ips,$addr"; fi
-    done
-    unset IFS
-
-    [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
-    [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
+    ensure_dirs
     
-    # Sane Default Metrics
-    if [ -z "$metric" ]; then
-        if [[ "$iface" == wlan* ]] || [[ "$iface" == wlp* ]] || [[ "$iface" == uap* ]]; then
-             metric="600"
-        elif [[ "$iface" == eth* ]] || [[ "$iface" == en* ]]; then
-             metric="100"
-        fi
-    fi
-
-    with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    # 2. Build Content
+    # build_network_config args: 
+    # iface ssid dhcp desc addresses gateway dns bridge vlan domains mac_policy routes mdns llmnr bond metric vrf mtu mac priv dhcp_id
+    local content
+    content=$(build_network_config "$iface" "$ssid" "no" "Static Configuration" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id")
     
-    json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
+    # 3. Write File to 75-static-* to match test expectations and avoid conflict with dhcp cleanup
+    local filename="${STORAGE_NET_DIR}/75-static-${iface}.network"
+    secure_write "$filename" "$content" "644"
+    
+    reconfigure_iface "$iface"
 }
 
 _task_set_link() {
@@ -236,7 +215,42 @@ action_set_static() {
 
     [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
     
+    # Handle Multiple IPs (Aliases) by iterating through comma-separated list
+    local final_ips=""
+    local IFS=','
+    read -ra ADDR_LIST <<< "$ip"
+    for addr in "${ADDR_LIST[@]}"; do
+        # Trim spaces
+        addr="${addr// /}"
+        [ -z "$addr" ] && continue
+        
+        # Default CIDR /24 if missing
+        if [[ "$addr" != *"/"* ]]; then addr="${addr}/24"; fi
+        
+        # Validate individual IP (CIDR aware)
+        if ! validate_ip "$addr"; then
+             return 1
+        fi
+        
+        if [ -z "$final_ips" ]; then final_ips="$addr"; else final_ips="$final_ips,$addr"; fi
+    done
+    unset IFS
+
+    [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
+    [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
+    
+    # Sane Default Metrics
+    if [ -z "$metric" ]; then
+        if [[ "$iface" == wlan* ]] || [[ "$iface" == wlp* ]] || [[ "$iface" == uap* ]]; then
+             metric="600"
+        elif [[ "$iface" == eth* ]] || [[ "$iface" == en* ]]; then
+             metric="100"
+        fi
+    fi
+
     with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    
+    json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
 }
 
 action_set_link() {

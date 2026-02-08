@@ -244,12 +244,14 @@ action_status() {
         (($wifi_network_info // {}) * ($wifi_station_info // {})) as $full_wifi |
 
         # Step 2: Process Systemd Network Data and Merge
-        
+        # REMEDIATION: Handle networkctl status returning {"Interfaces": [...]} vs list returning [...]
+        ($net | if .Interfaces then .Interfaces else . end) as $normalized_net |
+
         {
             success: true,
             hostname: $hn,
             global_proxy: $gp,
-            interfaces: ($net | map(
+            interfaces: ($normalized_net | map(
                 select($filter == "" or .Name == $filter) |
                 {
                     (.Name): {
