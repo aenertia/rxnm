@@ -328,6 +328,7 @@ CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
 # 1. Plugin Dispatch (Highest Priority)
 # Check if a plugin exists for this category (Extension or Override)
+# REMEDIATION: 'set -e' caused a crash here if find_plugin returned 1. Added || true.
 PLUGIN_EXEC=$(find_plugin "$CATEGORY" || true)
 
 if [ -n "$PLUGIN_EXEC" ]; then
@@ -344,7 +345,17 @@ if [ -n "$PLUGIN_EXEC" ]; then
 fi
 
 # 2. Built-in Dispatch
-if [[ ! " ${CATS[*]} " =~ " ${CATEGORY} " ]]; then
+# REMEDIATION: The regex match [[ ! " ${CATS[*]} " =~ " ${CATEGORY} " ]] fails when IFS
+# contains newlines (set globally in this script). Switched to an explicit loop.
+IS_VALID_CAT=false
+for valid_cat in "${CATS[@]}"; do
+    if [[ "$valid_cat" == "$CATEGORY" ]]; then
+        IS_VALID_CAT=true
+        break
+    fi
+done
+
+if [ "$IS_VALID_CAT" = false ]; then
     if [ -z "$RAW_CMD" ] || [ "$RAW_CMD" == "status" ]; then
         CATEGORY="system"
         set -- "status"
@@ -721,7 +732,7 @@ case "$CATEGORY" in
              USER=""; GROUP=""
              if [ "$ACTION" == "delete" ]; then action_delete_vpn "$NAME"; exit 0; fi
              while [[ $# -gt 0 ]]; do
-                case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift;; esac
+                case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift ;; esac
              done
              [ "$KIND" == "tun" ] && action_create_tun "$NAME" "$USER" "$GROUP"
              [ "$KIND" == "tap" ] && action_create_tap "$NAME" "$USER" "$GROUP"
