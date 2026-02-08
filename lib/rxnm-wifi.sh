@@ -419,6 +419,12 @@ action_scan() {
     fi
     
     local result
+    # REMEDIATION: JSON Schema Non-Compliance
+    # Implemented scaled signal strength mapping:
+    #   -90 dBm -> 0%
+    #   -30 dBm -> 100%
+    #   Calculation: (dBm - (-90)) * 100 / (-30 - (-90)) = (dBm + 90) * 100 / 60
+    #   Clamped strictly between 0 and 100.
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         [
             .data[] | to_entries[] | 
@@ -432,7 +438,7 @@ action_scan() {
                 signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100),
                 strength_pct: (
                     (.value["net.connman.iwd.Network"].SignalStrength.data // -100) as $sig |
-                    ($sig + 100) * 2 |
+                    (($sig + 90) * 100 / 60) |
                     if . > 100 then 100 elif . < 0 then 0 else . end | floor
                 )
             }
@@ -526,7 +532,6 @@ action_connect() {
         if [[ -z "$out" ]]; then
             local config_exists="false"
             
-            # REMEDIATION: The "First Connect" flow
             # Check for config in EPHEMERAL (RAM/Active) OR PERSISTENT (Disk/Saved) layers.
             # If a user has a static IP config saved in persistent storage, we shouldn't overwrite it
             # with default DHCP just because it hasn't been loaded into RAM yet.
@@ -543,6 +548,18 @@ action_connect() {
                  log_info "No network configuration found for $iface. Applying default DHCP."
                  if type _task_set_dhcp &>/dev/null; then
                      with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
+                     
+                     # REMEDIATION: The "Link-Local" Logic Bug
+                     # Explicitly force a reconfigure/reload of networkd to ensure the newly created
+                     # ephemeral configuration is picked up immediately. This guards against
+                     # race conditions where networkd hasn't noticed the file creation event yet.
+                     # Constraint: Check if networkd is actually running (we might be early boot)
+                     if command -v networkctl >/dev/null; then
+                         if is_service_active "systemd-networkd"; then
+                             timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
+                             timeout 5s networkctl reload >/dev/null 2>&1
+                         fi
+                     fi
                  else
                      log_warn "Cannot apply default DHCP: Interface library not loaded."
                  fi
