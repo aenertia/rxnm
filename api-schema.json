@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "RXNM Unified API Schema",
-  "description": "Comprehensive schema for all RXNM JSON outputs including Status, WiFi, Bluetooth, Profiles, and Configuration Actions.",
+  "description": "Comprehensive schema for all RXNM JSON outputs including Status, WiFi, Bluetooth, Profiles, Diagnostics, and Configuration Actions.",
   "type": "object",
   "required": [
     "success"
@@ -38,6 +38,10 @@
       "description": "Output of 'rxnm wifi list'"
     },
     {
+      "$ref": "#/definitions/WifiP2PPeersResponse",
+      "description": "Output of 'rxnm wifi p2p scan'"
+    },
+    {
       "$ref": "#/definitions/BluetoothScanResponse",
       "description": "Output of 'rxnm bluetooth scan'"
     },
@@ -51,7 +55,7 @@
     },
     {
       "$ref": "#/definitions/ActionResponse",
-      "description": "Generic acknowledgment for state changing commands (connect, set, create, delete)"
+      "description": "Generic acknowledgment for state changing commands (connect, set, create, delete, dpp, p2p)"
     }
   ],
   "definitions": {
@@ -257,6 +261,38 @@
         }
       }
     },
+    "WifiP2PPeersResponse": {
+      "type": "object",
+      "required": [
+        "peers"
+      ],
+      "properties": {
+        "peers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "mac"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "mac": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "connected": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
     "BluetoothScanResponse": {
       "type": "object",
       "required": [
@@ -330,6 +366,33 @@
         },
         "method": {
           "type": "string"
+        },
+        "auto_ack": {
+          "type": "boolean",
+          "description": "If true, RXNM automatically acknowledged the portal (e.g. transparent proxy)"
+        },
+        "hijacked": {
+          "type": "boolean",
+          "description": "True if redirect URL matches the probe URL (unusual portal behavior)"
+        },
+        "http_code": {
+          "type": "string",
+          "description": "HTTP Status code returned during probe"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Explanation for offline status (e.g., local_link_down)"
+        },
+        "state": {
+          "type": "string",
+          "description": "Systemd networkd operational state during check"
+        },
+        "note": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string",
+          "description": "Host successfully reached in fallback mode"
         }
       }
     },
@@ -382,6 +445,10 @@
         "ipv6_privacy": {
           "type": "string"
         },
+        "ipv6_pd": {
+          "type": "string",
+          "description": "Prefix Delegation setting/status (yes/no)"
+        },
         "dhcp_id": {
           "type": "string"
         },
@@ -395,7 +462,8 @@
           "type": "string"
         },
         "peer": {
-          "type": "string"
+          "type": "string",
+          "description": "Peer name for P2P or veth"
         },
         "user": {
           "type": "string"
