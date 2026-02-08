@@ -1,0 +1,460 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RXNM Unified API Schema",
+  "description": "Comprehensive schema for all RXNM JSON outputs including Status, WiFi, Bluetooth, Profiles, and Configuration Actions.",
+  "type": "object",
+  "required": [
+    "success"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "description": "Global success indicator."
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message if success is false."
+    },
+    "hint": {
+      "type": "string",
+      "description": "User-friendly suggestion for resolving the error."
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "Process exit code if success is false."
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/definitions/SystemStatusResponse",
+      "description": "Output of 'rxnm system status'"
+    },
+    {
+      "$ref": "#/definitions/WifiScanResponse",
+      "description": "Output of 'rxnm wifi scan'"
+    },
+    {
+      "$ref": "#/definitions/WifiKnownResponse",
+      "description": "Output of 'rxnm wifi list'"
+    },
+    {
+      "$ref": "#/definitions/BluetoothScanResponse",
+      "description": "Output of 'rxnm bluetooth scan'"
+    },
+    {
+      "$ref": "#/definitions/ProfileListResponse",
+      "description": "Output of 'rxnm profile list'"
+    },
+    {
+      "$ref": "#/definitions/DiagnosticResponse",
+      "description": "Output of 'rxnm system check internet/portal'"
+    },
+    {
+      "$ref": "#/definitions/ActionResponse",
+      "description": "Generic acknowledgment for state changing commands (connect, set, create, delete)"
+    }
+  ],
+  "definitions": {
+    "SystemStatusResponse": {
+      "type": "object",
+      "required": [
+        "hostname",
+        "interfaces"
+      ],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "global_proxy": {
+          "$ref": "#/definitions/ProxyConfig"
+        },
+        "interfaces": {
+          "type": "object",
+          "description": "Map of interface names to details",
+          "additionalProperties": {
+            "$ref": "#/definitions/InterfaceDetails"
+          }
+        }
+      }
+    },
+    "InterfaceDetails": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "state"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "ethernet",
+            "wifi",
+            "wifi_ap",
+            "bridge",
+            "bond",
+            "vlan",
+            "vrf",
+            "macvlan",
+            "ipvlan",
+            "veth",
+            "wireguard",
+            "tun",
+            "tap",
+            "unknown",
+            "virtual"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "ip": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ipv6": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "gateway": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mac": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "wifi": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/WifiStatusDetails"
+            }
+          ]
+        },
+        "proxy": {
+          "$ref": "#/definitions/ProxyConfig"
+        },
+        "members": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Comma-separated list of bridge members"
+        }
+      }
+    },
+    "WifiStatusDetails": {
+      "type": "object",
+      "properties": {
+        "ssid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rssi": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "bssid": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "MAC address of the connected Access Point"
+        }
+      }
+    },
+    "WifiScanResponse": {
+      "type": "object",
+      "required": [
+        "results"
+      ],
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "ssid",
+              "security",
+              "strength_pct"
+            ],
+            "properties": {
+              "ssid": {
+                "type": "string"
+              },
+              "security": {
+                "type": "string"
+              },
+              "connected": {
+                "type": "boolean"
+              },
+              "known": {
+                "type": "boolean"
+              },
+              "signal": {
+                "type": "integer",
+                "description": "Raw dBm"
+              },
+              "strength_pct": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        }
+      }
+    },
+    "WifiKnownResponse": {
+      "type": "object",
+      "required": [
+        "networks"
+      ],
+      "properties": {
+        "networks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "ssid"
+            ],
+            "properties": {
+              "ssid": {
+                "type": "string"
+              },
+              "security": {
+                "type": "string"
+              },
+              "hidden": {
+                "type": "boolean"
+              },
+              "last_connected": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "BluetoothScanResponse": {
+      "type": "object",
+      "required": [
+        "devices"
+      ],
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "mac",
+              "name"
+            ],
+            "properties": {
+              "mac": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "ProfileListResponse": {
+      "type": "object",
+      "required": [
+        "profiles"
+      ],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "description": "'global' or interface name"
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "DiagnosticResponse": {
+      "type": "object",
+      "properties": {
+        "portal_detected": {
+          "type": "boolean"
+        },
+        "ipv4": {
+          "type": "boolean"
+        },
+        "ipv6": {
+          "type": "boolean"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "target": {
+          "type": "string",
+          "description": "Redirect URL if portal detected"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "online",
+            "offline",
+            "portal_locked"
+          ]
+        },
+        "method": {
+          "type": "string"
+        }
+      }
+    },
+    "ActionResponse": {
+      "type": "object",
+      "description": "Flexible object for command acknowledgments (connect, set, create, delete)",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "iface": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ssid": {
+          "type": "string"
+        },
+        "mac": {
+          "type": "string"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "mtu": {
+          "type": "string"
+        },
+        "ipv6_privacy": {
+          "type": "string"
+        },
+        "dhcp_id": {
+          "type": "string"
+        },
+        "table": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "peer": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "open": {
+          "type": "boolean"
+        },
+        "removed_configs": {
+          "type": "integer"
+        },
+        "country": {
+          "type": "string"
+        }
+      }
+    },
+    "ProxyConfig": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "http": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "https": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "noproxy": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

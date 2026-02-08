@@ -8,6 +8,37 @@
 # 3. Level 2: User/Persistent Root: /storage/.config/network/*.network (Manual overrides)
 # 4. Active:  Ephemeral/Active: /run/systemd/network/ (RAM session)
 
+_sync_active_configs() {
+    local src_dir="$1"
+    local dest_dir="$2"
+    
+    # 1. Virtual Device definitions (.netdev)
+    # Always copy. These instruct systemd to CREATE interfaces.
+    local devs=("${src_dir}"/*.netdev)
+    if [ ${#devs[@]} -gt 0 ] && [ -e "${devs[0]}" ]; then
+        cp "${devs[@]}" "${dest_dir}/" 2>/dev/null
+    fi
+
+    # 2. Network Configs (.network)
+    # DECISION: We copy ALL user-defined network configs, regardless of whether
+    # the interface currently exists.
+    # REASON: This supports hotplugging. If a user defines a Static IP for "eth0"
+    # (a USB adapter) but boots without it, we still want that config in /run
+    # so systemd-networkd applies it immediately when the adapter is plugged in.
+    # COST: Negligible RAM usage (text files are tiny) vs high usability gain.
+    
+    local nets=("${src_dir}"/*.network)
+    if [ ${#nets[@]} -gt 0 ] && [ -e "${nets[0]}" ]; then
+        cp "${nets[@]}" "${dest_dir}/" 2>/dev/null
+    fi
+    
+    # 3. Proxy Configs
+    local proxies=("${src_dir}"/proxy-*.conf)
+    if [ ${#proxies[@]} -gt 0 ] && [ -e "${proxies[0]}" ]; then
+        cp "${proxies[@]}" "${dest_dir}/" 2>/dev/null
+    fi
+}
+
 _task_profile_save_global() {
     local name="$1"
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
@@ -60,15 +91,8 @@ _task_profile_load_global() {
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
     
-    # 2. Restore Network Configs & Per-Interface Proxies from Profile to RAM
-    local nets=("${profile_dir}"/*.network)
-    [ ${#nets[@]} -gt 0 ] && cp "${nets[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
-    
-    local devs=("${profile_dir}"/*.netdev)
-    [ ${#devs[@]} -gt 0 ] && cp "${devs[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
-
-    local interface_proxies=("${profile_dir}"/proxy-*.conf)
-    [ ${#interface_proxies[@]} -gt 0 ] && cp "${interface_proxies[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
+    # 2. Restore all configs (User Intent > Hardware Presence)
+    _sync_active_configs "${profile_dir}" "${EPHEMERAL_NET_DIR}"
     
     # 3. Restore Global Persistents (Disk)
     if [ -f "$profile_dir/proxy.conf" ]; then cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"; fi
@@ -171,19 +195,13 @@ action_profile() {
                 # This establishes the last known RXNM-managed state.
                 if [ -d "$global_dir/default" ]; then
                     log_info "Boot: Loading persistent 'default' profile into RAM..."
-                    local profile_nets=("$global_dir/default"/*.network)
-                    [ ${#profile_nets[@]} -gt 0 ] && cp "${profile_nets[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
-                    local profile_devs=("$global_dir/default"/*.netdev)
-                    [ ${#profile_devs[@]} -gt 0 ] && cp "${profile_devs[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
+                    _sync_active_configs "$global_dir/default" "${EPHEMERAL_NET_DIR}"
                 fi
 
                 # 3. Second Pass (Highest Priority): Sync Manually Dropped Files (Persistent Root -> RAM)
                 # Manual files ALWAYS overwrite profile files if there is a name collision.
                 log_info "Boot: Syncing manual overrides from root config..."
-                local manual_nets=("${PERSISTENT_NET_DIR}"/*.network)
-                [ ${#manual_nets[@]} -gt 0 ] && cp "${manual_nets[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
-                local manual_devs=("${PERSISTENT_NET_DIR}"/*.netdev)
-                [ ${#manual_devs[@]} -gt 0 ] && cp "${manual_devs[@]}" "${EPHEMERAL_NET_DIR}/" 2>/dev/null
+                _sync_active_configs "${PERSISTENT_NET_DIR}" "${EPHEMERAL_NET_DIR}"
                 
                 log_info "Boot: RAM Active State initialized."
                 ;;

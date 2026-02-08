@@ -26,12 +26,16 @@ _task_set_dhcp() {
     local mdns="$6"
     local llmnr="$7"
     local metric="$8"
+    local mtu="$9"
+    local mac="${10}"
+    local ipv6_priv="${11}"
+    local dhcp_id="${12}"
     
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
     # Fix: Always ensure a file is written to satisfy persistence/test checks
     ensure_dirs
-    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric"
+    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
     reconfigure_iface "$iface"
 }
 
@@ -43,7 +47,13 @@ _task_set_static() {
     local ssid="$5"
     local domains="$6"
     local routes="$7"
-    local mdns="${8:-yes}"; local llmnr="${9:-yes}"; local metric="${10}"
+    local mdns="${8:-yes}"
+    local llmnr="${9:-yes}"
+    local metric="${10}"
+    local mtu="${11}"
+    local mac="${12}"
+    local ipv6_priv="${13}"
+    local dhcp_id="${14}"
 
     [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
     
@@ -80,9 +90,9 @@ _task_set_static() {
         fi
     fi
 
-    with_iface_lock "$iface" _task_set_static "$iface" "$final_ips" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric"
-        
-    json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'"}'
+    with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    
+    json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
 }
 
 _task_set_link() {
@@ -123,12 +133,12 @@ _task_set_proxy() {
 }
 
 set_network_cfg() {
-    local iface=$1 dhcp=$2 ip=$3 gw=$4 dns=$5 ssid=$6 domains=$7 routes=$8 mdns=$9 llmnr=${10} metric=${11} vrf=${12}
+    local iface=$1 dhcp=$2 ip=$3 gw=$4 dns=$5 ssid=$6 domains=$7 routes=$8 mdns=$9 llmnr=${10} metric=${11} vrf=${12} mtu=${13} mac=${14} ipv6_priv=${15} dhcp_id=${16}
     local safe_ssid=""
     [ -n "$ssid" ] && safe_ssid=$(sanitize_ssid "$ssid")
     
     local cfg
-    cfg=$(build_network_config "$iface" "$ssid" "$dhcp" "User Config" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "$vrf")
+    cfg=$(build_network_config "$iface" "$ssid" "$dhcp" "User Config" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "$vrf" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id")
     
     local filename="${STORAGE_NET_DIR}/75-config-${iface}"
     if [ -n "$safe_ssid" ]; then
@@ -190,7 +200,8 @@ action_delete_netdev() {
 
 action_set_dhcp() {
     local iface="$1"; local ssid="$2"; local dns="$3"; local domains="$4"; local routes="$5"
-    local mdns="${6:-yes}"; local llmnr="${7:-yes}"; local metric="$8"
+    local mdns="${6:-yes}"; local llmnr="${7:-yes}"; local metric="$8"; local mtu="$9"; local mac="${10}"
+    local ipv6_priv="${11}"; local dhcp_id="${12}"
 
     [ -z "$iface" ] && { log_error "Interface required"; return 1; }
     
@@ -198,6 +209,9 @@ action_set_dhcp() {
         [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
         [ -n "$routes" ] && ! validate_routes "$routes" && { json_error "Invalid routes"; return 1; }
     fi
+    
+    [ -n "$mac" ] && ! validate_mac "$mac" && { json_error "Invalid MAC"; return 1; }
+    [ -n "$mtu" ] && ! validate_mtu "$mtu" && { json_error "Invalid MTU"; return 1; }
     
     # Sane Default Metrics for Handhelds:
     # Prefer Ethernet (100) over WiFi (600)
@@ -209,52 +223,18 @@ action_set_dhcp() {
         fi
     fi
 
-    with_iface_lock "$iface" _task_set_dhcp "$iface" "$ssid" "$dns" "$domains" "$routes" "$mdns" "$llmnr" "$metric"
-    json_success '{"mode": "dhcp", "iface": "'"$iface"'", "metric": "'"$metric"'"}'
+    with_iface_lock "$iface" _task_set_dhcp "$iface" "$ssid" "$dns" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    json_success '{"mode": "dhcp", "iface": "'"$iface"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
 }
 
 action_set_static() {
     local iface="$1"; local ip="$2"; local gw="$3"; local dns="$4"; local ssid="$5"; local domains="$6"; local routes="$7"
-    local mdns="${8:-yes}"; local llmnr="${9:-yes}"; local metric="${10}"
+    local mdns="${8:-yes}"; local llmnr="${9:-yes}"; local metric="${10}"; local mtu="${11}"; local mac="${12}"
+    local ipv6_priv="${13}"; local dhcp_id="${14}"
 
     [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
     
-    # Handle Multiple IPs (Aliases) by iterating through comma-separated list
-    local final_ips=""
-    local IFS=','
-    read -ra ADDR_LIST <<< "$ip"
-    for addr in "${ADDR_LIST[@]}"; do
-        # Trim spaces
-        addr="${addr// /}"
-        [ -z "$addr" ] && continue
-        
-        # Default CIDR /24 if missing
-        if [[ "$addr" != *"/"* ]]; then addr="${addr}/24"; fi
-        
-        # Validate individual IP (CIDR aware)
-        if ! validate_ip "$addr"; then
-             return 1
-        fi
-        
-        if [ -z "$final_ips" ]; then final_ips="$addr"; else final_ips="$final_ips,$addr"; fi
-    done
-    unset IFS
-
-    [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
-    [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
-    
-    # Sane Default Metrics
-    if [ -z "$metric" ]; then
-        if [[ "$iface" == wlan* ]] || [[ "$iface" == wlp* ]] || [[ "$iface" == uap* ]]; then
-             metric="600"
-        elif [[ "$iface" == eth* ]] || [[ "$iface" == en* ]]; then
-             metric="100"
-        fi
-    fi
-
-    with_iface_lock "$iface" _task_set_static "$iface" "$final_ips" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric"
-        
-    json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'"}'
+    with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
 }
 
 action_set_link() {

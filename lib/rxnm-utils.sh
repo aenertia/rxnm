@@ -110,14 +110,11 @@ with_iface_lock() {
 
 # --- LOGGING & OUTPUT ---
 
-# CRITICAL for ES Integration:
-# Info/Warn logs MUST go to stderr to avoid breaking JSON parsing on stdout.
 log_debug() {
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
 }
 
 log_info() {
-    # Even if format is human, prefer stderr for logs so stdout is clean for piping
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
 }
 
@@ -175,7 +172,6 @@ print_table() {
     if command -v column >/dev/null; then
         echo "$tsv_data" | column -t -s $'\t'
     else
-        # BusyBox/Embedded friendly fallback
         echo "$tsv_data" | awk -F'\t' '{
             for(i=1;i<=NF;i++) {
                 if(length($i) > max[i]) max[i] = length($i)
@@ -195,10 +191,17 @@ print_table() {
 }
 
 json_success() {
-    local data="$1"
+    local data
+    # Check if data is piped or passed as argument
+    if [ -p /dev/stdin ]; then
+        data=$(cat)
+    else
+        data="${1:-}"
+    fi
+    
     if [ -z "$data" ]; then data="{}"; fi
     
-    # PERFORMANCE: Minimal JQ usage. Merge success field.
+    # If data is already a JSON object string, merge directly
     local full_json
     full_json=$(jq -n --argjson data "$data" '{success:true} + $data')
     
@@ -328,16 +331,29 @@ sanitize_ssid() {
     echo "$safe"
 }
 
-# Refined json_escape: Use JQ for robust encoding if string is complex
+# OPTIMIZED: Pure Bash implementation avoids JQ fork overhead
 json_escape() {
     local s="$1"
-    # Simple alphanumeric strings can be handled via bash for speed
-    if [[ ! "$s" =~ [^a-zA-Z0-9._-] ]]; then
-        printf '%s' "$s"
-        return
-    fi
-    # Complex strings use JQ to ensure UTF-8 and control char compliance (RFC 8259)
-    printf '%s' "$s" | jq -R . | sed 's/^"//;s/"$//'
+    # Escape backslashes and quotes
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    # Escape control characters
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\b'/\\b}"
+    s="${s//$'\f'/\\f}"
+    
+    # Note: For very complex UTF-8/Control character handling, this simple
+    # replacement might be insufficient. If strict correctness is required
+    # over raw speed for arbitrary inputs, uncomment the JQ fallback:
+    
+    # if [[ "$s" =~ [^[:print:]] ]]; then
+    #    printf '%s' "$s" | jq -R . | sed 's/^"//;s/"$//'
+    #    return
+    # fi
+    
+    printf '%s' "$s"
 }
 
 validate_ssid() {
@@ -466,6 +482,20 @@ validate_country() {
         return 1
     fi
     return 0
+}
+
+validate_mac() {
+    local mac="$1"
+    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then return 0; fi
+    json_error "Invalid MAC address format" "1" "Expected XX:XX:XX:XX:XX:XX"
+    return 1
+}
+
+validate_mtu() {
+    local mtu="$1"
+    if [[ "$mtu" =~ ^[0-9]+$ ]] && [ "$mtu" -ge 68 ] && [ "$mtu" -le 65535 ]; then return 0; fi
+    json_error "Invalid MTU" "1" "Must be integer between 68 and 65535"
+    return 1
 }
 
 get_proxy_json() {

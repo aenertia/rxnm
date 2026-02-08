@@ -76,5 +76,30 @@ exec_plugin() {
     export RXNM_FORMAT="${RXNM_FORMAT:-human}"
     export RXNM_DEBUG="${RXNM_DEBUG:-}"
     
-    exec "$plugin_path" "$@"
+    # SAFETY FIX: Do not use 'exec' which replaces the shell process.
+    # Use subprocess execution with timeout to prevent UI freezes.
+    
+    local timeout_sec=10
+    
+    if timeout "$timeout_sec" "$plugin_path" "$@"; then
+        return 0
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            # Timeout specific error
+             if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+                echo "{\"success\": false, \"error\": \"Plugin execution timed out after ${timeout_sec}s\", \"plugin\": \"$plugin_path\"}"
+            else
+                echo "Error: Plugin timed out." >&2
+            fi
+        else
+            # General failure
+             if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+                echo "{\"success\": false, \"error\": \"Plugin exited with error code $exit_code\", \"plugin\": \"$plugin_path\"}"
+            else
+                echo "Error: Plugin failed (exit code $exit_code)." >&2
+            fi
+        fi
+        return $exit_code
+    fi
 }

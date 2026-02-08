@@ -2,6 +2,16 @@
 # NETWORK CONFIGURATION BUILDERS
 # ==============================================================================
 
+# Helper to peek at system templates to ensure consistency
+_get_system_template_val() {
+    local fname="$1"
+    local key="$2"
+    local f="/usr/lib/systemd/network/$fname"
+    if [ -f "$f" ]; then
+         grep "^${key}=" "$f" | sed 's/#.*//' | cut -d= -f2- | tr -d '[:space:]' | head -n1
+    fi
+}
+
 # Generic Client/Station Config Builder (WAN/Upstream)
 build_network_config() {
     local match_iface="$1"
@@ -21,6 +31,10 @@ build_network_config() {
     local bond="${15:-}"
     local metric="${16:-}"
     local vrf="${17:-}"
+    local mtu="${18:-}"
+    local mac_addr="${19:-}"
+    local ipv6_privacy="${20:-}"
+    local dhcp_client_id="${21:-}"
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then
@@ -30,8 +44,12 @@ build_network_config() {
     local config="[Match]\nName=${match_iface}\n"
     [ -n "$match_ssid" ] && config+="SSID=${match_ssid}\n"
     
-    if [ -n "$mac_policy" ]; then
-        config+="\n[Link]\nMACAddressPolicy=${mac_policy}\n"
+    # [Link] Section for Hardware Settings
+    if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$mac_addr" ]; then
+        config+="\n[Link]\n"
+        [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
+        [ -n "$mac_addr" ] && config+="MACAddress=${mac_addr}\n"
+        [ -n "$mtu" ] && config+="MTUBytes=${mtu}\n"
     fi
     
     config+="\n[Network]\n"
@@ -51,6 +69,12 @@ build_network_config() {
     # Fix: IPMasquerade=yes is deprecated. Use "ipv4" to satisfy systemd-networkd warnings.
     # RFC Compliance: LinkLocalAddressing=yes enables both IPv4LL (169.254/16) and IPv6LL (fe80::/10)
     config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=ipv4\n"
+    
+    # IPv6 Privacy Extensions (RFC 4941)
+    # Options: no, yes, prefer-public, kernel
+    if [ -n "$ipv6_privacy" ]; then
+        config+="IPv6PrivacyExtensions=${ipv6_privacy}\n"
+    fi
 
     if [ -n "$addresses" ]; then
         IFS=',' read -ra ADDRS <<< "$addresses"
@@ -69,6 +93,12 @@ build_network_config() {
     if [ -n "$domains" ]; then
         IFS=',' read -ra DOMS <<< "$domains"
         for d in "${DOMS[@]}"; do config+="Domains=${d}\n"; done
+    fi
+    
+    # [DHCPv4] Specifics
+    # ClientIdentifier: mac (compatibility) vs duid (RFC4361 standard)
+    if [ -n "$dhcp_client_id" ]; then
+         config+="\n[DHCPv4]\nClientIdentifier=${dhcp_client_id}\n"
     fi
     
     if [ -n "$routes" ]; then
@@ -104,18 +134,33 @@ build_gateway_config() {
 
     # Auto-IP Strategy
     if [ -z "$ip" ]; then
-        if [ "$share" == "true" ]; then
-             # Use configured default or fall back to original RXNM default (192.168.212.1/24)
-             # This avoids common conflicts (0.1, 1.1, 8.1, 42.1, 100.1, 254.1)
-             ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
+        local detected_ip=""
+        
+        # Try to detect from system templates first to ensure consistency with bundled defaults
+        if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
+             detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
+             [ -z "$detected_ip" ] && detected_ip=$(_get_system_template_val "70-br-usb-host.network" "Address")
+        elif [[ "$iface" == wlan* ]] && [ "$share" == "true" ]; then
+             detected_ip=$(_get_system_template_val "70-wifi-ap.network" "Address")
+        fi
+        
+        if [ -n "$detected_ip" ]; then
+            ip="$detected_ip"
         else
-             # Local/No-Share: Link Local strategy
-             if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
-                 # RFC 3927: Avoid 169.254.0.0/24 and 169.254.255.0/24
-                 ip="169.254.10.2/24"
-             else
-                 ip="169.254.1.1/16" 
-             fi
+            # Fallback if templates missing or no match
+            if [ "$share" == "true" ]; then
+                 # Use configured default or fall back to original RXNM default (192.168.212.1/24)
+                 # This avoids common conflicts (0.1, 1.1, 8.1, 42.1, 100.1, 254.1)
+                 ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
+            else
+                 # Local/No-Share: Link Local strategy
+                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
+                     # RFC 3927: Avoid 169.254.0.0/24 and 169.254.255.0/24
+                     ip="169.254.10.2/24"
+                 else
+                     ip="169.254.1.1/16" 
+                 fi
+            fi
         fi
     fi
 
