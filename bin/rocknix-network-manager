@@ -328,7 +328,6 @@ CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
 # 1. Plugin Dispatch (Highest Priority)
 # Check if a plugin exists for this category (Extension or Override)
-# REMEDIATION: 'set -e' caused a crash here if find_plugin returned 1. Added || true.
 PLUGIN_EXEC=$(find_plugin "$CATEGORY" || true)
 
 if [ -n "$PLUGIN_EXEC" ]; then
@@ -345,8 +344,6 @@ if [ -n "$PLUGIN_EXEC" ]; then
 fi
 
 # 2. Built-in Dispatch
-# REMEDIATION: The regex match [[ ! " ${CATS[*]} " =~ " ${CATEGORY} " ]] fails when IFS
-# contains newlines (set globally in this script). Switched to an explicit loop.
 IS_VALID_CAT=false
 for valid_cat in "${CATS[@]}"; do
     if [[ "$valid_cat" == "$CATEGORY" ]]; then
@@ -524,24 +521,47 @@ case "$CATEGORY" in
 
     interface)
         ARG_1="${1:-}"
-        ARG_2="${2:-}"
         TARGET=""
         ACTION=""
         
-        POTENTIAL_ACTION=$(expand_alias "$ARG_1" "show" "set" "enable" "disable" "list")
-        if [ "$POTENTIAL_ACTION" == "$ARG_1" ]; then
-            ACTION="$ARG_1"
+        # Valid actions for this category
+        VALID_ACTS=("show" "set" "enable" "disable" "list")
+        
+        # Attempt expansion of first arg as a keyword
+        EXPANDED=$(expand_alias "$ARG_1" "${VALID_ACTS[@]}")
+        
+        # Validate if the expanded result is actually one of our keywords
+        IS_KEYWORD=false
+        for v in "${VALID_ACTS[@]}"; do
+            if [[ "$v" == "$EXPANDED" ]]; then IS_KEYWORD=true; break; fi
+        done
+        
+        if [ "$IS_KEYWORD" == "true" ]; then
+            # Command-first syntax: rxnm interface set eth0 ...
+            ACTION="$EXPANDED"
             shift
+            # If next arg is not a flag, it's the target
+            if [[ "${1:-}" != --* ]] && [ -n "${1:-}" ]; then
+                TARGET="$1"
+                shift
+            fi
         else
+            # Object-first syntax: rxnm interface eth0 set ...
             TARGET="$ARG_1"
             shift
-            ACTION=$(expand_alias "${1:-show}" "show" "set" "enable" "disable")
+            ACTION=$(expand_alias "${1:-show}" "${VALID_ACTS[@]}")
             shift
         fi
         
+        # Flag args override
+        ARGS=("$@")
         while [[ $# -gt 0 ]]; do
-             case "$1" in --interface) TARGET="$2"; shift 2 ;; *) ARGS+=("$1"); shift ;; esac
+             case "$1" in 
+                --interface) TARGET="$2"; shift 2 ;; 
+                *) shift ;; 
+             esac
         done
+        # Reset args for subcommand parsing
         set -- "${ARGS[@]}"
 
         case "$ACTION" in
