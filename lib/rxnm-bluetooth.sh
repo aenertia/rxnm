@@ -2,6 +2,63 @@
 # BLUETOOTH PAN ACTIONS
 # ==============================================================================
 
+# --- DBUS HELPERS ---
+
+# Get list of all Adapter object paths
+_get_dbus_adapters() {
+    busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null \
+    | jq -r '.data | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key'
+}
+
+# Get Device path by MAC (Search all adapters)
+_get_dbus_device_path() {
+    local mac="$1"
+    busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null \
+    | jq -r --arg mac "$mac" '.data | to_entries[] | select(.value["org.bluez.Device1"].Address.data == $mac) | .key' | head -n1
+}
+
+# Get Adapter path for a specific Device path
+_get_adapter_for_device() {
+    local dev_path="$1"
+    busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Adapter --json=short 2>/dev/null | jq -r '.data'
+}
+
+# Stability Helper for Bluetooth Controller
+ensure_bluetooth_power() {
+    # 1. Unblock Global RFKill (Fast check first)
+    local blocked=0
+    for rdir in /sys/class/rfkill/rfkill*; do
+        [ -e "$rdir/type" ] || continue
+        read -r rtype < "$rdir/type" 2>/dev/null || rtype=""
+        if [ "$rtype" == "bluetooth" ]; then
+             read -r soft < "$rdir/soft" 2>/dev/null || soft=0
+             if [ "$soft" -eq 1 ]; then blocked=1; break; fi
+        fi
+    done
+
+    if [ "$blocked" -eq 1 ] && command -v rfkill >/dev/null; then
+        rfkill unblock bluetooth 2>/dev/null || true
+    fi
+
+    # 2. Enable Power on ALL detected adapters via DBus
+    local adapters
+    adapters=$(_get_dbus_adapters)
+    
+    if [ -z "$adapters" ]; then
+        # Last ditch fallback if DBus is empty (daemon might be starting)
+        timeout 2s bluetoothctl power on >/dev/null 2>&1
+        return
+    fi
+
+    for adapter in $adapters; do
+         # Set Powered=true
+         busctl --timeout=2s set-property org.bluez "$adapter" org.bluez.Adapter1 Powered b true >/dev/null 2>&1
+    done
+    
+    # Allow state to settle
+    sleep 0.5
+}
+
 _task_pan_net() {
     local cmd="$1"
     local pin="$2"
@@ -10,17 +67,26 @@ _task_pan_net() {
     local mode="${5:-client}"
     local share="$6"
     
+    ensure_bluetooth_power
+
     case "$cmd" in
         enable)
             [ -n "$pin" ] && secure_write "$STORAGE_BT_PIN_FILE" "$pin" "600"
-            if [ -n "$name" ] && command -v bluetoothctl >/dev/null; then
-                validate_bluetooth_name "$name" && bluetoothctl system-alias "$name" >/dev/null 2>&1
+            
+            # Set System Alias on ALL adapters via DBus
+            if [ -n "$name" ]; then
+                validate_bluetooth_name "$name"
+                local adapters=$(_get_dbus_adapters)
+                for adapter in $adapters; do
+                    busctl --timeout=2s set-property org.bluez "$adapter" org.bluez.Adapter1 Alias s "$name" >/dev/null 2>&1
+                done
             fi
 
             if [ "$mode" == "host" ] || [ "$mode" == "nap" ]; then
                 local is_share="true"
                 [ "$share" == "false" ] && is_share="false"
                 local content
+                # Pass "yes" for ipv6_pd by default if sharing
                 content=$(build_gateway_config "bnep*" "$custom_ip" "$is_share" "Bluetooth PAN Host (NAP)" "yes" "yes" "yes")
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 tune_network_stack "host"
@@ -30,8 +96,6 @@ _task_pan_net() {
                 content=$(build_network_config "bnep*" "" "yes" "Bluetooth PAN Client (PANU)" "" "" "" "" "" "" "" "" "yes" "yes")
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 tune_network_stack "client"
-                # Fix: Don't disable global NAT just because BT is client
-                # disable_nat_masquerade
             fi
             reload_networkd
             ;;
@@ -60,44 +124,60 @@ action_pan_net() {
 }
 
 action_bt_scan() {
-    if ! command -v bluetoothctl >/dev/null; then
-        json_error "bluetoothctl not found"
+    if ! command -v busctl >/dev/null; then
+        json_error "busctl required for DBus operations"
         return 1
     fi
     
-    # Process Safety: Trap interrupts to kill background scan
-    local scan_pid=""
-    cleanup_scan() {
-        if [ -n "$scan_pid" ]; then
-            kill "$scan_pid" 2>/dev/null
-        fi
-        bluetoothctl scan off >/dev/null 2>&1
-    }
-    trap cleanup_scan EXIT INT TERM
-
-    # Start scan in background
-    bluetoothctl scan on >/dev/null 2>&1 &
-    scan_pid=$!
+    ensure_bluetooth_power
     
-    # Wait for discovery (blocking on purpose, but safe now)
+    local adapters
+    adapters=$(_get_dbus_adapters)
+    
+    if [ -z "$adapters" ]; then
+        json_error "No Bluetooth adapters found"
+        return 1
+    fi
+
+    # 1. Start Discovery on all adapters
+    for adapter in $adapters; do
+        busctl --timeout=5s call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1
+    done
+    
+    # 2. Wait for discovery
     sleep 4
     
-    cleanup_scan
-    trap - EXIT INT TERM # Clear trap
+    # 3. Stop Discovery
+    for adapter in $adapters; do
+        busctl --timeout=2s call org.bluez "$adapter" org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1
+    done
+    
+    # 4. Fetch Results via ObjectManager
+    local objects_json
+    objects_json=$(busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local devices
-    devices=$(bluetoothctl devices | awk '{$1=""; print $0}' | sed 's/^ //')
+    devices=$(echo "$objects_json" | jq -r '
+        [
+            .data | to_entries[] | 
+            select(.value["org.bluez.Device1"] != null) |
+            {
+                mac: .value["org.bluez.Device1"].Address.data,
+                name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
+                connected: (.value["org.bluez.Device1"].Connected.data == true),
+                paired: (.value["org.bluez.Device1"].Paired.data == true),
+                adapter: (.value["org.bluez.Device1"].Adapter.data)
+            }
+        ] | sort_by(-.rssi)
+    ')
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
-        # Parse into JSON array
-        local json="[]"
-        if [ -n "$devices" ]; then
-             json=$(echo "$devices" | jq -R -s -c 'split("\n")[:-1] | map(split(" ") | {mac: .[0], name: .[1:][]|join(" ")})')
-        fi
-        json_success "{\"devices\": $json}"
+        json_success "{\"devices\": $devices}"
     else
         echo "Bluetooth Devices:"
-        echo "$devices"
+        # Pretty print for human format
+        echo "$devices" | jq -r '.[] | "\(.mac)  \(.name)  \(.rssi)dBm"'
     fi
 }
 
@@ -108,41 +188,67 @@ action_bt_pair() {
         return 1
     fi
     
+    ensure_bluetooth_power
     confirm_action "Pair with device $mac?" "$FORCE_ACTION"
     
-    local timeout=30
-    local elapsed=0
-    
-    # Initiate pairing
-    if ! bluetoothctl pair "$mac"; then
+    # Use bluetoothctl for the pairing process itself (handling the Agent PIN flow)
+    # This is the one place where the binary tool is superior to raw DBus in scripts
+    if ! timeout 20s bluetoothctl pair "$mac"; then
         json_error "Failed to initiate pairing with $mac"
         return 1
     fi
     
-    # Poll for completion instead of fixed sleep
-    while [ $elapsed -lt $timeout ]; do
-        if bluetoothctl info "$mac" | grep -q "Paired: yes"; then
-            bluetoothctl trust "$mac"
+    # Verify Paired state via DBus
+    local dev_path
+    dev_path=$(_get_dbus_device_path "$mac")
+    
+    if [ -z "$dev_path" ]; then
+        # Fallback loop if object creation lags
+        sleep 1
+        dev_path=$(_get_dbus_device_path "$mac")
+    fi
+
+    if [ -n "$dev_path" ]; then
+        local paired
+        paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | jq -r '.data')
+        
+        if [ "$paired" == "true" ]; then
+            timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1
             json_success '{"action": "paired", "mac": "'"$mac"'"}'
             return 0
         fi
-        
-        # Check for failure states (requires parsing output, assuming bluetoothctl logs to stdout/err or inspecting info)
-        # bluetoothctl info output is cleaner check
-        
-        sleep 1
-        ((elapsed++))
-    done
+    fi
     
-    json_error "Pairing timeout for $mac after ${timeout}s"
+    json_error "Pairing sequence finished but device not marked as Paired"
     return 1
 }
 
 action_bt_unpair() {
     local mac="$1"
-    if bluetoothctl remove "$mac"; then
+    
+    # 1. Find device object
+    local dev_path
+    dev_path=$(_get_dbus_device_path "$mac")
+    
+    if [ -z "$dev_path" ]; then
+        json_error "Device $mac not found"
+        return 1
+    fi
+    
+    # 2. Find parent adapter
+    local adapter_path
+    adapter_path=$(_get_adapter_for_device "$dev_path")
+    
+    if [ -z "$adapter_path" ]; then
+        json_error "Could not determine adapter for device"
+        return 1
+    fi
+    
+    # 3. Call RemoveDevice on the adapter
+    if busctl --timeout=5s call org.bluez "$adapter_path" org.bluez.Adapter1 RemoveDevice o "$dev_path" >/dev/null 2>&1; then
         json_success '{"action": "unpaired", "mac": "'"$mac"'"}'
     else
-        json_error "Unpair failed"
+        json_error "Unpair failed (DBus call error)"
+        return 1
     fi
 }

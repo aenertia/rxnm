@@ -145,6 +145,13 @@ Actions:
   forget <ssid>         Forget a known network
   ap start <ssid>       Start Access Point (Hotspot)
   country <code>        Set WiFi Country Code
+  
+  p2p scan              Scan for WiFi Direct peers
+  p2p connect <name>    Connect to P2P peer
+  p2p disconnect        Disconnect P2P
+  
+  dpp enroll <uri>      Start DPP enrollment (QR code string)
+  dpp stop              Stop DPP session
 
 Options:
   --password <pass>     WiFi Password
@@ -371,7 +378,7 @@ fi
 # Dispatch to Category Handlers
 case "$CATEGORY" in
     wifi)
-        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget")
+        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp")
         shift
         
         ARG_IFACE=""
@@ -463,6 +470,32 @@ case "$CATEGORY" in
             country)
                 CODE="${1:-}"
                 action_set_country "$CODE"
+                ;;
+            p2p)
+                SUBCMD="${1:-}"; shift
+                case "$SUBCMD" in
+                    scan) action_p2p_scan ;;
+                    connect) 
+                        PEER="${1:-}"; [ -z "$PEER" ] && { json_error "Peer name required"; exit 1; }
+                        action_p2p_connect "$PEER" 
+                        ;;
+                    disconnect) action_p2p_disconnect ;;
+                    *) json_error "Unknown P2P command. Use: scan, connect, disconnect" ;;
+                esac
+                ;;
+            dpp)
+                SUBCMD="${1:-}"; shift
+                case "$SUBCMD" in
+                    enroll)
+                        URI="${1:-}"; [ -z "$URI" ] && { json_error "URI string required"; exit 1; }
+                        # Use ARG_IFACE detected earlier
+                        action_dpp_enroll "$ARG_IFACE" "$URI"
+                        ;;
+                    stop)
+                        action_dpp_stop "$ARG_IFACE"
+                        ;;
+                    *) json_error "Unknown DPP command. Use: enroll, stop" ;;
+                esac
                 ;;
         esac
         ;;

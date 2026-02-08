@@ -6,18 +6,19 @@
 cache_service_states() {
     # Initialize cache with timestamps
     local now
-    now=$(date +%s)
+    # Bash 4.2+ optimization
+    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
     
     local services=("iwd" "systemd-networkd" "avahi-daemon")
     local states
-    states=$(systemctl is-active "${services[@]}" 2>/dev/null)
+    # Timeout protection for systemctl calls
+    states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null)
     
     local i=0
     while IFS= read -r state; do
         local svc="${services[$i]}"
         SERVICE_STATE_CACHE["$svc"]="$state"
         SERVICE_STATE_TS["$svc"]=$now
-        # Fix: Use pre-increment to avoid return code 0 (error) on i=0
         ((++i))
     done <<< "$states"
     
@@ -29,14 +30,14 @@ cache_service_states() {
 is_service_active() {
     local svc="$1"
     local now
-    now=$(date +%s)
+    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
     local last_check="${SERVICE_STATE_TS["$svc"]:-0}"
     local age=$((now - last_check))
     
     # Cache TTL: 2 seconds
     if [ $age -gt 2 ]; then
         local state
-        state=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+        state=$(timeout 1s systemctl is-active "$svc" 2>/dev/null || echo "inactive")
         SERVICE_STATE_CACHE["$svc"]="$state"
         SERVICE_STATE_TS["$svc"]=$now
     fi
@@ -75,8 +76,16 @@ action_setup() {
 
     fix_permissions
     tune_network_stack "client"
-    # Fix: Guard rfkill for containers where it might fail or not exist
-    rfkill unblock all 2>/dev/null || true
+    
+    # Optimized RFKill unblock: Check sysfs first to avoid slow fork
+    local needs_unblock=0
+    for rdir in /sys/class/rfkill/rfkill*; do
+        [ -e "$rdir/soft" ] && { read -r s < "$rdir/soft"; [ "$s" -eq 1 ] && needs_unblock=1 && break; }
+    done
+    if [ "$needs_unblock" -eq 1 ] && command -v rfkill >/dev/null; then
+         rfkill unblock all 2>/dev/null || true
+    fi
+    
     log_info "Setup complete."
 }
 
@@ -88,7 +97,7 @@ action_reload() {
 }
 
 action_stop() {
-    systemctl stop iwd 2>/dev/null || true
+    timeout 5s systemctl stop iwd 2>/dev/null || true
     log_info "Wireless services stopped."
 }
 
@@ -123,7 +132,8 @@ fix_permissions() {
 reload_networkd() {
     fix_permissions
     if is_service_active "systemd-networkd"; then
-        networkctl reload
+        # Hardened against daemon hangs
+        timeout 5s networkctl reload 2>/dev/null || log_warn "networkctl reload timed out"
     fi
 }
 
@@ -132,9 +142,9 @@ reconfigure_iface() {
     fix_permissions
     if is_service_active "systemd-networkd"; then
         if [ -n "$iface" ]; then
-            networkctl reconfigure "$iface" 2>/dev/null || networkctl reload
+            timeout 5s networkctl reconfigure "$iface" 2>/dev/null || networkctl reload
         else
-            networkctl reload
+            timeout 5s networkctl reload
         fi
     fi
 }
@@ -170,6 +180,7 @@ tune_network_stack() {
     local profile="$1"
     
     # Sysctl can fail in containers (read-only /proc), guard with || true
+    # sysctl is fast, no timeout needed
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
@@ -223,79 +234,83 @@ enable_nat_masquerade() {
     
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
 
-    if [ "$fw_tool" == "iptables" ]; then
-        iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
-        iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
-        
-        iptables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-        iptables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
-        
-        iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-        iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
+    # Firewall operations guarded with timeout to prevent hang on module load
+    local T="timeout 2s"
 
-        iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-        iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
+    if [ "$fw_tool" == "iptables" ]; then
+        $T iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
+        $T iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
         
-        if command -v ip6tables >/dev/null && ip6tables -t nat -L >/dev/null 2>&1; then
-            ip6tables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
-            ip6tables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
+        $T iptables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+        $T iptables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
+        
+        $T iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+        $T iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
+
+        $T iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+        $T iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
+        
+        if command -v ip6tables >/dev/null && $T ip6tables -t nat -L >/dev/null 2>&1; then
+            $T ip6tables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
+            $T ip6tables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
             
-            ip6tables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
+            $T ip6tables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+            $T ip6tables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
             
-            ip6tables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
+            $T ip6tables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+            $T ip6tables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
         fi
         
     elif [ "$fw_tool" == "nft" ]; then
-        nft add table ip rocknix_nat 2>/dev/null
-        # Ensure idempotency by flushing or recreating chains
-        nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
-        nft flush chain ip rocknix_nat postrouting
-        nft add rule ip rocknix_nat postrouting oifname "$wan_iface" masquerade
+        $T nft add table ip rocknix_nat 2>/dev/null
+        $T nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
+        $T nft flush chain ip rocknix_nat postrouting
+        $T nft add rule ip rocknix_nat postrouting oifname "$wan_iface" masquerade
         
-        nft add table ip rocknix_filter 2>/dev/null
-        nft add chain ip rocknix_filter forward "{ type filter hook forward priority 0 ; }" 2>/dev/null
-        nft flush chain ip rocknix_filter forward
-        nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
-        nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
-        nft add rule ip rocknix_filter forward tcp flags syn tcp option maxseg size set rt mtu
+        $T nft add table ip rocknix_filter 2>/dev/null
+        $T nft add chain ip rocknix_filter forward "{ type filter hook forward priority 0 ; }" 2>/dev/null
+        $T nft flush chain ip rocknix_filter forward
+        $T nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
+        $T nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
+        $T nft add rule ip rocknix_filter forward tcp flags syn tcp option maxseg size set rt mtu
     fi
 }
 
 disable_nat_masquerade() {
     local fw_tool
     fw_tool=$(detect_firewall_tool)
+    local T="timeout 2s"
     
     if [ "$fw_tool" == "iptables" ]; then
         for table in nat filter mangle; do
             local rules
-            rules=$(iptables-save -t "$table" | grep -- '--comment "rocknix"')
+            # Cannot safely timeout iptables-save pipe, but it's read-only
+            rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 read -r _ chain rest <<< "$line"
                 local rule="${line#-A $chain }"
-                iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
+                $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
             done <<< "$rules"
         done
         
-        if command -v ip6tables >/dev/null && ip6tables -t nat -L >/dev/null 2>&1; then
+        if command -v ip6tables >/dev/null && $T ip6tables -t nat -L >/dev/null 2>&1; then
              for table in nat filter mangle; do
                 local rules
-                rules=$(ip6tables-save -t "$table" | grep -- '--comment "rocknix"')
+                rules=$(ip6tables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
                 while IFS= read -r line; do
                     [ -z "$line" ] && continue
                     read -r _ chain rest <<< "$line"
                     local rule="${line#-A $chain }"
-                    ip6tables -t "$table" -D "$chain" $rule 2>/dev/null || true
+                    $T ip6tables -t "$table" -D "$chain" $rule 2>/dev/null || true
                 done <<< "$rules"
             done
         fi
         
     elif [ "$fw_tool" == "nft" ]; then
-        nft delete table ip rocknix_nat 2>/dev/null
-        nft delete table ip rocknix_filter 2>/dev/null
-        nft delete table ip6 rocknix_nat6 2>/dev/null
-        nft delete table ip6 rocknix_filter6 2>/dev/null
+        $T nft delete table ip rocknix_nat 2>/dev/null
+        $T nft delete table ip rocknix_filter 2>/dev/null
+        $T nft delete table ip6 rocknix_nat6 2>/dev/null
+        $T nft delete table ip6 rocknix_filter6 2>/dev/null
     fi
 }

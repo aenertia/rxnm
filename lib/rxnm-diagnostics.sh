@@ -73,7 +73,8 @@ action_check_internet() {
     # 0. TIER 0: NETWORKCTL STATUS (FASTEST)
     if command -v networkctl >/dev/null; then
          local operstate
-         operstate=$(networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
+         # Hardened against hung networkd
+         operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
          case "$operstate" in
             off|no-carrier|dormant|carrier)
                 jq -n --arg state "$operstate" \
@@ -119,7 +120,8 @@ action_status() {
     # 1. READ-THROUGH CACHE (Battery Saver)
     if [ -f "$CACHE_FILE" ]; then
         local now file_time age
-        now=$(date +%s)
+        # Bash 4.2+ optimization
+        now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
         file_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
         age=$((now - file_time))
         
@@ -135,17 +137,18 @@ action_status() {
 
     # Source A: Systemd Networkd (Layer 3)
     # Ensure net_json is a valid JSON array even on failure
-    # systemd v252+ supports --json=short which is ideal.
+    # Hardened: Add timeout to prevent hang if daemon is dead
     local net_json="[]"
     if command -v networkctl >/dev/null; then
-        net_json=$(networkctl status --all --json=short 2>/dev/null || networkctl list --json=short 2>/dev/null || echo "[]")
+        net_json=$(timeout 3s networkctl status --all --json=short 2>/dev/null || timeout 3s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
 
     # Source B: IWD (Layer 2 - WiFi)
     # Ensure iwd_json is a valid JSON object even on failure
+    # Hardened: Use timeout on DBus call
     local iwd_json="{}"
     if is_service_active "iwd"; then
-        iwd_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | jq -r '.data[0] // {}' || echo "{}")
+        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | jq -r '.data[0] // {}' || echo "{}")
     fi
 
     # Source C: Global Proxy
