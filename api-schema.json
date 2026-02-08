@@ -42,6 +42,10 @@
       "description": "Output of 'rxnm wifi p2p scan'"
     },
     {
+      "$ref": "#/definitions/WifiP2PStatusResponse",
+      "description": "Output of 'rxnm wifi p2p status'"
+    },
+    {
       "$ref": "#/definitions/BluetoothScanResponse",
       "description": "Output of 'rxnm bluetooth scan'"
     },
@@ -289,6 +293,36 @@
                 "type": "boolean"
               }
             }
+          }
+        }
+      }
+    },
+    "WifiP2PStatusResponse": {
+      "type": "object",
+      "required": [
+        "peers",
+        "interfaces",
+        "is_go"
+      ],
+      "properties": {
+        "is_go": {
+          "type": "boolean",
+          "description": "True if this device is acting as a Group Owner"
+        },
+        "peers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "mac": { "type": "string" }
+            }
+          }
+        },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InterfaceDetails"
           }
         }
       }

@@ -37,6 +37,18 @@ rxnm_init() {
     echo "${args[@]}"
 }
 
+# Access the API Schema
+# Usage: rxnm_get_schema > schema.json
+rxnm_get_schema() {
+    local schema_path="${RXNM_LIB_DIR}/../api-schema.json"
+    if [ -f "$schema_path" ]; then
+        cat "$schema_path"
+    else
+        # Fallback minimal schema if file missing
+        echo '{"error": "Schema file not found", "path": "'"$schema_path"'"}'
+    fi
+}
+
 # Export common variables for ease of use
 export RXNM_LIB_DIR
 export RXNM_FORMAT
