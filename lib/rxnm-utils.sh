@@ -162,10 +162,10 @@ print_table() {
     
     # Generate Tab-Separated Values
     local tsv_data
-    tsv_data=$(echo -e "${header_row}"; echo "$json_input" | jq -r ".[]? | $jq_query" 2>/dev/null)
+    tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
     if [ -z "$tsv_data" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
         # Handle single object case if array filter failed
-        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | jq -r "$jq_query" 2>/dev/null)
+        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r "$jq_query" 2>/dev/null)
     fi
 
     # Formatting: Use column if available, else awk for embedded fallback
@@ -203,7 +203,7 @@ json_success() {
     
     # If data is already a JSON object string, merge directly
     local full_json
-    full_json=$(jq -n --argjson data "$data" '{success:true} + $data')
+    full_json=$("$JQ_BIN" -n --argjson data "$data" '{success:true} + $data')
     
     case "${RXNM_FORMAT:-human}" in
         json)
@@ -211,46 +211,46 @@ json_success() {
             ;;
         table)
             # Route based on content type for tabular display
-            if echo "$full_json" | jq -e '.results' >/dev/null 2>&1; then
-                print_table "$(echo "$full_json" | jq '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
-            elif echo "$full_json" | jq -e '.networks' >/dev/null 2>&1; then
-                print_table "$(echo "$full_json" | jq '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
-            elif echo "$full_json" | jq -e '.interfaces' >/dev/null 2>&1; then
+            if echo "$full_json" | "$JQ_BIN" -e '.results' >/dev/null 2>&1; then
+                print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
+            elif echo "$full_json" | "$JQ_BIN" -e '.networks' >/dev/null 2>&1; then
+                print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
+            elif echo "$full_json" | "$JQ_BIN" -e '.interfaces' >/dev/null 2>&1; then
                 local arr_data
-                arr_data=$(echo "$full_json" | jq '[.interfaces[]]')
+                arr_data=$(echo "$full_json" | "$JQ_BIN" '[.interfaces[]]')
                 print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
-            elif echo "$full_json" | jq -e '.profiles' >/dev/null 2>&1; then
-                if echo "$full_json" | jq -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
-                     echo "$full_json" | jq -r '.profiles[]' | sed '1iPROFILE_NAME'
+            elif echo "$full_json" | "$JQ_BIN" -e '.profiles' >/dev/null 2>&1; then
+                if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
+                     echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
                 else
-                     print_table "$(echo "$full_json" | jq '.profiles')" "name:NAME,iface:INTERFACE"
+                     print_table "$(echo "$full_json" | "$JQ_BIN" '.profiles')" "name:NAME,iface:INTERFACE"
                 fi
-            elif echo "$full_json" | jq -e '.devices' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | jq '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
+            elif echo "$full_json" | "$JQ_BIN" -e '.devices' >/dev/null 2>&1; then
+                 print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
             else
                 # Fallback to Key-Value
-                echo "$full_json" | jq -r 'to_entries | .[] | "\(.key): \(.value)"'
+                echo "$full_json" | "$JQ_BIN" -r 'to_entries | .[] | "\(.key): \(.value)"'
             fi
             ;;
         *)
             # Human readable pretty print (Default)
-            if echo "$full_json" | jq -e '.message' >/dev/null 2>&1; then
-                echo "$full_json" | jq -r '.message'
-            elif echo "$full_json" | jq -e '.action' >/dev/null 2>&1; then
-                local action=$(echo "$full_json" | jq -r '.action')
-                local target=$(echo "$full_json" | jq -r '.iface // .ssid // .name // "system"')
+            if echo "$full_json" | "$JQ_BIN" -e '.message' >/dev/null 2>&1; then
+                echo "$full_json" | "$JQ_BIN" -r '.message'
+            elif echo "$full_json" | "$JQ_BIN" -e '.action' >/dev/null 2>&1; then
+                local action=$(echo "$full_json" | "$JQ_BIN" -r '.action')
+                local target=$(echo "$full_json" | "$JQ_BIN" -r '.iface // .ssid // .name // "system"')
                 echo "✓ Success: $action performed on $target"
-            elif echo "$full_json" | jq -e '.connected == true' >/dev/null 2>&1; then
-                echo "✓ Successfully connected to $(echo "$full_json" | jq -r '.ssid')."
-            elif echo "$full_json" | jq -e '.results' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | jq '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
-            elif echo "$full_json" | jq -e '.networks' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | jq '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
-            elif echo "$full_json" | jq -e '.interfaces' >/dev/null 2>&1; then
+            elif echo "$full_json" | "$JQ_BIN" -e '.connected == true' >/dev/null 2>&1; then
+                echo "✓ Successfully connected to $(echo "$full_json" | "$JQ_BIN" -r '.ssid')."
+            elif echo "$full_json" | "$JQ_BIN" -e '.results' >/dev/null 2>&1; then
+                 print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
+            elif echo "$full_json" | "$JQ_BIN" -e '.networks' >/dev/null 2>&1; then
+                 print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
+            elif echo "$full_json" | "$JQ_BIN" -e '.interfaces' >/dev/null 2>&1; then
                  echo "--- Network Status ---"
-                 echo "$full_json" | jq -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
+                 echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
             else
-                echo "$full_json" | jq -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
+                echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
             fi
             ;;
     esac
@@ -262,7 +262,7 @@ json_error() {
     local hint="${3:-}"
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
-        jq -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" \
+        "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" \
             '{success:false, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
     else
         echo "✗ Error: $msg" >&2
@@ -349,7 +349,7 @@ json_escape() {
     # over raw speed for arbitrary inputs, uncomment the JQ fallback:
     
     # if [[ "$s" =~ [^[:print:]] ]]; then
-    #    printf '%s' "$s" | jq -R . | sed 's/^"//;s/"$//'
+    #    printf '%s' "$s" | "$JQ_BIN" -R . | sed 's/^"//;s/"$//'
     #    return
     # fi
     
@@ -513,7 +513,7 @@ get_proxy_json() {
         done < "$file"
         [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
         [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
-        jq -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
+        "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
             '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
     else
         echo "null"

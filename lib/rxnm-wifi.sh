@@ -226,7 +226,7 @@ _task_p2p_scan() {
     fi
     
     local p2p_dev_path
-    p2p_dev_path=$(echo "$objects_json" | jq -r '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Device"] != null) | .key' | head -n1)
+    p2p_dev_path=$(echo "$objects_json" | "$JQ_BIN" -r '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Device"] != null) | .key' | head -n1)
     
     [ -z "$p2p_dev_path" ] && { echo "No P2P-capable device found" >&2; return 1; }
     
@@ -245,7 +245,7 @@ _task_p2p_scan() {
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local peers
-    peers=$(echo "$objects_json" | jq -r '
+    peers=$(echo "$objects_json" | "$JQ_BIN" -r '
         [
             .data | to_entries[] | 
             select(.value["net.connman.iwd.p2p.Peer"] != null) |
@@ -268,7 +268,7 @@ _task_p2p_connect() {
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local peer_path
-    peer_path=$(echo "$objects_json" | jq -r --arg name "$peer_name" '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
+    peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
     
@@ -357,7 +357,7 @@ action_scan() {
     fi
 
     local device_path
-    device_path=$(echo "$objects_json" | jq -r --arg iface "$iface" '.data[] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
+    device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data[] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
@@ -375,12 +375,10 @@ action_scan() {
     for ((i=1; i<=max_polls; i++)); do
         local scanning
         # Use builtin timeout for property check
-        scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | jq -r '.data')
+        scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
         [ "$scanning" != "true" ] && break
         sleep "$sleep_sec"
     done
-    
-    sleep 0.5
     
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to fetch scan results"
@@ -388,7 +386,7 @@ action_scan() {
     fi
     
     local result
-    result=$(echo "$objects_json" | jq -r --arg dev "$device_path" '
+    result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         [
             .data[] | to_entries[] | 
             select(.value["net.connman.iwd.Network"] != null) |
@@ -430,7 +428,7 @@ action_list_known_networks() {
     fi
 
     local networks
-    networks=$(echo "$objects_json" | jq -r '
+    networks=$(echo "$objects_json" | "$JQ_BIN" -r '
         [
             .data[] | to_entries[] |
             select(.value["net.connman.iwd.KnownNetwork"] != null) |
@@ -611,7 +609,7 @@ action_p2p_disconnect() {
     # Subshell logic to cleanly count disconnected peers
     local disconnect_logic='
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
-    connected_peers=$(echo "$objects_json" | jq -r ".data | to_entries[] | select(.value[\"net.connman.iwd.p2p.Peer\"].Connected.data == true) | .key")
+    connected_peers=$(echo "$objects_json" | "$JQ_BIN" -r ".data | to_entries[] | select(.value[\"net.connman.iwd.p2p.Peer\"].Connected.data == true) | .key")
     count=0
     for peer in $connected_peers; do
         busctl --timeout=2s call net.connman.iwd "$peer" net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1

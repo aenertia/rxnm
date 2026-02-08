@@ -7,20 +7,20 @@
 # Get list of all Adapter object paths
 _get_dbus_adapters() {
     busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null \
-    | jq -r '.data | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key'
+    | "$JQ_BIN" -r '.data | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key'
 }
 
 # Get Device path by MAC (Search all adapters)
 _get_dbus_device_path() {
     local mac="$1"
     busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null \
-    | jq -r --arg mac "$mac" '.data | to_entries[] | select(.value["org.bluez.Device1"].Address.data == $mac) | .key' | head -n1
+    | "$JQ_BIN" -r --arg mac "$mac" '.data | to_entries[] | select(.value["org.bluez.Device1"].Address.data == $mac) | .key' | head -n1
 }
 
 # Get Adapter path for a specific Device path
 _get_adapter_for_device() {
     local dev_path="$1"
-    busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Adapter --json=short 2>/dev/null | jq -r '.data'
+    busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Adapter --json=short 2>/dev/null | "$JQ_BIN" -r '.data'
 }
 
 # Stability Helper for Bluetooth Controller
@@ -157,7 +157,7 @@ action_bt_scan() {
     objects_json=$(busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local devices
-    devices=$(echo "$objects_json" | jq -r '
+    devices=$(echo "$objects_json" | "$JQ_BIN" -r '
         [
             .data | to_entries[] | 
             select(.value["org.bluez.Device1"] != null) |
@@ -177,7 +177,7 @@ action_bt_scan() {
     else
         echo "Bluetooth Devices:"
         # Pretty print for human format
-        echo "$devices" | jq -r '.[] | "\(.mac)  \(.name)  \(.rssi)dBm"'
+        echo "$devices" | "$JQ_BIN" -r '.[] | "\(.mac)  \(.name)  \(.rssi)dBm"'
     fi
 }
 
@@ -210,7 +210,7 @@ action_bt_pair() {
 
     if [ -n "$dev_path" ]; then
         local paired
-        paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | jq -r '.data')
+        paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
         
         if [ "$paired" == "true" ]; then
             timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1

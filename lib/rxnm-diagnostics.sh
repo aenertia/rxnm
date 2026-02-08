@@ -21,7 +21,7 @@ action_check_portal() {
 
     # Quick probe: Is the internet just "working"?
     if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
-        jq -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
+        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
         return 0
     fi
 
@@ -34,14 +34,14 @@ action_check_portal() {
     local effective_url="${result#*:}"
 
     if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
-        jq -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success
+        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success
         return 0
     fi
 
     if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
         # Check if we were redirected but can still reach the target (weird transparent proxy cases)
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
-             jq -n --arg url "$effective_url" \
+             "$JQ_BIN" -n --arg url "$effective_url" \
                  '{portal_detected: true, auto_ack: true, status: "online", target: $url, note: "authorized_by_probe"}' \
                  | json_success
              return 0
@@ -50,7 +50,7 @@ action_check_portal() {
         local hijack_flag="false"
         if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
         
-        jq -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
+        "$JQ_BIN" -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
             '{portal_detected: true, auto_ack: false, status: "portal_locked", target: $url, http_code: $code, hijacked: $hijacked}' \
             | json_success
         return 0
@@ -59,14 +59,14 @@ action_check_portal() {
     # 3. TIER 3: SEQUENTIAL FALLBACK
     for fallback in "${fallback_urls[@]}"; do
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
-            jq -n --arg url "$fallback" \
+            "$JQ_BIN" -n --arg url "$fallback" \
                 '{portal_detected: false, status: "online", method: "fallback", host: $url}' \
                 | json_success
             return 0
         fi
     done
 
-    jq -n '{portal_detected: false, status: "offline"}' | json_success
+    "$JQ_BIN" -n '{portal_detected: false, status: "offline"}' | json_success
 }
 
 action_check_internet() {
@@ -77,7 +77,7 @@ action_check_internet() {
          operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
          case "$operstate" in
             off|no-carrier|dormant|carrier)
-                jq -n --arg state "$operstate" \
+                "$JQ_BIN" -n --arg state "$operstate" \
                     '{ipv4: false, ipv6: false, connected: false, reason: "local_link_down", state: $state}' \
                     | json_success
                 return 0
@@ -89,25 +89,55 @@ action_check_internet() {
 
     local curl_fmt="%{http_code}"
     local target="http://clients3.google.com/generate_204"
-    local v4="false" v6="false"
     
-    # Use native JSON output where possible
-    if ip -4 route show default | grep -q default; then
-        local code4
-        code4=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
-        [[ "$code4" == "204" ]] && v4="true"
-    fi
-
-    if ip -6 route show default | grep -q default; then
-        local code6
-        code6=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
-        [[ "$code6" == "204" ]] && v6="true"
-    fi
+    # --- PARALLEL EXECUTION (Map-Reduce) ---
+    # Running curl checks in parallel to save time on timeouts
+    
+    local t_v4
+    t_v4=$(mktemp)
+    local t_v6
+    t_v6=$(mktemp)
+    local pid_v4=0
+    local pid_v6=0
+    
+    # 1. Start IPv4 Check
+    (
+        if ip -4 route show default | grep -q default; then
+            local code
+            code=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
+            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+        else
+            echo "false"
+        fi
+    ) > "$t_v4" &
+    pid_v4=$!
+    
+    # 2. Start IPv6 Check
+    (
+        if ip -6 route show default | grep -q default; then
+            local code
+            code=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
+            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+        else
+            echo "false"
+        fi
+    ) > "$t_v6" &
+    pid_v6=$!
+    
+    # 3. Wait for both
+    wait $pid_v4 $pid_v6
+    
+    # 4. Reduce Results
+    local v4
+    v4=$(cat "$t_v4")
+    local v6
+    v6=$(cat "$t_v6")
+    rm -f "$t_v4" "$t_v6"
     
     local connected="false"
     [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
     
-    jq -n --argjson v4 "$v4" --argjson v6 "$v6" --argjson connected "$connected" \
+    "$JQ_BIN" -n --argjson v4 "$v4" --argjson v6 "$v6" --argjson connected "$connected" \
         '{ipv4: $v4, ipv6: $v6, connected: $connected}' \
         | json_success
 }
@@ -148,16 +178,16 @@ action_status() {
     # Hardened: Use timeout on DBus call
     local iwd_json="{}"
     if is_service_active "iwd"; then
-        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | jq -r '.data[0] // {}' || echo "{}")
+        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data[0] // {}' || echo "{}")
     fi
 
     # Source C: Global Proxy
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
 
-    # 3. MERGE & MAP (Using JQ for speed - O(1) Fork)
+    # 3. MERGE & MAP (Using JQ/JAQ for speed - O(1) Fork)
     local json_output
-    json_output=$(jq -n \
+    json_output=$("$JQ_BIN" -n \
         --arg hn "$hostname" \
         --arg filter "$filter_iface" \
         --argjson gp "$global_proxy_json" \

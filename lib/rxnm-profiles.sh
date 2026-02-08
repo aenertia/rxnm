@@ -163,7 +163,7 @@ action_profile() {
                 for f in "$global_dir"/*; do [ -d "$f" ] && files+=("$(basename "$f")") ; done
                 [ ! -d "$global_dir/default" ] && files+=("default (system)")
                 local json_list="[]"
-                [ ${#files[@]} -gt 0 ] && json_list=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)
+                [ ${#files[@]} -gt 0 ] && json_list=$(printf '%s\n' "${files[@]}" | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
                 json_success '{"profiles": '"$json_list"', "scope": "global"}'
                 ;;
             delete)
@@ -235,7 +235,7 @@ action_profile() {
             local clean_files=()
             for f in "${profile_iface_dir}"/*.network; do [ -e "$f" ] && clean_files+=("$(basename "$f" .network)"); done
             local json_list="[]"
-            [ ${#clean_files[@]} -gt 0 ] && json_list=$(printf '%s\n' "${clean_files[@]}" | jq -R . | jq -s .)
+            [ ${#clean_files[@]} -gt 0 ] && json_list=$(printf '%s\n' "${clean_files[@]}" | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;
         delete)

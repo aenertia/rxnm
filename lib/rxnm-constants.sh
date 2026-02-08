@@ -84,6 +84,23 @@ STORAGE_BT_PIN_FILE="${PERSISTENT_NET_DIR}/bluetooth.pin"
 GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
 GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
 
+# --- JSON PROCESSOR DETECTION ---
+# Optimization: Detect faster JSON processors for ARM
+# Priority: jaq (Rust/SIMD) > gojq (Go) > jq (C)
+if command -v jaq >/dev/null; then
+    # jaq must support --argjson (v1.0+) to be a drop-in replacement
+    if jaq --help 2>&1 | grep -q "\--argjson"; then
+        export JQ_BIN="jaq"
+    else
+        # Fallback if jaq is too old
+        export JQ_BIN="jq"
+    fi
+elif command -v gojq >/dev/null; then
+    export JQ_BIN="gojq"
+else
+    export JQ_BIN="jq"
+fi
+
 # --- GLOBAL SERVICE STATE CACHE ---
 # Initialized in system.sh
 # Using an associative array for caching with timestamps if needed
