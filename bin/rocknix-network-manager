@@ -149,6 +149,7 @@ Actions:
   p2p scan              Scan for WiFi Direct peers
   p2p connect <name>    Connect to P2P peer
   p2p disconnect        Disconnect P2P
+  p2p status            Show P2P status (Peers/GO Mode)
   
   dpp enroll <uri>      Start DPP enrollment (QR code string)
   dpp stop              Stop DPP session
@@ -480,7 +481,8 @@ case "$CATEGORY" in
                         action_p2p_connect "$PEER" 
                         ;;
                     disconnect) action_p2p_disconnect ;;
-                    *) json_error "Unknown P2P command. Use: scan, connect, disconnect" ;;
+                    status) action_p2p_status ;;
+                    *) json_error "Unknown P2P command. Use: scan, connect, disconnect, status" ;;
                 esac
                 ;;
             dpp)

@@ -273,6 +273,7 @@ _task_p2p_connect() {
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
     
     # Trigger Connect with builtin Timeout
+    # Note: Standard IWD Connect() negotiation includes WSC (WPS) handling if needed.
     if busctl --timeout=15s call net.connman.iwd "$peer_path" net.connman.iwd.p2p.Peer Connect >/dev/null 2>&1; then
         echo "OK"
         return 0
@@ -280,6 +281,38 @@ _task_p2p_connect() {
         echo "P2P Connection Failed" >&2
         return 1
     fi
+}
+
+_task_p2p_status() {
+    # Combine IWD info and Networkd state
+    local objects_json
+    objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+    
+    local net_json="[]"
+    if command -v networkctl >/dev/null; then
+        net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]")
+    fi
+    
+    # Merge logic
+    echo "$objects_json" | "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$(cat)" '
+        # Find Connected P2P Peers
+        ($iwd.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) | 
+         select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
+         {name: .value["net.connman.iwd.p2p.Peer"].Name.data, mac: .value["net.connman.iwd.p2p.Peer"].DeviceAddress.data}
+        ) as $peers |
+        
+        # Check Networkd for P2P-GO interfaces
+        ($net | map(select(.Type == "wlan" or .Name | startswith("p2p"))) | 
+         map({name: .Name, type: .Type, state: .OperationalState})
+        ) as $ifaces |
+        
+        {
+            success: true,
+            peers: [$peers],
+            interfaces: $ifaces,
+            is_go: ($ifaces | any(.name | startswith("p2p") and .state == "routable"))
+        }
+    '
 }
 
 # --- DPP TASKS ---
@@ -625,6 +658,15 @@ action_p2p_disconnect() {
     local count
     count=$(with_iface_lock "global_wifi" _task_p2p_disconnect_internal)
     json_success '{"action": "p2p_disconnect", "count": '"${count:-0}"'}'
+}
+
+action_p2p_status() {
+    local output
+    if output=$(with_iface_lock "global_wifi" _task_p2p_status); then
+        echo "$output"
+    else
+        json_error "Failed to retrieve P2P status"
+    fi
 }
 
 action_dpp_enroll() {
