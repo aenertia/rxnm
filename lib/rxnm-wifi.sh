@@ -247,6 +247,9 @@ action_scan() {
     fi
     
     # Standardize output for status checks
+    # REMEDIATION: Fixed Signal Percentage Calculation
+    # Old logic: (($sig / 100) + 100) * 2 was incorrect for dBm.
+    # New logic: (dBm + 100) * 2 clamped. E.g. -60dBm -> 80%. -100dBm -> 0%.
     local result
     result=$(echo "$objects_json" | jq -r --arg dev "$device_path" '
         [
@@ -258,10 +261,10 @@ action_scan() {
                 security: .value["net.connman.iwd.Network"].Type.data,
                 connected: (.value["net.connman.iwd.Network"].Connected.data == true),
                 known: (if .value["net.connman.iwd.Network"].KnownNetwork.data then true else false end),
-                signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -10000),
+                signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100),
                 strength_pct: (
-                    (.value["net.connman.iwd.Network"].SignalStrength.data // -10000) as $sig |
-                    (($sig / 100) + 100) * 2 |
+                    (.value["net.connman.iwd.Network"].SignalStrength.data // -100) as $sig |
+                    ($sig + 100) * 2 |
                     if . > 100 then 100 elif . < 0 then 0 else . end | floor
                 )
             }

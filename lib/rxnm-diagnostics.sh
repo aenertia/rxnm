@@ -143,12 +143,8 @@ action_status() {
 
     # Source B: IWD (Layer 2 - WiFi)
     # Ensure iwd_json is a valid JSON object even on failure
-    # busctl --json=short returns { "type": "...", "data": [ { ... } ] }
     local iwd_json="{}"
     if is_service_active "iwd"; then
-        # busctl json output for GetManagedObjects typically returns { "type": "...", "data": [...] }
-        # We need the inner data which is the dictionary of objects.
-        # Use || echo "{}" to prevent jq parse errors on empty output
         iwd_json=$(busctl call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | jq -r '.data[0] // {}' || echo "{}")
     fi
 
@@ -176,7 +172,7 @@ action_status() {
         ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Device"]?)) |
          map({key: .key, value: .value["net.connman.iwd.Device"].Name.data}) | from_entries) as $dev_paths |
 
-        # B. Map Access Point Objects (for BSSID lookup - AccessPoints are at /net/connman/iwd/0/5 etc. )
+        # B. Map Access Point Objects (for BSSID lookup)
         ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.AccessPoint"]?)) |
          map({key: .key, value: .value["net.connman.iwd.AccessPoint"]}) | from_entries
         ) as $access_points |
@@ -227,7 +223,7 @@ action_status() {
                         name: .Name,
                         type: .Type,
                         state: .OperationalState,
-                        # Handle IP address parsing from networkctl JSON output
+                        # REMEDIATION: Handle missing Addresses array (common in networkctl list)
                         ip: (if .Addresses then (.Addresses | map(select(.Family==2)) | .[0].Address) else null end),
                         ipv6: (if .Addresses then (.Addresses | map(select(.Family==10)) | map(.Address)) else [] end),
                         gateway: (.Gateway), 
