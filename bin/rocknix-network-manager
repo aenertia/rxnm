@@ -328,7 +328,7 @@ CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
 # 1. Plugin Dispatch (Highest Priority)
 # Check if a plugin exists for this category (Extension or Override)
-PLUGIN_EXEC=$(find_plugin "$CATEGORY")
+PLUGIN_EXEC=$(find_plugin "$CATEGORY" || true)
 
 if [ -n "$PLUGIN_EXEC" ]; then
     # If a plugin is found, we hand over control immediately.
