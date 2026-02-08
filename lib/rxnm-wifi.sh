@@ -525,8 +525,17 @@ action_connect() {
         
         if [[ -z "$out" ]]; then
             local config_exists="false"
+            
+            # REMEDIATION: The "First Connect" flow
+            # Check for config in EPHEMERAL (RAM/Active) OR PERSISTENT (Disk/Saved) layers.
+            # If a user has a static IP config saved in persistent storage, we shouldn't overwrite it
+            # with default DHCP just because it hasn't been loaded into RAM yet.
+            
             if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || \
                [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
+                config_exists="true"
+            elif [ -f "${PERSISTENT_NET_DIR}/75-config-${iface}.network" ] || \
+                 [ -f "${PERSISTENT_NET_DIR}/75-static-${iface}.network" ]; then
                 config_exists="true"
             fi
             

@@ -28,10 +28,20 @@ case "$1/$2" in
     
   post/*)
     # After resume - restore connections
-    # Wait briefly for hardware/modules to wake up
-    sleep 2
+    
+    # REMEDIATION: Missing iwctl Error Handling & Race Condition
+    # Wait for IWD service and interface availability before attempting commands.
     
     if [ -d /run/rocknix/resume_state ]; then
+        
+        # Wait up to 10 seconds for IWD
+        for i in {1..20}; do
+            if systemctl is-active --quiet iwd; then
+                break
+            fi
+            sleep 0.5
+        done
+        
         for state_file in /run/rocknix/resume_state/*.ssid; do
             [ -e "$state_file" ] || continue
             
@@ -39,9 +49,13 @@ case "$1/$2" in
             ssid=$(cat "$state_file")
             
             if [ -n "$ssid" ] && command -v iwctl >/dev/null; then
-                # Trigger reconnection in background (passphrase already in iwd config)
-                logger -t rxnm-resume "Restoring connection to $ssid on $iface_name"
-                iwctl station "$iface_name" connect "$ssid" >/dev/null 2>&1 &
+                # Ensure the interface exists in sysfs before commanding it
+                if [ -d "/sys/class/net/${iface_name}" ]; then
+                    logger -t rxnm-resume "Restoring connection to $ssid on $iface_name"
+                    iwctl station "$iface_name" connect "$ssid" >/dev/null 2>&1 &
+                else
+                    logger -t rxnm-resume "Interface $iface_name not found after resume, skipping reconnect"
+                fi
             fi
             
             rm -f "$state_file"

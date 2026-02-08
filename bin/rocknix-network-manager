@@ -33,8 +33,17 @@ done
 SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
+# REMEDIATION: Path Hardcoding & Environment Visibility
+# Export LIB_DIR so sourced scripts (like rxnm-system.sh) can access it
+# inside sub-shells or functional contexts.
+export LIB_DIR
+export RXNM_LIB_DIR="${LIB_DIR}"
+
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
+    # Fallback to system install path if relative path fails (e.g. symlinked binary in /usr/bin)
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
+    export LIB_DIR
+    export RXNM_LIB_DIR="${LIB_DIR}"
 fi
 
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then

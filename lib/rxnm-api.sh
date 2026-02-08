@@ -4,9 +4,22 @@
 # ==============================================================================
 
 # Ensure we know where we are
-if [ -z "$RXNM_LIB_DIR" ]; then
-    # Fallback if not called via rxnm wrapper
-    RXNM_LIB_DIR="/usr/lib/rocknix-network-manager/lib"
+if [ -z "${RXNM_LIB_DIR:-}" ]; then
+    # REMEDIATION: Path Hardcoding
+    # Attempt to derive LIB_DIR relative to this script location if not exported by wrapper
+    SOURCE="${BASH_SOURCE[0]}"
+    while [ -h "$SOURCE" ]; do
+      DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+      SOURCE="$(readlink "$SOURCE")"
+      [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+    done
+    RXNM_LIB_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+    
+    # Validation
+    if [ ! -f "${RXNM_LIB_DIR}/rxnm-constants.sh" ]; then
+        # Fallback to standard install path only if relative resolution fails
+        RXNM_LIB_DIR="/usr/lib/rocknix-network-manager/lib"
+    fi
 fi
 
 if [ ! -d "$RXNM_LIB_DIR" ]; then
@@ -17,7 +30,7 @@ fi
 # Load Core Modules
 source "${RXNM_LIB_DIR}/rxnm-constants.sh"
 source "${RXNM_LIB_DIR}/rxnm-utils.sh"
-source "${RXNM_LIB_DIR}/rxnm-system.sh"
+source "${LIB_DIR}/rxnm-system.sh" # Load system utils (fixes circular dep in action_setup)
 
 # If the caller script didn't set format, inherit or default
 : "${RXNM_FORMAT:=human}"

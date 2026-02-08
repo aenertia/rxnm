@@ -64,8 +64,13 @@ action_setup() {
         action_profile "boot"
     else
         # Fallback if profile lib not loaded yet (e.g. direct setup call)
-        source "${LIB_DIR}/rxnm-profiles.sh"
-        action_profile "boot"
+        # Sourcing relies on LIB_DIR exported by bin/rxnm or rxnm-api.sh derivation
+        if [ -n "${LIB_DIR:-}" ] && [ -f "${LIB_DIR}/rxnm-profiles.sh" ]; then
+             source "${LIB_DIR}/rxnm-profiles.sh"
+             action_profile "boot"
+        else
+             log_error "Cannot load profiles: LIB_DIR not set."
+        fi
     fi
 
     if [ -f "${CONF_DIR}/hosts.conf" ]; then
