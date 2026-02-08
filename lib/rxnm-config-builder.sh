@@ -35,6 +35,7 @@ build_network_config() {
     local mac_addr="${19:-}"
     local ipv6_privacy="${20:-}"
     local dhcp_client_id="${21:-}"
+    local ipv6_pd="${22:-yes}"  # Default: Client requests/accepts PD if offered
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then
@@ -101,6 +102,12 @@ build_network_config() {
          config+="\n[DHCPv4]\nClientIdentifier=${dhcp_client_id}\n"
     fi
     
+    # [DHCPv6] Control
+    # Controls whether we accept delegated prefixes (Upstream)
+    if [ "$ipv6_pd" == "no" ]; then
+        config+="\n[DHCPv6]\nUseDelegatedPrefix=no\n"
+    fi
+    
     if [ -n "$routes" ]; then
         IFS=',' read -ra RTS <<< "$routes"
         for r in "${RTS[@]}"; do
@@ -127,6 +134,7 @@ build_gateway_config() {
     local desc="$4"
     local mdns="${5:-yes}"
     local llmnr="${6:-yes}"
+    local ipv6_pd="${7:-yes}" # Default: Distribute PD if sharing is enabled
     
     if [ "$mdns" == "yes" ] && is_avahi_running; then
         mdns="no"
@@ -175,7 +183,12 @@ build_gateway_config() {
     if [ "$share" == "true" ]; then
         # --- SHARING ENABLED (Gateway/Router) ---
         config+="IPForwarding=yes\n"
-        config+="IPv6SendRA=yes\nDHCPPrefixDelegation=yes\n"
+        config+="IPv6SendRA=yes\n"
+        
+        # IPv6 Prefix Delegation (Downstream Distribution)
+        if [ "$ipv6_pd" != "no" ]; then
+             config+="DHCPPrefixDelegation=yes\n"
+        fi
         
         # Add a stable ULA Address for isolated IPv6 connectivity (RFC 4193)
         # This ensures local IPv6 reachability even without upstream PD

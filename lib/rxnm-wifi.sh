@@ -59,11 +59,12 @@ _task_host_mode() {
     local ssid="$5"
     local pass="$6"
     local channel="$7"
+    local ipv6_pd="${8:-yes}"
     
     ensure_dirs
     local host_file="${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     local content
-    content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes")
+    content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes" "$ipv6_pd")
     secure_write "$host_file" "$content" "644"
     
     reload_networkd
@@ -415,7 +416,7 @@ action_disconnect() {
 }
 
 action_host() {
-    local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"
+    local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"; local ipv6_pd="${8:-yes}"
     [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
@@ -428,8 +429,8 @@ action_host() {
     [ -n "$share" ] && use_share="$share"
 
     # Fix: No interactive read for 'host' mode - default to Open if pass is missing
-    with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel"
-    json_success '{"status": "host_started", "ssid": "'"$ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"'}'
+    with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"
+    json_success '{"status": "host_started", "ssid": "'"$ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
     return 0
 }
 

@@ -30,12 +30,13 @@ _task_set_dhcp() {
     local mac="${10}"
     local ipv6_priv="${11}"
     local dhcp_id="${12}"
+    local ipv6_pd="${13}"
     
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
     # Fix: Always ensure a file is written to satisfy persistence/test checks
     ensure_dirs
-    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
     reconfigure_iface "$iface"
 }
 
@@ -54,6 +55,7 @@ _task_set_static() {
     local mac="${12}"
     local ipv6_priv="${13}"
     local dhcp_id="${14}"
+    # Static interfaces usually don't do client PD, so we don't expose it here yet.
 
     [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
     
@@ -133,12 +135,12 @@ _task_set_proxy() {
 }
 
 set_network_cfg() {
-    local iface=$1 dhcp=$2 ip=$3 gw=$4 dns=$5 ssid=$6 domains=$7 routes=$8 mdns=$9 llmnr=${10} metric=${11} vrf=${12} mtu=${13} mac=${14} ipv6_priv=${15} dhcp_id=${16}
+    local iface=$1 dhcp=$2 ip=$3 gw=$4 dns=$5 ssid=$6 domains=$7 routes=$8 mdns=$9 llmnr=${10} metric=${11} vrf=${12} mtu=${13} mac=${14} ipv6_priv=${15} dhcp_id=${16} ipv6_pd=${17}
     local safe_ssid=""
     [ -n "$ssid" ] && safe_ssid=$(sanitize_ssid "$ssid")
     
     local cfg
-    cfg=$(build_network_config "$iface" "$ssid" "$dhcp" "User Config" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "$vrf" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id")
+    cfg=$(build_network_config "$iface" "$ssid" "$dhcp" "User Config" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "$vrf" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd")
     
     local filename="${STORAGE_NET_DIR}/75-config-${iface}"
     if [ -n "$safe_ssid" ]; then
@@ -201,7 +203,7 @@ action_delete_netdev() {
 action_set_dhcp() {
     local iface="$1"; local ssid="$2"; local dns="$3"; local domains="$4"; local routes="$5"
     local mdns="${6:-yes}"; local llmnr="${7:-yes}"; local metric="$8"; local mtu="$9"; local mac="${10}"
-    local ipv6_priv="${11}"; local dhcp_id="${12}"
+    local ipv6_priv="${11}"; local dhcp_id="${12}"; local ipv6_pd="${13}"
 
     [ -z "$iface" ] && { log_error "Interface required"; return 1; }
     
@@ -223,8 +225,8 @@ action_set_dhcp() {
         fi
     fi
 
-    with_iface_lock "$iface" _task_set_dhcp "$iface" "$ssid" "$dns" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
-    json_success '{"mode": "dhcp", "iface": "'"$iface"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
+    with_iface_lock "$iface" _task_set_dhcp "$iface" "$ssid" "$dns" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
+    json_success '{"mode": "dhcp", "iface": "'"$iface"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'", "ipv6_pd": "'"${ipv6_pd:-default}"'"}'
 }
 
 action_set_static() {

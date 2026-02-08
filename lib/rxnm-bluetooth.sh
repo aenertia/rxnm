@@ -21,7 +21,7 @@ _task_pan_net() {
                 local is_share="true"
                 [ "$share" == "false" ] && is_share="false"
                 local content
-                content=$(build_gateway_config "bnep*" "$custom_ip" "$is_share" "Bluetooth PAN Host (NAP)" "yes" "yes")
+                content=$(build_gateway_config "bnep*" "$custom_ip" "$is_share" "Bluetooth PAN Host (NAP)" "yes" "yes" "yes")
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 tune_network_stack "host"
                 [ "$is_share" == "true" ] && enable_nat_masquerade "bnep+" 
