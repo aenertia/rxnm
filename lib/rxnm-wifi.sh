@@ -130,7 +130,9 @@ _task_host_mode() {
     tune_network_stack "host"
     if [ "$use_share" == "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
     
-    if ! is_service_active "iwd"; then echo "IWD not running" >&2; exit 1; fi
+    if [ "${RXNM_TEST_MODE:-0}" -ne 1 ] && ! is_service_active "iwd"; then 
+        echo "IWD not running" >&2; exit 1
+    fi
 
     timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
     

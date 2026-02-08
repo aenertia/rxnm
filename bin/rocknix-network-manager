@@ -702,17 +702,22 @@ case "$CATEGORY" in
             bridge)
                 if [ "$ACTION" == "create" ]; then action_create_bridge "$NAME"; fi
                 if [ "$ACTION" == "add-member" ]; then
-                     IFACE="${1:-}"; shift
-                     while [[ $# -gt 0 ]]; do case "$1" in --bridge) NAME="$2"; shift 2;; *) shift ;; esac; done
-                     action_set_member "$IFACE" "$NAME"
+                     IFACE="${1:-}"; 
+                     # REMEDIATION: Fixed argument parsing. 'NAME' already contains the interface from position 2.
+                     # We need to parse --bridge flag.
+                     IFACE="$NAME"
+                     BRIDGE=""
+                     while [[ $# -gt 0 ]]; do case "$1" in --bridge) BRIDGE="$2"; shift 2;; *) shift ;; esac; done
+                     action_set_member "$IFACE" "$BRIDGE"
                 fi
                 ;;
             bond)
                 if [ "$ACTION" == "create" ]; then action_create_bond "$NAME" "active-backup"; fi
                 if [ "$ACTION" == "add-slave" ]; then
-                     IFACE="${1:-}"; shift
-                     while [[ $# -gt 0 ]]; do case "$1" in --bond) NAME="$2"; shift 2;; *) shift ;; esac; done
-                     action_set_bond_slave "$IFACE" "$NAME"
+                     IFACE="$NAME"
+                     BOND=""
+                     while [[ $# -gt 0 ]]; do case "$1" in --bond) BOND="$2"; shift 2;; *) shift ;; esac; done
+                     action_set_bond_slave "$IFACE" "$BOND"
                 fi
                 ;;
             vrf)
@@ -722,9 +727,10 @@ case "$CATEGORY" in
                      action_create_vrf "$NAME" "$TABLE"
                 fi
                 if [ "$ACTION" == "add-member" ]; then
-                     IFACE="${1:-}"; shift
-                     while [[ $# -gt 0 ]]; do case "$1" in --vrf) NAME="$2"; shift 2;; *) shift ;; esac; done
-                     action_set_vrf_member "$IFACE" "$NAME"
+                     IFACE="$NAME"
+                     VRF=""
+                     while [[ $# -gt 0 ]]; do case "$1" in --vrf) VRF="$2"; shift 2;; *) shift ;; esac; done
+                     action_set_vrf_member "$IFACE" "$VRF"
                 fi
                 ;;
             vlan)
@@ -740,6 +746,19 @@ case "$CATEGORY" in
                      [ -z "$PARENT" ] && { json_error "Parent required (--parent)"; exit 1; }
                      [ -z "$ID" ] && { json_error "ID required (--id)"; exit 1; }
                      action_create_vlan "$PARENT" "$NAME" "$ID"
+                fi
+                ;;
+            macvlan)
+                if [ "$ACTION" == "create" ]; then
+                     PARENT=""; MODE="bridge"
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --parent) PARENT="$2"; shift 2 ;;
+                            --mode) MODE="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                     done
+                     action_create_macvlan "$NAME" "$PARENT" "$MODE"
                 fi
                 ;;
          esac
