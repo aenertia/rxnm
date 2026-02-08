@@ -1,112 +1,336 @@
-_rxnm_completion() {
-    local cur="${COMP_WORDS[COMP_CWORD]}"
-    local prev="${COMP_WORDS[COMP_CWORD-1]}"
-    local cmd="${COMP_WORDS[1]}"
-    local subcmd="${COMP_WORDS[2]}"
+# RXNM (ROCKNIX Network Manager) Bash Completion
+# Supports hierarchical commands, dynamic interface detection, and profile listing
+# Now with Live State Querying via RXNM JSON API
 
-    # Top Level Categories
-    local categories="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
-    local wifi_cmds="scan connect disconnect ap wps networks list forget country"
-    local iface_cmds="show set enable disable list"
-    local system_cmds="status check proxy reload"
-    local profile_cmds="save load list delete export import"
-    local virt_cmds="create delete add-member list"
+_rxnm_completion() {
+    local cur prev words cword
     
-    # Flags that can appear anywhere
-    if [[ "$cur" == --* ]]; then
-        COMPREPLY=($(compgen -W "--json --format --yes --force --debug --help --interface --metric --table --parent --mode --peer --user --group --ssid --password --hidden --share --ip --gateway --dns --http --https --noproxy" -- "$cur"))
-        return 0
+    # Initialize completion vars (Standard bash-completion boilerplate)
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion -n = || return
+    else
+        # Fallback for minimal environments
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
     fi
+
+    # --- CONSTANTS ---
+    local RUN_DIR="/run/rocknix"
+    local STATUS_CACHE="${RUN_DIR}/status.json"
+    local GLOBAL_OPTS="--json --format --yes --force --debug --help"
+    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
+
+    # --- LIVE QUERY HELPERS ---
+
+    # Helper: Get interfaces from live state, optionally filtered by type
+    # Types: wlan, ethernet, bridge, bond, vrf, vlan, etc.
+    _rxnm_live_interfaces() {
+        local type_filter="$1"
+        
+        # 1. Try to read from hot cache (Fastest)
+        if [ -s "$STATUS_CACHE" ] && command -v jq >/dev/null; then
+            if [ -n "$type_filter" ]; then
+                # Map complex types (e.g., 'wifi' -> 'wlan') for loose matching if needed
+                # But RXNM mostly uses standard types in JSON
+                jq -r --arg t "$type_filter" '.interfaces | to_entries[] | select(.value.type == $t) | .key' "$STATUS_CACHE" 2>/dev/null
+            else
+                jq -r '.interfaces | keys[]' "$STATUS_CACHE" 2>/dev/null
+            fi
+            return
+        fi
+
+        # 2. Fallback to Sysfs (Fast, but no type filtering)
+        # We can do basic detection for wifi/bridge based on folder structure
+        local ifaces=($(ls /sys/class/net/ 2>/dev/null | grep -v "^lo$"))
+        
+        if [ -n "$type_filter" ]; then
+            for iface in "${ifaces[@]}"; do
+                case "$type_filter" in
+                    wlan|wifi)
+                        [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ] && echo "$iface"
+                        ;;
+                    bridge)
+                        [ -d "/sys/class/net/$iface/bridge" ] && echo "$iface"
+                        ;;
+                    *)
+                        # Unknown filter structure in sysfs, return all
+                        echo "$iface"
+                        ;;
+                esac
+            done
+        else
+            echo "${ifaces[@]}"
+        fi
+    }
+
+    # Helper: Get Profiles via Tool Query
+    _rxnm_live_profiles() {
+        # 'rxnm profile list --json' is fast enough, but direct directory listing is safer for completion
+        # logic if the tool is broken. We stick to directory listing for raw speed (0ms latency).
+        local p_dir="/storage/.config/network/profiles/global"
+        local profiles="default"
+        if [ -d "$p_dir" ]; then
+            profiles="$profiles $(ls -d "$p_dir"/*/ 2>/dev/null | xargs -n 1 basename)"
+        fi
+        echo "$profiles"
+    }
+
+    # Helper: Get Known SSIDs
+    _rxnm_live_ssids() {
+        # Use iwctl known-networks if available (most accurate source of truth)
+        if command -v iwctl >/dev/null; then
+             iwctl known-networks list 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g' | awk 'NR>4 {print $1}'
+        fi
+    }
+    
+    # Helper: Get Bluetooth Devices (From DBus/Tool)
+    _rxnm_live_bt_devices() {
+        # This is speculative/interactive. We try to read recent scan results if available, 
+        # but don't block.
+        # RXNM doesn't cache BT scan results to disk by default, so we rely on BlueZ cache?
+        # For now, return nothing to avoid blocking.
+        return
+    }
+
+    # --- COMPLETION LOGIC ---
 
     # Level 1: Category Selection
-    if [ $COMP_CWORD -eq 1 ]; then
-        COMPREPLY=($(compgen -W "$categories" -- "$cur"))
+    if [[ $cword -eq 1 ]]; then
+        if [[ "$cur" == -* ]]; then
+            COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
+        else
+            COMPREPLY=( $(compgen -W "${TOP_CATS}" -- "$cur") )
+        fi
         return 0
     fi
 
-    # Level 2+: Action Selection
-    case "$cmd" in
+    local category="${words[1]}"
+    
+    case "$category" in
         wifi)
-            if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "$wifi_cmds" -- "$cur"))
+            local cmds="scan connect disconnect ap wps networks list forget country p2p dpp"
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+                return 0
+            fi
+            
+            local action="${words[2]}"
+            case "$action" in
+                connect|forget)
+                    if [[ "$cur" == -* ]]; then
+                         COMPREPLY=( $(compgen -W "--ssid --password --password-stdin --hidden --interface" -- "$cur") )
+                    else
+                         # Auto-populate with Known SSIDs
+                         COMPREPLY=( $(compgen -W "$(_rxnm_live_ssids)" -- "$cur") )
+                    fi
+                    ;;
+                disconnect|wps|scan)
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
+                    else
+                        # Context Aware: Only show WiFi interfaces
+                        COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wlan)" -- "$cur") )
+                    fi
+                    ;;
+                ap)
+                    if [[ $cword -eq 3 ]]; then
+                        COMPREPLY=( $(compgen -W "start stop" -- "$cur") )
+                    elif [[ "${words[3]}" == "start" ]]; then
+                        COMPREPLY=( $(compgen -W "--ssid --password --mode --share --ip --interface --ipv6-pd" -- "$cur") )
+                    elif [[ "${words[3]}" == "stop" ]]; then
+                        COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
+                    fi
+                    ;;
+                p2p)
+                    if [[ $cword -eq 3 ]]; then
+                         COMPREPLY=( $(compgen -W "scan connect disconnect status" -- "$cur") )
+                    fi
+                    ;;
+                dpp)
+                    if [[ $cword -eq 3 ]]; then
+                         COMPREPLY=( $(compgen -W "enroll stop" -- "$cur") )
+                    fi
+                    ;;
+                *)
+                    COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
+                    ;;
+            esac
+            ;;
+
+        interface)
+            local cmds="show set enable disable list"
+            
+            # Smart Detection: `rxnm interface [IFACE]` vs `rxnm interface [CMD]`
+            local is_iface=0
+            local available_ifaces=$(_rxnm_live_interfaces) # All interfaces
+            
+            for i in $available_ifaces; do
+                if [[ "$i" == "${words[2]}" ]]; then is_iface=1; break; fi
+            done
+
+            if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "$cmds $available_ifaces" -- "$cur") )
+            elif [[ $is_iface -eq 1 ]]; then
+                 # Format: rxnm interface wlan0 [action]
+                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
             else
-                 case "$subcmd" in
-                    connect|forget)
-                        # SSID auto-complete from IWD scan/known networks
-                        if [[ "$cur" != -* ]]; then
-                             local ssids
-                             if command -v iwctl >/dev/null; then
-                                 # Try to get known networks first
-                                 ssids=$(iwctl known-networks list 2>/dev/null | tail -n +5 | awk '{print $1}' | sed 's/\x1b\[[0-9;]*m//g')
+                 # Format: rxnm interface [action] ...
+                 local subaction="${words[2]}"
+                 case "$subaction" in
+                    set)
+                        if [[ $cword -eq 3 ]]; then
+                            COMPREPLY=( $(compgen -W "dhcp static" -- "$cur") )
+                        fi
+                        # Flags for set dhcp/static
+                        if [[ "${words[3]}" == "dhcp" || "${words[3]}" == "static" ]]; then
+                             local opts="--metric --mtu --mac --ipv6-privacy --dhcp-id --ipv6-pd"
+                             if [[ "${words[3]}" == "static" ]]; then
+                                opts="$opts --ip --gateway --dns"
                              fi
-                             COMPREPLY=($(compgen -W "$ssids" -- "$cur"))
+                             COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
                         fi
                         ;;
-                    disconnect|scan|ap)
-                        COMPREPLY=($(compgen -W "--interface" -- "$cur"))
+                    enable|disable|show)
+                        # Suggest all interfaces
+                        COMPREPLY=( $(compgen -W "$available_ifaces" -- "$cur") )
                         ;;
                  esac
             fi
             ;;
-        interface)
-            if [ $COMP_CWORD -eq 2 ]; then
-                 # Suggest interfaces OR subcommands
-                 local ifaces=$(ls /sys/class/net/ 2>/dev/null)
-                 COMPREPLY=($(compgen -W "$iface_cmds $ifaces" -- "$cur"))
-            elif [ $COMP_CWORD -eq 3 ]; then
-                 # If previous was an interface name, now we need a command
-                 if [[ -d "/sys/class/net/$subcmd" ]]; then
-                     COMPREPLY=($(compgen -W "$iface_cmds" -- "$cur"))
-                 else
-                     # Previous was a command, maybe 'set'
-                     case "$subcmd" in
-                        set) COMPREPLY=($(compgen -W "dhcp static" -- "$cur")) ;;
-                     esac
-                 fi
-            fi
-            ;;
-        system)
-            if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "$system_cmds" -- "$cur"))
-            fi
-            ;;
+
         bluetooth)
-             if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "pan scan pair unpair" -- "$cur"))
-             elif [ $COMP_CWORD -eq 3 ]; then
-                case "$subcmd" in
-                    pan) COMPREPLY=($(compgen -W "enable disable" -- "$cur")) ;;
-                esac
+             local cmds="scan pair unpair pan"
+             if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+             fi
+             
+             local action="${words[2]}"
+             if [[ "$action" == "pan" ]]; then
+                  if [[ $cword -eq 3 ]]; then
+                      COMPREPLY=( $(compgen -W "enable disable" -- "$cur") )
+                  elif [[ "${words[3]}" == "enable" ]]; then
+                      COMPREPLY=( $(compgen -W "--mode --share --ip" -- "$cur") )
+                  fi
              fi
              ;;
-        bridge|bond|vrf|macvlan|ipvlan|veth)
-             if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "$virt_cmds" -- "$cur"))
-             fi
-             ;;
-        vpn|tun|tap)
-             if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "wireguard tun tap" -- "$cur"))
-             elif [ $COMP_CWORD -eq 3 ]; then
-                if [[ "$subcmd" == "wireguard" ]]; then
-                    COMPREPLY=($(compgen -W "connect disconnect delete" -- "$cur"))
-                fi
-             fi
-             ;;
+
+        system)
+            local cmds="status check proxy reload setup start stop"
+            if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+            fi
+            
+            local action="${words[2]}"
+            case "$action" in
+                check) COMPREPLY=( $(compgen -W "internet portal" -- "$cur") ) ;;
+                proxy) 
+                    if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "set" -- "$cur") ); fi
+                    if [[ "${words[3]}" == "set" ]]; then COMPREPLY=( $(compgen -W "--http --https --noproxy --interface" -- "$cur") ); fi
+                    ;;
+            esac
+            ;;
+            
         profile)
-            if [ $COMP_CWORD -eq 2 ]; then
-                COMPREPLY=($(compgen -W "$profile_cmds" -- "$cur"))
-            elif [ $COMP_CWORD -eq 3 ]; then
-                case "$subcmd" in
-                    load|delete|export)
-                        local profiles=$(find /storage/.config/network/profiles/global -maxdepth 1 -type d -exec basename {} \; 2>/dev/null)
-                        COMPREPLY=($(compgen -W "$profiles default" -- "$cur"))
+            local cmds="list save load delete export import"
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+            else
+                local action="${words[2]}"
+                case "$action" in
+                    load|delete|export|save)
+                        if [[ "$cur" == -* ]]; then
+                            COMPREPLY=( $(compgen -W "--interface --file" -- "$cur") )
+                        else
+                            # Suggest existing profiles
+                            COMPREPLY=( $(compgen -W "$(_rxnm_live_profiles)" -- "$cur") )
+                        fi
+                        ;;
+                    import)
+                        COMPREPLY=( $(compgen -W "--file" -- "$cur") )
                         ;;
                 esac
             fi
             ;;
-        *)
+
+        bridge|bond|vrf|vlan|macvlan|ipvlan|veth)
+             local cmds="create delete list"
+             if [[ "$category" == "bridge" || "$category" == "vrf" ]]; then cmds="$cmds add-member"; fi
+             if [[ "$category" == "bond" ]]; then cmds="$cmds add-slave"; fi
+             
+             if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+             else
+                 local subaction="${words[2]}"
+                 if [[ "$subaction" == "create" ]]; then
+                      # Context-aware creation flags
+                      case "$category" in
+                        vlan) COMPREPLY=( $(compgen -W "--parent --id" -- "$cur") ) ;;
+                        macvlan|ipvlan) COMPREPLY=( $(compgen -W "--parent --mode" -- "$cur") ) ;;
+                        vrf) COMPREPLY=( $(compgen -W "--table" -- "$cur") ) ;;
+                        bond) COMPREPLY=( $(compgen -W "--mode" -- "$cur") ) ;;
+                        veth) COMPREPLY=( $(compgen -W "--peer" -- "$cur") ) ;;
+                      esac
+                 elif [[ "$subaction" == "add-member" ]]; then
+                      case "$category" in
+                        # Only show Bridges when asked for a bridge
+                        bridge) 
+                             if [[ "$cur" == --bridge* ]] || [[ "$prev" == "--bridge" ]]; then
+                                COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces bridge)" -- "$cur") )
+                             else
+                                COMPREPLY=( $(compgen -W "--bridge" -- "$cur") )
+                             fi
+                             ;;
+                        vrf) 
+                             if [[ "$cur" == --vrf* ]] || [[ "$prev" == "--vrf" ]]; then
+                                COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces vrf)" -- "$cur") )
+                             else
+                                COMPREPLY=( $(compgen -W "--vrf" -- "$cur") )
+                             fi
+                             ;;
+                      esac
+                 elif [[ "$subaction" == "add-slave" ]]; then
+                      if [[ "$cur" == --bond* ]] || [[ "$prev" == "--bond" ]]; then
+                         COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces bond)" -- "$cur") )
+                      else
+                         COMPREPLY=( $(compgen -W "--bond" -- "$cur") )
+                      fi
+                 elif [[ "$subaction" == "delete" ]]; then
+                      # Smart Deletion: Only show interfaces of the matching type!
+                      COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces $category)" -- "$cur") )
+                 fi
+             fi
+             ;;
+             
+        vpn)
+            if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "wireguard" -- "$cur") )
+            elif [[ "${words[2]}" == "wireguard" ]]; then
+                 if [[ $cword -eq 3 ]]; then
+                      COMPREPLY=( $(compgen -W "connect disconnect delete" -- "$cur") )
+                 elif [[ "${words[3]}" == "connect" ]]; then
+                      COMPREPLY=( $(compgen -W "--private-key --peer-key --endpoint --allowed-ips --address" -- "$cur") )
+                 elif [[ "${words[3]}" == "disconnect" || "${words[3]}" == "delete" ]]; then
+                      # Show only WireGuard interfaces
+                      COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wireguard)" -- "$cur") )
+                 fi
+            fi
             ;;
+            
+        tun|tap)
+             if [[ $cword -eq 2 ]]; then
+                 COMPREPLY=( $(compgen -W "create delete" -- "$cur") )
+             else
+                 local subaction="${words[2]}"
+                 if [[ "$subaction" == "delete" ]]; then
+                     COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces $category)" -- "$cur") )
+                 else
+                     COMPREPLY=( $(compgen -W "--user --group" -- "$cur") )
+                 fi
+             fi
+             ;;
+
     esac
 }
 
