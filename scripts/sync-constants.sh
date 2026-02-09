@@ -5,7 +5,8 @@
 # Ensures Single Source of Truth (SSoT) across Hybrid Architecture.
 # ==============================================================================
 
-set -euo pipefail
+# Use strict mode but allow grep/sed to fail gracefully
+set -u
 
 # Inputs
 CONSTANTS_SH="lib/rxnm-constants.sh"
@@ -35,22 +36,22 @@ cat <<EOF > "$HEADER_FILE"
 EOF
 
 # --- PART 1: EXTRACT SHELL CONSTANTS ---
-# We use grep/sed to extract default values assigned via : "${VAR:=VAL}"
-# or export VAR=VAL patterns.
+# Extraction logic using sed to parse shell defaults: : "${VAR:=VAL}"
 
 extract_sh_var() {
     local var_name="$1"
     local type="$2" # string or int
     local file="$3"
     
-    # Regex to capture: : "${VAR:=Value}" OR export VAR=Value
-    # FIX: Append '|| true' to prevent pipefail from killing the script when grep finds no match
-    local val
-    val=$(grep -E "^: \"\\\${$var_name:=" "$file" | sed -E "s/^: \"\\\${$var_name:=(.*)}\"/\1/" | head -n1 || true)
-    
+    local val=""
+
+    # 1. Try Standard Format: : "${VAR:=Value}"
+    # Sed explanation: Match line starting with : "${VAR:=, capture value until }", print capture.
+    val=$(sed -n "s/^: \"\\\${$var_name:=\(.*\)}\"$/\1/p" "$file" | head -n1)
+
+    # 2. Try Export Format: export VAR=Value
     if [ -z "$val" ]; then
-        # Try export format
-        val=$(grep -E "^export $var_name=" "$file" | sed -E "s/^export $var_name=(.*)/\1/" | head -n1 || true)
+        val=$(sed -n "s/^export $var_name=\(.*\)$/\1/p" "$file" | head -n1)
     fi
 
     if [ -n "$val" ]; then
@@ -73,6 +74,7 @@ extract_sh_var "GLOBAL_LOCK_FILE" "string" "$CONSTANTS_SH"
 
 echo "" >> "$HEADER_FILE"
 echo "// --- Tuning Constants (from rxnm-constants.sh) ---" >> "$HEADER_FILE"
+# Note: For adaptive constants (timeouts), this picks the first occurrence (usually the safe/slow default)
 extract_sh_var "SCAN_TIMEOUT" "int" "$CONSTANTS_SH"
 extract_sh_var "CURL_TIMEOUT" "int" "$CONSTANTS_SH"
 extract_sh_var "WIFI_CHANNEL_MAX" "int" "$CONSTANTS_SH"
@@ -85,9 +87,10 @@ echo "// --- API Schema Keys (from api-schema.json) ---" >> "$HEADER_FILE"
 
 if [ -f "$SCHEMA_JSON" ] && command -v jq >/dev/null; then
     # Extract keys from properties and definitions
+    # '|| true' ensures script doesn't die if jq fails
     jq -r '
         .properties | keys[] as $k | "#define KEY_" + ($k | ascii_upcase) + " \"" + $k + "\""
-    ' "$SCHEMA_JSON" >> "$HEADER_FILE"
+    ' "$SCHEMA_JSON" >> "$HEADER_FILE" || echo "// Error running jq" >> "$HEADER_FILE"
 else
     echo "// Warning: api-schema.json not found or jq missing. Skipping schema keys." >> "$HEADER_FILE"
     # Fallback essential keys
