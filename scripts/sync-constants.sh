@@ -44,12 +44,13 @@ extract_sh_var() {
     local file="$3"
     
     # Regex to capture: : "${VAR:=Value}" OR export VAR=Value
+    # FIX: Append '|| true' to prevent pipefail from killing the script when grep finds no match
     local val
-    val=$(grep -E "^: \"\\\${$var_name:=" "$file" | sed -E "s/^: \"\\\${$var_name:=(.*)}\"/\1/" | head -n1)
+    val=$(grep -E "^: \"\\\${$var_name:=" "$file" | sed -E "s/^: \"\\\${$var_name:=(.*)}\"/\1/" | head -n1 || true)
     
     if [ -z "$val" ]; then
         # Try export format
-        val=$(grep -E "^export $var_name=" "$file" | sed -E "s/^export $var_name=(.*)/\1/" | head -n1)
+        val=$(grep -E "^export $var_name=" "$file" | sed -E "s/^export $var_name=(.*)/\1/" | head -n1 || true)
     fi
 
     if [ -n "$val" ]; then
