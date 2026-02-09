@@ -32,6 +32,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
+#include <linux/if_link.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -143,6 +144,10 @@ typedef struct {
     char state[16];
     int mtu;
     bool exists;
+    
+    // Stats
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
 
     // WiFi Specifics
     bool is_wifi;
@@ -187,6 +192,8 @@ iface_entry_t* get_iface(int index) {
             ifaces[i].ssid[0] = '\0';
             ifaces[i].signal_dbm = -100;
             ifaces[i].wifi_connected = false;
+            ifaces[i].rx_bytes = 0;
+            ifaces[i].tx_bytes = 0;
             return &ifaces[i];
         }
     }
@@ -308,6 +315,13 @@ void process_link_msg(struct nlmsghdr *nh) {
     if (tb[IFLA_MTU]) entry->mtu = *(unsigned int *)RTA_DATA(tb[IFLA_MTU]);
     else entry->mtu = 0;
     if (tb[IFLA_MASTER]) entry->master_index = *(int *)RTA_DATA(tb[IFLA_MASTER]);
+    
+    // Stats
+    if (tb[IFLA_STATS64]) {
+        struct rtnl_link_stats64 *stats = (struct rtnl_link_stats64 *)RTA_DATA(tb[IFLA_STATS64]);
+        entry->rx_bytes = stats->rx_bytes;
+        entry->tx_bytes = stats->tx_bytes;
+    }
 
     if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
     else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
@@ -858,8 +872,26 @@ void cmd_get_value(char *key) {
 
     // Key format: interfaces.<name>.<field>
     // e.g., interfaces.wlan0.ip
+    // Or wifi.ssid, wifi.signal
     
     char *segment = strtok(key, ".");
+
+    if (segment && strcmp(segment, "wifi") == 0) {
+        // Handle Global WiFi queries (find first connected wifi)
+        char *sub = strtok(NULL, ".");
+        if (!sub) return;
+
+        for (int i = 0; i < MAX_IFACES; i++) {
+            if (ifaces[i].exists && ifaces[i].is_wifi && ifaces[i].wifi_connected) {
+                if (strcmp(sub, "ssid") == 0) printf("%s\n", ifaces[i].ssid);
+                else if (strcmp(sub, "signal") == 0) printf("%d\n", ifaces[i].signal_dbm);
+                else if (strcmp(sub, "rssi") == 0) printf("%d\n", ifaces[i].signal_dbm);
+                return;
+            }
+        }
+        return;
+    }
+
     if (!segment || strcmp(segment, "interfaces") != 0) {
         // Handle top-level keys
         if (segment && strcmp(segment, "hostname") == 0) {
@@ -898,6 +930,18 @@ void cmd_get_value(char *key) {
     else if (strcmp(field, "rssi") == 0) printf("%d\n", iface->signal_dbm);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
     else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface));
+    else if (strcmp(field, "stats") == 0) {
+        char *sub = strtok(NULL, ".");
+        if (!sub) return;
+        if (strcmp(sub, "rx_bytes") == 0) printf("%llu\n", (unsigned long long)iface->rx_bytes);
+        else if (strcmp(sub, "tx_bytes") == 0) printf("%llu\n", (unsigned long long)iface->tx_bytes);
+    }
+    else if (strcmp(field, "wifi") == 0) {
+        char *sub = strtok(NULL, ".");
+        if (!sub) return;
+        if (strcmp(sub, "ssid") == 0) printf("%s\n", iface->ssid);
+        else if (strcmp(sub, "signal") == 0) printf("%d\n", iface->signal_dbm);
+    }
 }
 
 // --- COMMAND HANDLERS ---

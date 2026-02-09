@@ -285,6 +285,37 @@ _task_p2p_connect() {
     fi
 }
 
+_task_p2p_disconnect() {
+    # Find active P2P connection via DBus
+    local objects_json
+    objects_json=$(busctl --timeout=2s call net.connman.iwd / \
+                   org.freedesktop.DBus.ObjectManager GetManagedObjects \
+                   --json=short 2>/dev/null)
+    
+    local connected_peer
+    connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '
+        .data | to_entries[] | 
+        select(.value["net.connman.iwd.p2p.Peer"] != null) |
+        select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
+        .key
+    ')
+    
+    if [ -z "$connected_peer" ]; then
+        echo "No P2P connection active"
+        return 1
+    fi
+    
+    # Disconnect
+    if busctl --timeout=10s call net.connman.iwd "$connected_peer" \
+        net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1; then
+        echo "OK"
+        return 0
+    else
+        echo "Disconnect failed"
+        return 1
+    fi
+}
+
 _task_p2p_status() {
     # Combine IWD info and Networkd state
     local objects_json
@@ -667,25 +698,12 @@ action_p2p_connect() {
 }
 
 action_p2p_disconnect() {
-    # Subshell logic to cleanly count disconnected peers
-    local disconnect_logic='
-    objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
-    connected_peers=$(echo "$objects_json" | "$JQ_BIN" -r ".data | to_entries[] | select(.value[\"net.connman.iwd.p2p.Peer\"].Connected.data == true) | .key")
-    count=0
-    for peer in $connected_peers; do
-        busctl --timeout=2s call net.connman.iwd "$peer" net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1
-        count=$((count + 1))
-    done
-    echo $count
-    '
-    
-    _task_p2p_disconnect_internal() {
-        eval "$disconnect_logic"
-    }
-    
-    local count
-    count=$(with_iface_lock "global_wifi" _task_p2p_disconnect_internal)
-    json_success '{"action": "p2p_disconnect", "count": '"${count:-0}"'}'
+    local iface="${1:-global_wifi}"
+    if with_iface_lock "$iface" _task_p2p_disconnect; then
+        json_success '{"action": "p2p_disconnect", "status": "ok"}'
+    else
+        json_error "Failed to disconnect P2P peer or no connection active"
+    fi
 }
 
 action_p2p_status() {

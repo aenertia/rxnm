@@ -9,10 +9,11 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11
 # -Os: Optimize for size
 # -static: Include all libraries in the binary (portable)
 # -s: Strip debug symbols
+# -flto: Link Time Optimization
 # -ffunction-sections -fdata-sections: Allow linker to discard unused code
 # -Wl,--gc-sections: Tell linker to garbage collect unused sections
 # -idirafter /usr/include: Fallback to system headers for linux/netlink.h (Required for musl-gcc wrapper)
-CFLAGS_TINY = -Os -static -s -ffunction-sections -fdata-sections -Wl,--gc-sections -idirafter /usr/include -std=c11
+CFLAGS_TINY = -Os -static -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -idirafter /usr/include -std=c11
 
 # Directories
 BIN_DIR = bin

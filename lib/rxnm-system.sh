@@ -140,6 +140,12 @@ reload_networkd() {
         # Hardened against daemon hangs
         timeout 5s networkctl reload 2>/dev/null || log_warn "networkctl reload timed out"
     fi
+    
+    # Cache Invalidation: Ensure UI sees new state immediately
+    # RUN_DIR comes from rxnm-constants.sh
+    if [ -n "$RUN_DIR" ]; then
+        rm -f "$RUN_DIR/status.json" 2>/dev/null
+    fi
 }
 
 reconfigure_iface() {
@@ -151,6 +157,11 @@ reconfigure_iface() {
         else
             timeout 5s networkctl reload
         fi
+    fi
+    
+    # Cache Invalidation for reconfigure
+    if [ -n "$RUN_DIR" ]; then
+        rm -f "$RUN_DIR/status.json" 2>/dev/null
     fi
 }
 
