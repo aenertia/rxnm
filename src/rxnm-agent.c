@@ -148,6 +148,9 @@ typedef struct {
     // Stats
     uint64_t rx_bytes;
     uint64_t tx_bytes;
+    
+    // Speed
+    int speed_mbps;
 
     // WiFi Specifics
     bool is_wifi;
@@ -194,6 +197,7 @@ iface_entry_t* get_iface(int index) {
             ifaces[i].wifi_connected = false;
             ifaces[i].rx_bytes = 0;
             ifaces[i].tx_bytes = 0;
+            ifaces[i].speed_mbps = -1;
             return &ifaces[i];
         }
     }
@@ -253,10 +257,14 @@ void load_runtime_config() {
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
     if (len == -1) return;
     self_path[len] = '\0';
+    
     char *last_slash = strrchr(self_path, '/');
-    if (!last_slash) return; *last_slash = '\0';
+    if (!last_slash) return;
+    *last_slash = '\0';
+    
     last_slash = strrchr(self_path, '/');
-    if (!last_slash) return; *last_slash = '\0';
+    if (!last_slash) return;
+    *last_slash = '\0';
 
     char script_path[PATH_MAX];
     if (strlen(self_path) + 32 < sizeof(script_path)) {
@@ -841,6 +849,23 @@ void print_json_status() {
             printf("\",\n");
         }
         
+        // Stats
+        printf("      \"stats\": {\n");
+        printf("        \"rx_bytes\": %llu,\n", (unsigned long long)ifaces[i].rx_bytes);
+        printf("        \"tx_bytes\": %llu\n", (unsigned long long)ifaces[i].tx_bytes);
+        printf("      },\n");
+
+        // Speed (Read from sysfs on demand)
+        int speed_mbps = -1;
+        char speed_path[256];
+        snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", ifaces[i].name);
+        FILE *f_speed = fopen(speed_path, "r");
+        if (f_speed) {
+            if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1;
+            fclose(f_speed);
+        }
+        if (speed_mbps > 0) printf("      \"speed\": %d,\n", speed_mbps);
+        
         // WiFi Specifics
         if (ifaces[i].is_wifi) {
             printf("      \"wifi\": {\n");
@@ -930,6 +955,17 @@ void cmd_get_value(char *key) {
     else if (strcmp(field, "rssi") == 0) printf("%d\n", iface->signal_dbm);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
     else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface));
+    else if (strcmp(field, "speed") == 0) {
+        int speed_mbps = -1;
+        char speed_path[256];
+        snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", iface->name);
+        FILE *f_speed = fopen(speed_path, "r");
+        if (f_speed) {
+            if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1;
+            fclose(f_speed);
+        }
+        printf("%d\n", speed_mbps);
+    }
     else if (strcmp(field, "stats") == 0) {
         char *sub = strtok(NULL, ".");
         if (!sub) return;

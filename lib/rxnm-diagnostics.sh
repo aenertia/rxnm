@@ -47,10 +47,32 @@ action_status_legacy() {
     fi
 
     # Source E: IProute2 (Fallback for missing networkd)
+    # UPDATED: Use -s to get stats
     local ip_json="[]"
     if command -v ip >/dev/null; then
-        ip_json=$(ip -j addr show 2>/dev/null || echo "[]")
+        ip_json=$(ip -j -s addr show 2>/dev/null || echo "[]")
     fi
+    
+    # Source F: Link Speeds (Sysfs)
+    # Coldpath Optimization: Build a JSON object of {interface: speed}
+    # This avoids calling cat/jq inside the main JQ filter loop
+    local speed_json="{}"
+    local speed_data=""
+    for iface_dir in /sys/class/net/*; do
+        if [ -e "$iface_dir/speed" ]; then
+            local ifname=$(basename "$iface_dir")
+            local s_val=$(cat "$iface_dir/speed" 2>/dev/null || echo -1)
+            # Only include valid positive speeds
+            if [ "$s_val" -gt 0 ] 2>/dev/null; then
+                if [ -z "$speed_data" ]; then 
+                    speed_data="\"$ifname\": $s_val"
+                else
+                    speed_data="$speed_data, \"$ifname\": $s_val"
+                fi
+            fi
+        fi
+    done
+    speed_json="{ $speed_data }"
 
     # 3. MERGE & MAP
     local json_output
@@ -62,6 +84,7 @@ action_status_legacy() {
         --argjson iwd "$iwd_json" \
         --argjson routes "$routes_json" \
         --argjson ip "$ip_json" \
+        --argjson speeds "$speed_json" \
         '
         ($iwd | if . == {} or . == null then {} else . end) as $safe_iwd |
         ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Device"]?)) |
@@ -101,6 +124,9 @@ action_status_legacy() {
         # Normalize Networkd vs IProute2
         (($net | objects | .Interfaces) // ($net | arrays) // []) as $sysd_net |
         
+        # Mapping IP stats from ip -j -s output
+        ($ip | map({key: .ifname, value: (.stats64 // .stats)}) | from_entries) as $ip_stats |
+
         (if ($sysd_net | length) > 0 then $sysd_net else 
             ($ip | map({
                 Name: .ifname,
@@ -124,6 +150,7 @@ action_status_legacy() {
                 select($filter == "" or .Name == $filter) |
                 ($route_map[.Name] // []) as $iface_routes |
                 ($iface_routes | map(select(.dst == "default")) | .[0]) as $def_route |
+                ($ip_stats[.Name] // {}) as $my_stats |
                 {
                     (.Name): {
                         name: .Name,
@@ -138,11 +165,16 @@ action_status_legacy() {
                         
                         gateway: (.Gateway // $def_route.gateway // null),
                         metric: ($def_route.metric // null),
+                        speed: ($speeds[.Name] // null),
                         routes: ($iface_routes | map({
                             dst: .dst,
                             gw: .gateway,
                             metric: .metric
-                        }))
+                        })),
+                        stats: {
+                            rx_bytes: ($my_stats.rx.bytes // 0),
+                            tx_bytes: ($my_stats.tx.bytes // 0)
+                        }
                     }
                 }
             ) | add)

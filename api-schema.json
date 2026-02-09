@@ -156,6 +156,17 @@
         "mtu": {
           "type": "integer"
         },
+        "speed": {
+          "type": "integer",
+          "description": "Link speed in Mbps"
+        },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "rx_bytes": { "type": "integer" },
+            "tx_bytes": { "type": "integer" }
+          }
+        },
         "wifi": {
           "oneOf": [
             {

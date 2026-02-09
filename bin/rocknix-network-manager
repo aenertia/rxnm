@@ -181,18 +181,24 @@ Actions:
   show                  Show interface details
   set dhcp              Enable DHCP
   set static <ip>       Set Static IP (CIDR format)
+  set hardware          Set physical link properties (speed, duplex)
   enable / disable      Set link state
   list                  List all interfaces
 
 Options:
   --gateway <ip>        Set Gateway
   --dns <ip>            Set DNS servers (comma separated)
+  --routes <list>       Set static routes (dest@gw@metric, comma separated)
   --metric <int>        Route metric priority
   --mtu <int>           Set MTU (68-65535)
   --mac <addr>          Set MAC Address (XX:XX:XX:XX:XX:XX)
   --ipv6-privacy <opt>  Set IPv6 Privacy (yes|no|prefer-public|kernel)
   --dhcp-id <opt>       Set DHCP Client ID (mac|duid)
   --ipv6-pd <yes|no>    Enable/Disable IPv6 Prefix Delegation (Default: yes)
+  
+  --speed <mbps>        Link speed (e.g. 100, 1000)
+  --duplex <mode>       Duplex mode (half, full)
+  --autoneg <yes|no>    Enable/Disable auto-negotiation
 EOF
             ;;
         profile)
@@ -570,6 +576,7 @@ case "$CATEGORY" in
                 IPV6_PD=""
                 case "$SUBCMD" in
                     dhcp)
+                         ROUTES=""
                          while [[ $# -gt 0 ]]; do
                             case "$1" in 
                                 --metric) METRIC="$2"; shift 2 ;; 
@@ -578,14 +585,15 @@ case "$CATEGORY" in
                                 --ipv6-privacy) IPV6_PRIV="$2"; shift 2 ;;
                                 --dhcp-id) DHCP_ID="$2"; shift 2 ;;
                                 --ipv6-pd) IPV6_PD="$2"; shift 2 ;;
+                                --routes) ROUTES="$2"; shift 2 ;;
                                 *) shift ;; 
                             esac
                         done
-                         action_set_dhcp "$TARGET" "" "" "" "" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
+                         action_set_dhcp "$TARGET" "" "" "" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
                          ;;
                     static)
                          IP="${1:-}"; [ -n "$IP" ] && [[ "$IP" != --* ]] && shift
-                         GW=""; DNS=""
+                         GW=""; DNS=""; ROUTES=""
                          while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --ip) IP="$2"; shift 2 ;;
@@ -596,10 +604,23 @@ case "$CATEGORY" in
                                 --mac) MAC="$2"; shift 2 ;;
                                 --ipv6-privacy) IPV6_PRIV="$2"; shift 2 ;;
                                 --dhcp-id) DHCP_ID="$2"; shift 2 ;;
+                                --routes) ROUTES="$2"; shift 2 ;;
                                 *) shift ;;
                             esac
                         done
-                         action_set_static "$TARGET" "$IP" "$GW" "$DNS" "" "" "" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID"
+                         action_set_static "$TARGET" "$IP" "$GW" "$DNS" "" "" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID"
+                         ;;
+                    hardware)
+                         SPEED=""; DUPLEX=""; AUTONEG=""
+                         while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --speed) SPEED="$2"; shift 2 ;;
+                                --duplex) DUPLEX="$2"; shift 2 ;;
+                                --autoneg) AUTONEG="$2"; shift 2 ;;
+                                *) shift ;;
+                            esac
+                         done
+                         action_set_hardware "$TARGET" "$SPEED" "$DUPLEX" "$AUTONEG"
                          ;;
                 esac
                 ;;

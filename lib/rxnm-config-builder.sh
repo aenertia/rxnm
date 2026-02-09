@@ -45,7 +45,7 @@ build_network_config() {
     local config="[Match]\nName=${match_iface}\n"
     [ -n "$match_ssid" ] && config+="SSID=${match_ssid}\n"
     
-    # [Link] Section for Hardware Settings
+    # [Link] Section for Hardware Settings (within .network file scope)
     if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$mac_addr" ]; then
         config+="\n[Link]\n"
         [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
@@ -111,18 +111,58 @@ build_network_config() {
     if [ -n "$routes" ]; then
         IFS=',' read -ra RTS <<< "$routes"
         for r in "${RTS[@]}"; do
-            if [[ "$r" == *":"* ]]; then
-                local dest="${r%%:*}"
-                local rgw="${r#*:}"
-                config+="\n[Route]\nDestination=${dest}\nGateway=${rgw}\n"
-                [ -n "$metric" ] && config+="Metric=${metric}\n"
-            else
-                config+="\n[Route]\nDestination=${r}\n"
-                [ -n "$metric" ] && config+="Metric=${metric}\n"
+            # Format: dest@gateway@metric
+            # Using @ allows for IPv6 addresses which contain colons
+            local r_dest=""
+            local r_gw=""
+            local r_metric=""
+            
+            # Split using @
+            IFS='@' read -r r_dest r_gw r_metric <<< "$r"
+            
+            config+="\n[Route]\nDestination=${r_dest}\n"
+            [ -n "$r_gw" ] && config+="Gateway=${r_gw}\n"
+            
+            # Metric Precedence: Per-route > Global Interface Metric
+            if [ -n "$r_metric" ]; then
+                config+="Metric=${r_metric}\n"
+            elif [ -n "$metric" ]; then
+                config+="Metric=${metric}\n"
             fi
         done
     fi
 
+    printf "%b" "$config"
+}
+
+# Device Link Configuration (.link file generation)
+# Handles Speed, Duplex, WakeOnLan, etc.
+build_device_link_config() {
+    local iface="$1"
+    local speed="$2" # Mbps (e.g. 100, 1000)
+    local duplex="$3" # half, full
+    local autoneg="$4" # yes, no
+    
+    # Matching strategy: 
+    # Prefer matching by OriginalName (kernel name) for embedded devices where
+    # PCI/USB enumeration is usually stable.
+    local config="[Match]\nOriginalName=${iface}\n"
+    
+    config+="\n[Link]\nDescription=RXNM Hardware Config\n"
+    
+    if [ -n "$speed" ]; then
+        # systemd .link expects e.g. "100M" or bits. We assume Mbps input.
+        config+="BitsPerSecond=${speed}M\n"
+    fi
+    
+    if [ -n "$duplex" ]; then
+        config+="Duplex=${duplex}\n"
+    fi
+    
+    if [ -n "$autoneg" ]; then
+        config+="AutoNegotiation=${autoneg}\n"
+    fi
+    
     printf "%b" "$config"
 }
 

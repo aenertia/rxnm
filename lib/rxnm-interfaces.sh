@@ -91,6 +91,34 @@ _task_set_link() {
     reconfigure_iface "$iface"
 }
 
+_task_set_hardware() {
+    local iface="$1"
+    local speed="$2"
+    local duplex="$3"
+    local autoneg="$4"
+    
+    ensure_dirs
+    local link_file="${STORAGE_NET_DIR}/10-rxnm-${iface}.link"
+    
+    if [ -z "$speed" ] && [ -z "$duplex" ] && [ -z "$autoneg" ]; then
+        # If all empty, maybe clear config?
+        [ -f "$link_file" ] && rm -f "$link_file"
+    else
+        local content
+        content=$(build_device_link_config "$iface" "$speed" "$duplex" "$autoneg")
+        secure_write "$link_file" "$content" "644"
+    fi
+    
+    # CRITICAL: .link files are applied by udevd, not networkd. 
+    # We must trigger udev to re-apply the link configuration.
+    if command -v udevadm >/dev/null; then
+        # Trigger 'change' action for net subsystem
+        udevadm trigger --verbose --type=devices --action=change --subsystem-match=net --sysname-match="$iface" >/dev/null 2>&1
+    else
+        log_warn "udevadm not found. Link settings may require reboot to apply."
+    fi
+}
+
 _task_set_proxy() {
     local iface="$1"
     local http="$2"
@@ -251,6 +279,20 @@ action_set_static() {
     with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
     
     json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
+}
+
+action_set_hardware() {
+    local iface="$1"; local speed="$2"; local duplex="$3"; local autoneg="$4"
+    
+    [ -z "$iface" ] && { json_error "Interface required"; return 1; }
+    
+    if [ -n "$speed" ] && ! validate_link_speed "$speed"; then return 1; fi
+    if [ -n "$duplex" ] && ! validate_duplex "$duplex"; then return 1; fi
+    if [ -n "$autoneg" ] && ! validate_autoneg "$autoneg"; then return 1; fi
+    
+    with_iface_lock "$iface" _task_set_hardware "$iface" "$speed" "$duplex" "$autoneg"
+    
+    json_success '{"action": "set_hardware", "iface": "'"$iface"'", "speed": "'"${speed:-default}"'", "duplex": "'"${duplex:-default}"'", "autoneg": "'"${autoneg:-default}"'"}'
 }
 
 action_set_link() {
