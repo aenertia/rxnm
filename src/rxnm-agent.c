@@ -5,10 +5,12 @@
  * Phase 2: Core Network Status (Netlink)
  * Phase 4: Connectivity Probing (TCP)
  * Phase 5: Runtime Configuration Sync
+ * Phase 6: Query Interface (Litepath)
  * - Direct Kernel Netlink (RTNETLINK) integration
  * - Zero-dependency JSON generation
  * - Raw TCP WAN Probing
  * - Live parsing of Bash constants for hot-patching
+ * - Dot-notation key retrieval (jq replacement)
  */
 
 #define _GNU_SOURCE
@@ -138,6 +140,7 @@ iface_entry_t* get_iface(int index) {
             ifaces[i].route_count = 0;
             ifaces[i].gateway[0] = '\0';
             ifaces[i].metric = 0;
+            ifaces[i].ipv4[0] = '\0'; // Ensure empty init for First-Win logic
             return &ifaces[i];
         }
     }
@@ -350,9 +353,12 @@ void process_addr_msg(struct nlmsghdr *nh) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         
         if (ifa->ifa_family == AF_INET) {
-            char ipv4_buf[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
-                snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
+            // "First Writer Wins": Only set if empty (Primary IP strategy)
+            if (entry->ipv4[0] == '\0') {
+                char ipv4_buf[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
+                    snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
+                }
             }
         } else if (ifa->ifa_family == AF_INET6) {
             char ipv6_buf[INET6_ADDRSTRLEN];
@@ -594,7 +600,6 @@ void cmd_check_internet() {
 // --- HELPER: Parse Simple Key=Val Config (Proxy) ---
 void get_proxy_config(char* http, char* https, char* no_proxy) {
     char path[PATH_MAX];
-    // FIX: Add length check to silence -Wformat-truncation
     if (strlen(g_conf_dir) + 20 >= sizeof(path)) return;
     
     snprintf(path, sizeof(path), "%s/proxy.conf", g_conf_dir);
@@ -719,17 +724,67 @@ void print_json_status() {
     printf("}\n");
 }
 
+// --- QUERY INTERFACE (LITEPATH) ---
+
+void cmd_get_value(char *key) {
+    // Force collect data first
+    collect_network_state();
+
+    // Key format: interfaces.<name>.<field>
+    // e.g., interfaces.wlan0.ip
+    
+    char *segment = strtok(key, ".");
+    if (!segment || strcmp(segment, "interfaces") != 0) {
+        // Handle top-level keys
+        if (segment && strcmp(segment, "hostname") == 0) {
+            char hostname[256] = DEFAULT_HOSTNAME;
+            gethostname(hostname, sizeof(hostname));
+            printf("%s\n", hostname);
+            return;
+        }
+        if (segment && strcmp(segment, "agent_version") == 0) {
+            printf("%s\n", g_agent_version);
+            return;
+        }
+        return;
+    }
+
+    // Next: Interface Name
+    char *ifname = strtok(NULL, ".");
+    if (!ifname) return;
+
+    // Find Interface
+    iface_entry_t *iface = NULL;
+    for (int i = 0; i < MAX_IFACES; i++) {
+        if (ifaces[i].exists && strcmp(ifaces[i].name, ifname) == 0) {
+            iface = &ifaces[i];
+            break;
+        }
+    }
+    if (!iface) return; // Interface not found
+
+    // Next: Field
+    char *field = strtok(NULL, ".");
+    if (!field) return;
+
+    if (strcmp(field, "ip") == 0) printf("%s\n", iface->ipv4);
+    else if (strcmp(field, "mac") == 0) printf("%s\n", iface->mac);
+    else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
+    else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface->name));
+    else if (strcmp(field, "gateway") == 0) printf("%s\n", iface->gateway);
+    else if (strcmp(field, "mtu") == 0) printf("%d\n", iface->mtu);
+    else if (strcmp(field, "metric") == 0) printf("%u\n", iface->metric);
+}
+
 // --- COMMAND HANDLERS ---
 
 void cmd_version() {
-    // Use dynamic version
     printf("rxnm-agent %s\n", g_agent_version);
     printf("ConfDir: %s\n", g_conf_dir);
     printf("RunDir:  %s\n", g_run_dir);
 }
 
 void cmd_health() {
-    // Use dynamic version
     printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", 
            KEY_SUCCESS, g_agent_version);
 }
@@ -776,23 +831,25 @@ int main(int argc, char *argv[]) {
         {"is-low-power", no_argument, 0, 'L'},
         {"dump",    no_argument, 0, 'd'},
         {"check-internet", no_argument, 0, 'c'},
+        {"get",     required_argument, 0, 'g'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "vhHtdLc", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcg:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': 
-                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--check-internet  Verify WAN (TCP probe)\n"); 
+                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value (e.g. interfaces.wlan0.ip)\n"); 
                 return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
             case 'd': cmd_dump_status(); return 0;
             case 'c': cmd_check_internet(); return 0;
+            case 'g': cmd_get_value(optarg); return 0;
             default: return 1;
         }
     }

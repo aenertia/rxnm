@@ -77,6 +77,7 @@ test-all: all
 	@echo "[TEST] Running Full Validation Suite..."
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
+	@bash tests/test_query.sh
 	@bash tests/test_consistency.sh
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
