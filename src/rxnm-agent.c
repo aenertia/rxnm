@@ -26,23 +26,46 @@
 // Include generated SSoT constants
 #include "rxnm_generated.h"
 
-#define AGENT_VERSION "0.2.0-phase2"
+#define AGENT_VERSION "0.2.4-phase2"
 #define BUF_SIZE 8192
+#define MAX_IPV6_PER_IFACE 8
+#define MAX_ROUTES_PER_IFACE 16
+
+// Buffer sizes with room for CIDR suffix (e.g. "/24" or "/128")
+#define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
+#define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
 
 // --- DATA STRUCTURES ---
+
+typedef struct {
+    char dst[IPV6_CIDR_LEN]; // "default" or "10.0.0.0/8"
+    char gw[INET6_ADDRSTRLEN];
+    uint32_t metric;
+    bool is_default;
+} route_entry_t;
+
 // Minimal structure to hold interface state during Netlink dump
 typedef struct {
     int index;
+    int master_index; // For bridge membership (IFLA_MASTER)
     char name[IFNAMSIZ];
     char mac[18];
-    char ipv4[INET_ADDRSTRLEN];
-    char ipv6[INET6_ADDRSTRLEN]; // Only holding first IPv6 for simplified status
+    char ipv4[IPV4_CIDR_LEN];
+    char ipv6[MAX_IPV6_PER_IFACE][IPV6_CIDR_LEN]; 
+    int ipv6_count;
+    
+    // Routing Info
+    char gateway[INET6_ADDRSTRLEN]; // Primary default gateway
+    uint32_t metric;                // Primary metric (of default route)
+    route_entry_t routes[MAX_ROUTES_PER_IFACE];
+    int route_count;
+
     char state[16];
     int mtu;
     bool exists;
 } iface_entry_t;
 
-// Simple fixed-size map for constrained devices (max 16 interfaces usually enough for handhelds)
+// Simple fixed-size map for constrained devices (max 32 interfaces)
 #define MAX_IFACES 32
 iface_entry_t ifaces[MAX_IFACES];
 
@@ -74,12 +97,43 @@ iface_entry_t* get_iface(int index) {
         if (!ifaces[i].exists) {
             ifaces[i].exists = true;
             ifaces[i].index = index;
+            ifaces[i].master_index = 0;
             // Defaults
             strcpy(ifaces[i].state, "unknown");
+            ifaces[i].ipv6_count = 0;
+            ifaces[i].route_count = 0;
+            ifaces[i].gateway[0] = '\0';
+            ifaces[i].metric = 0;
             return &ifaces[i];
         }
     }
     return NULL; // Full
+}
+
+const char* detect_iface_type(const char* name) {
+    if (strncmp(name, "wl", 2) == 0) return "wifi";
+    if (strncmp(name, "et", 2) == 0) return "ethernet";
+    if (strncmp(name, "en", 2) == 0) return "ethernet";
+    
+    // Bridges
+    if (strncmp(name, "br", 2) == 0) return "bridge";
+    if (strncmp(name, "podman", 6) == 0) return "bridge";
+    if (strncmp(name, "docker", 6) == 0) return "bridge";
+    if (strncmp(name, "cni", 3) == 0) return "bridge";
+    
+    // Virtual / Gadgets
+    if (strncmp(name, "lo", 2) == 0) return "loopback";
+    if (strncmp(name, "usb", 3) == 0) return "gadget";
+    if (strncmp(name, "rndis", 5) == 0) return "gadget";
+    if (strncmp(name, "veth", 4) == 0) return "veth";
+    
+    // Tunnels / VPNs
+    if (strncmp(name, "tun", 3) == 0) return "tun";
+    if (strncmp(name, "tap", 3) == 0) return "tap";
+    if (strncmp(name, "tailscale", 9) == 0) return "tun";
+    if (strncmp(name, "wg", 2) == 0) return "wireguard";
+    
+    return "unknown";
 }
 
 // --- NETLINK ENGINE ---
@@ -131,17 +185,19 @@ void process_link_msg(struct nlmsghdr *nh) {
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
-    // FIX: Retrieve MTU from attributes, not struct
     if (tb[IFLA_MTU]) {
         entry->mtu = *(unsigned int *)RTA_DATA(tb[IFLA_MTU]);
     } else {
         entry->mtu = 0;
     }
 
+    if (tb[IFLA_MASTER]) {
+        entry->master_index = *(int *)RTA_DATA(tb[IFLA_MASTER]);
+    }
+
     // Map Kernel Flags to Systemd-like State
-    // IFF_UP (0x1) && IFF_RUNNING (0x40)
     if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) {
-        strcpy(entry->state, "routable"); // Simplified mapping for UI
+        strcpy(entry->state, "routable");
     } else if (ifi->ifi_flags & IFF_UP) {
         strcpy(entry->state, "no-carrier");
     } else {
@@ -160,16 +216,90 @@ void process_addr_msg(struct nlmsghdr *nh) {
 
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
+        char tmp_buf[INET6_ADDRSTRLEN];
+
         if (ifa->ifa_family == AF_INET) {
-            inet_ntop(AF_INET, addr_ptr, entry->ipv4, INET_ADDRSTRLEN);
+            if (inet_ntop(AF_INET, addr_ptr, tmp_buf, sizeof(tmp_buf))) {
+                // Combine Addr + PrefixLen (CIDR)
+                snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", tmp_buf, ifa->ifa_prefixlen);
+            }
         } else if (ifa->ifa_family == AF_INET6) {
-            // Only capture global scope or unique local, skip link-local fe80:: for brevity if desired
-            // For now, capture first found
-            if (entry->ipv6[0] == '\0') { 
-                inet_ntop(AF_INET6, addr_ptr, entry->ipv6, INET6_ADDRSTRLEN);
+            // Append IPv6 addresses if we have space
+            if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
+                if (inet_ntop(AF_INET6, addr_ptr, tmp_buf, sizeof(tmp_buf))) {
+                    snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", tmp_buf, ifa->ifa_prefixlen);
+                    entry->ipv6_count++;
+                }
             }
         }
     }
+}
+
+void process_route_msg(struct nlmsghdr *nh) {
+    struct rtmsg *rt = NLMSG_DATA(nh);
+    struct rtattr *tb[RTA_MAX + 1];
+    
+    // We only care about main table routes (RT_TABLE_MAIN = 254)
+    if (rt->rtm_table != RT_TABLE_MAIN) return;
+    
+    parse_rtattr(tb, RTA_MAX, RTM_RTA(rt), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*rt)));
+
+    // Must have an Output Interface to associate with
+    if (!tb[RTA_OIF]) return;
+
+    int oif = *(int *)RTA_DATA(tb[RTA_OIF]);
+    iface_entry_t *entry = get_iface(oif);
+    if (!entry) return;
+
+    if (entry->route_count >= MAX_ROUTES_PER_IFACE) return;
+
+    route_entry_t *route = &entry->routes[entry->route_count];
+    memset(route, 0, sizeof(route_entry_t));
+
+    // 1. Metric / Priority
+    if (tb[RTA_PRIORITY]) {
+        route->metric = *(uint32_t *)RTA_DATA(tb[RTA_PRIORITY]);
+    } else {
+        route->metric = 0;
+    }
+
+    // 2. Gateway
+    if (tb[RTA_GATEWAY]) {
+        void *gw_ptr = RTA_DATA(tb[RTA_GATEWAY]);
+        if (rt->rtm_family == AF_INET) {
+            inet_ntop(AF_INET, gw_ptr, route->gw, INET_ADDRSTRLEN);
+        } else if (rt->rtm_family == AF_INET6) {
+            inet_ntop(AF_INET6, gw_ptr, route->gw, INET6_ADDRSTRLEN);
+        }
+    }
+
+    // 3. Destination (or Default)
+    if (rt->rtm_dst_len == 0) {
+        strcpy(route->dst, "default");
+        route->is_default = true;
+        
+        // Update Primary Interface Stats if this is a default route
+        if (rt->rtm_family == AF_INET || entry->gateway[0] == '\0') {
+            if (route->gw[0] != '\0') {
+                strcpy(entry->gateway, route->gw);
+            }
+            entry->metric = route->metric;
+        }
+    } else if (tb[RTA_DST]) {
+        void *dst_ptr = RTA_DATA(tb[RTA_DST]);
+        char tmp_buf[INET6_ADDRSTRLEN];
+        if (rt->rtm_family == AF_INET) {
+            if (inet_ntop(AF_INET, dst_ptr, tmp_buf, sizeof(tmp_buf))) {
+                snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            }
+        } else if (rt->rtm_family == AF_INET6) {
+            if (inet_ntop(AF_INET6, dst_ptr, tmp_buf, sizeof(tmp_buf))) {
+                snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            }
+        }
+    }
+
+    entry->route_count++;
 }
 
 void send_dump_request(int sock, int type) {
@@ -183,7 +313,7 @@ void send_dump_request(int sock, int type) {
     req.nlh.nlmsg_type = type;
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     req.nlh.nlmsg_seq = time(NULL);
-    req.rtg.rtgen_family = AF_PACKET; // AF_PACKET for links, or AF_UNSPEC
+    req.rtg.rtgen_family = AF_UNSPEC; // All families
 
     send(sock, &req, req.nlh.nlmsg_len, 0);
 }
@@ -203,6 +333,8 @@ void read_netlink_response(int sock) {
                 process_link_msg(nh);
             } else if (nh->nlmsg_type == RTM_NEWADDR) {
                 process_addr_msg(nh);
+            } else if (nh->nlmsg_type == RTM_NEWROUTE) {
+                process_route_msg(nh);
             }
         }
     }
@@ -217,21 +349,47 @@ void collect_network_state() {
     read_netlink_response(sock);
 
     // 2. Dump Addresses
-    struct {
-        struct nlmsghdr nlh;
-        struct ifaddrmsg ifa;
-    } req_addr;
-    memset(&req_addr, 0, sizeof(req_addr));
-    req_addr.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
-    req_addr.nlh.nlmsg_type = RTM_GETADDR;
-    req_addr.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req_addr.nlh.nlmsg_seq = 1;
-    req_addr.ifa.ifa_family = AF_UNSPEC; // All families
-    
-    send(sock, &req_addr, req_addr.nlh.nlmsg_len, 0);
+    send_dump_request(sock, RTM_GETADDR);
+    read_netlink_response(sock);
+
+    // 3. Dump Routes
+    send_dump_request(sock, RTM_GETROUTE);
     read_netlink_response(sock);
 
     close(sock);
+}
+
+// --- HELPER: Parse Simple Key=Val Config (Proxy) ---
+void get_proxy_config(char* http, char* https, char* no_proxy) {
+    // Construct path: CONF_DIR/proxy.conf
+    char path[512];
+    snprintf(path, sizeof(path), "%s/proxy.conf", CONF_DIR);
+    
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        // Strip quotes if simple 'key="val"'
+        char *val_start = strchr(line, '=');
+        if (!val_start) continue;
+        val_start++; // Skip =
+        
+        // Remove trailing newline
+        line[strcspn(line, "\n")] = 0;
+        
+        // Simple dequote
+        if (val_start[0] == '"' || val_start[0] == '\'') val_start++;
+        char *val_end = val_start + strlen(val_start) - 1;
+        if (*val_end == '"' || *val_end == '\'') *val_end = 0;
+        
+        if (strncmp(line, "http_proxy", 10) == 0) strcpy(http, val_start);
+        else if (strncmp(line, "HTTP_PROXY", 10) == 0) strcpy(http, val_start);
+        else if (strncmp(line, "https_proxy", 11) == 0) strcpy(https, val_start);
+        else if (strncmp(line, "HTTPS_PROXY", 11) == 0) strcpy(https, val_start);
+        else if (strncmp(line, "no_proxy", 8) == 0) strcpy(no_proxy, val_start);
+    }
+    fclose(f);
 }
 
 // --- JSON GENERATION (Simple Printer) ---
@@ -240,6 +398,34 @@ void print_json_status() {
     printf("{\n");
     printf("  \"%s\": true,\n", KEY_SUCCESS);
     printf("  \"agent_version\": \"%s\",\n", AGENT_VERSION);
+    
+    // Hostname
+    char hostname[256] = "ROCKNIX";
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        // Fallback to /etc/hostname if syscall fails
+        FILE *f = fopen("/etc/hostname", "r");
+        if (f) {
+            if (fgets(hostname, sizeof(hostname), f)) {
+                hostname[strcspn(hostname, "\n")] = 0;
+            }
+            fclose(f);
+        }
+    }
+    printf("  \"hostname\": \"%s\",\n", hostname);
+
+    // Global Proxy
+    char p_http[256] = "", p_https[256] = "", p_no[256] = "";
+    get_proxy_config(p_http, p_https, p_no);
+    if (strlen(p_http) > 0 || strlen(p_https) > 0 || strlen(p_no) > 0) {
+        printf("  \"global_proxy\": {\n");
+        if (strlen(p_http) > 0) printf("    \"http\": \"%s\",\n", p_http);
+        if (strlen(p_https) > 0) printf("    \"https\": \"%s\",\n", p_https);
+        if (strlen(p_no) > 0) printf("    \"noproxy\": \"%s\"\n", p_no);
+        printf("  },\n");
+    } else {
+        printf("  \"global_proxy\": null,\n");
+    }
+
     printf("  \"interfaces\": {\n");
 
     bool first = true;
@@ -251,25 +437,56 @@ void print_json_status() {
         printf("      \"name\": \"%s\",\n", ifaces[i].name);
         printf("      \"state\": \"%s\",\n", ifaces[i].state);
         printf("      \"mtu\": %d,\n", ifaces[i].mtu);
+        
         if (strlen(ifaces[i].mac) > 0) 
             printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
+        
         if (strlen(ifaces[i].ipv4) > 0) 
             printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
-        if (strlen(ifaces[i].ipv6) > 0)
-            printf("      \"ipv6\": [\"%s\"],\n", ifaces[i].ipv6);
         
-        // Basic Type Inference
-        const char *type = "unknown";
-        if (strncmp(ifaces[i].name, "wl", 2) == 0) type = "wifi";
-        else if (strncmp(ifaces[i].name, "et", 2) == 0) type = "ethernet";
-        else if (strncmp(ifaces[i].name, "en", 2) == 0) type = "ethernet";
-        else if (strncmp(ifaces[i].name, "br", 2) == 0) type = "bridge";
-        else if (strncmp(ifaces[i].name, "lo", 2) == 0) type = "loopback";
-        else if (strncmp(ifaces[i].name, "usb", 3) == 0) type = "gadget";
-        else if (strncmp(ifaces[i].name, "tun", 3) == 0) type = "tun";
-        else if (strncmp(ifaces[i].name, "wg", 2) == 0) type = "wireguard";
+        if (strlen(ifaces[i].gateway) > 0)
+            printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
         
+        if (ifaces[i].metric > 0)
+            printf("      \"metric\": %u,\n", ifaces[i].metric);
+        
+        // IPv6 Array
+        printf("      \"ipv6\": [");
+        for(int j=0; j<ifaces[i].ipv6_count; j++) {
+            printf("\"%s\"%s", ifaces[i].ipv6[j], (j < ifaces[i].ipv6_count - 1) ? ", " : "");
+        }
+        printf("],\n");
+        
+        // Routes Array
+        printf("      \"routes\": [");
+        for(int k=0; k<ifaces[i].route_count; k++) {
+            printf("\n        { \"dst\": \"%s\"", ifaces[i].routes[k].dst);
+            if (strlen(ifaces[i].routes[k].gw) > 0)
+                printf(", \"gw\": \"%s\"", ifaces[i].routes[k].gw);
+            if (ifaces[i].routes[k].metric > 0)
+                printf(", \"metric\": %u", ifaces[i].routes[k].metric);
+            printf(" }");
+            if (k < ifaces[i].route_count - 1) printf(",");
+        }
+        if (ifaces[i].route_count > 0) printf("\n      ");
+        printf("],\n");
+
+        const char *type = detect_iface_type(ifaces[i].name);
         printf("      \"type\": \"%s\",\n", type);
+        
+        // Bridge Members (Iterate all interfaces to find children of this bridge)
+        if (strcmp(type, "bridge") == 0) {
+            printf("      \"members\": \"");
+            bool first_mem = true;
+            for (int c = 0; c < MAX_IFACES; c++) {
+                if (ifaces[c].exists && ifaces[c].master_index == ifaces[i].index) {
+                    if (!first_mem) printf(",");
+                    printf("%s", ifaces[c].name);
+                    first_mem = false;
+                }
+            }
+            printf("\",\n");
+        }
         
         // Connected Logic (Simplified)
         bool connected = (strcmp(ifaces[i].state, "routable") == 0);
