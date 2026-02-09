@@ -6,6 +6,11 @@
 : "${RXNM_VERSION:=1.0.0}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
+# Connectivity Probes (TCP L4)
+# Space-separated list of "Host:Port". Used by rxnm-agent for fast connectivity checks.
+: "${RXNM_PROBE_TARGETS_V4:=1.1.1.1:80 8.8.8.8:443}"
+: "${RXNM_PROBE_TARGETS_V6:=[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443}"
+
 # Default Paths (Override via Environment Variables)
 : "${CONF_DIR:=/storage/.config}"
 : "${STATE_DIR:=/var/lib}"

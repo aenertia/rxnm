@@ -7,6 +7,7 @@ CACHE_FILE="${RUN_DIR}/status.json"
 CACHE_TTL=5 # Seconds
 
 # Agent Path
+# FIX: Correct relative path is ONE level up from lib
 AGENT_BIN="${RXNM_LIB_DIR}/../bin/rxnm-agent"
 if [ ! -x "$AGENT_BIN" ]; then
     # Fallback for installed system path
@@ -40,7 +41,6 @@ action_status_legacy() {
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
 
     # Source D: Routes
-    # FIX: Ensure we never return 'null' if ip command produces no output
     local routes_json="[]"
     if ip -j route show >/dev/null 2>&1; then
         routes_json=$( { ip -j route show; ip -j -6 route show; } 2>/dev/null | "$JQ_BIN" -s 'add // []' )
@@ -107,7 +107,6 @@ action_status_legacy() {
                 Type: (if .link_type=="wlan" then "wlan" elif .link_type=="ether" then "ethernet" else .link_type end),
                 Addresses: (.addr_info | map({
                     Family: (if .family=="inet" then 2 else 10 end),
-                    # FIX: Append CIDR prefix length to match Agent behavior
                     Address: ((.local // .address) + "/" + (.prefixlen|tostring)),
                     Scope: .scope
                 })),
@@ -130,7 +129,6 @@ action_status_legacy() {
                         name: .Name,
                         type: .Type,
                         state: .OperationalState,
-                        # FIX: Removed .Scope!="host" filter to allow Loopback IP matching with Agent
                         ip: (if .Addresses then (.Addresses | map(select(.Family==2)) | .[0].Address) else null end),
                         ipv6: (if .Addresses then (.Addresses | map(select(.Family==10)) | map(.Address)) else [] end),
                         mac: (.HardwareAddress),
@@ -232,6 +230,15 @@ action_check_portal() {
 }
 
 action_check_internet() {
+    # 1. FASTPATH: Agent
+    if [ -x "$AGENT_BIN" ]; then
+        if output=$("$AGENT_BIN" --check-internet 2>/dev/null) && [[ "$output" == \{* ]]; then
+            echo "$output"
+            return 0
+        fi
+    fi
+
+    # 2. COLDPATH: Legacy Curl
     if command -v networkctl >/dev/null; then
          local operstate; operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
          case "$operstate" in

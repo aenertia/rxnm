@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * Phase 2: Core Network Status (Netlink)
+ * Phase 4: Connectivity Probing (TCP)
+ * Phase 5: Runtime Configuration Sync
  * - Direct Kernel Netlink (RTNETLINK) integration
  * - Zero-dependency JSON generation
- * - Replaces 'networkctl status' overhead
+ * - Raw TCP WAN Probing
+ * - Live parsing of Bash constants for hot-patching
  */
 
 #define _GNU_SOURCE
@@ -18,10 +21,14 @@
 #include <getopt.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <limits.h>
 
 // Include generated SSoT constants
 #include "rxnm_generated.h"
@@ -33,9 +40,26 @@
 #ifndef DEFAULT_HOSTNAME
 #define DEFAULT_HOSTNAME "ROCKNIX"
 #endif
+#ifndef CONF_DIR
+#define CONF_DIR "/storage/.config"
+#endif
+#ifndef RUN_DIR
+#define RUN_DIR "/run/rocknix"
+#endif
+#ifndef RXNM_PROBE_TARGETS_V4
+#define RXNM_PROBE_TARGETS_V4 "1.1.1.1:80 8.8.8.8:443"
+#endif
+#ifndef RXNM_PROBE_TARGETS_V6
+#define RXNM_PROBE_TARGETS_V6 "[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443"
+#endif
 
-// Revert to macro usage for version consistency
-#define AGENT_VERSION RXNM_VERSION
+// --- RUNTIME CONFIGURATION ---
+// These default to compile-time constants but can be overridden by parsing the bash script at runtime.
+char g_conf_dir[PATH_MAX] = CONF_DIR;
+char g_run_dir[PATH_MAX] = RUN_DIR;
+char g_agent_version[64] = RXNM_VERSION;
+char g_conn_targets_v4[256] = RXNM_PROBE_TARGETS_V4;
+char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
 
 #define BUF_SIZE 8192
 #define MAX_IPV6_PER_IFACE 8
@@ -146,6 +170,104 @@ const char* detect_iface_type(const char* name) {
     return "unknown";
 }
 
+// --- CONFIGURATION PARSER ---
+
+// Helper to extract value from bash syntax: : "${VAR:=VALUE}" or export VAR=VALUE
+void extract_bash_var(const char *line, const char *key, char *dest, size_t dest_size) {
+    char search_pattern[128];
+    
+    // Pattern 1: : "${KEY:=VALUE}"
+    snprintf(search_pattern, sizeof(search_pattern), "${%s:=", key);
+    char *p = strstr(line, search_pattern);
+    if (p) {
+        p += strlen(search_pattern);
+        char *end = strchr(p, '}');
+        if (end) {
+            // Check for quotes inside
+            if (p[0] == '"' && end[-1] == '"') {
+                p++; end--;
+            }
+            size_t len = end - p;
+            if (len < dest_size) {
+                strncpy(dest, p, len);
+                dest[len] = '\0';
+                return;
+            }
+        }
+    }
+
+    // Pattern 2: export KEY=VALUE
+    snprintf(search_pattern, sizeof(search_pattern), "export %s=", key);
+    p = strstr(line, search_pattern);
+    if (p) {
+        p += strlen(search_pattern);
+        // Simple value extraction (stops at newline or space if unquoted)
+        char *end = strpbrk(p, "\n");
+        if (!end) end = p + strlen(p);
+        
+        // Handle quotes
+        if (p[0] == '"') {
+            p++;
+            end = strchr(p, '"');
+        }
+        
+        if (end) {
+            size_t len = end - p;
+            if (len < dest_size) {
+                strncpy(dest, p, len);
+                dest[len] = '\0';
+            }
+        }
+    }
+}
+
+void load_runtime_config() {
+    // 1. Find the script path relative to the binary
+    // Binary: .../bin/rxnm-agent
+    // Script: .../lib/rxnm-constants.sh
+    char self_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (len == -1) return;
+    self_path[len] = '\0';
+
+    // Strip filename
+    char *last_slash = strrchr(self_path, '/');
+    if (!last_slash) return;
+    *last_slash = '\0'; // Now we have .../bin
+
+    // Go up one level
+    last_slash = strrchr(self_path, '/');
+    if (!last_slash) return;
+    *last_slash = '\0'; // Now we have .../
+
+    // Append lib path safely
+    char script_path[PATH_MAX];
+    if (strlen(self_path) + 32 < sizeof(script_path)) {
+        snprintf(script_path, sizeof(script_path), "%s/lib/rxnm-constants.sh", self_path);
+    } else {
+        return; // Path too long, bail
+    }
+
+    // 2. Parse the file
+    FILE *f = fopen(script_path, "r");
+    if (!f) return; // Fallback to compiled defaults silently
+
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        // Skip comments
+        char *trimmed = line;
+        while(*trimmed == ' ' || *trimmed == '\t') trimmed++;
+        if (*trimmed == '#') continue;
+
+        extract_bash_var(trimmed, "CONF_DIR", g_conf_dir, sizeof(g_conf_dir));
+        extract_bash_var(trimmed, "RUN_DIR", g_run_dir, sizeof(g_run_dir));
+        extract_bash_var(trimmed, "RXNM_VERSION", g_agent_version, sizeof(g_agent_version));
+        extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V4", g_conn_targets_v4, sizeof(g_conn_targets_v4));
+        extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V6", g_conn_targets_v6, sizeof(g_conn_targets_v6));
+    }
+    fclose(f);
+}
+
 // --- NETLINK ENGINE ---
 
 int open_netlink() {
@@ -228,16 +350,12 @@ void process_addr_msg(struct nlmsghdr *nh) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         
         if (ifa->ifa_family == AF_INET) {
-            // FIX: Use correctly sized buffer for IPv4 to prevent compiler warning
             char ipv4_buf[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
-                // Combine Addr + PrefixLen (CIDR)
                 snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
             }
         } else if (ifa->ifa_family == AF_INET6) {
-            // Use larger buffer for IPv6
             char ipv6_buf[INET6_ADDRSTRLEN];
-            // Append IPv6 addresses if we have space
             if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
                 if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
                     snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
@@ -252,12 +370,10 @@ void process_route_msg(struct nlmsghdr *nh) {
     struct rtmsg *rt = NLMSG_DATA(nh);
     struct rtattr *tb[RTA_MAX + 1];
     
-    // We only care about main table routes (RT_TABLE_MAIN = 254)
     if (rt->rtm_table != RT_TABLE_MAIN) return;
     
     parse_rtattr(tb, RTA_MAX, RTM_RTA(rt), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*rt)));
 
-    // Must have an Output Interface to associate with
     if (!tb[RTA_OIF]) return;
 
     int oif = *(int *)RTA_DATA(tb[RTA_OIF]);
@@ -269,14 +385,12 @@ void process_route_msg(struct nlmsghdr *nh) {
     route_entry_t *route = &entry->routes[entry->route_count];
     memset(route, 0, sizeof(route_entry_t));
 
-    // 1. Metric / Priority
     if (tb[RTA_PRIORITY]) {
         route->metric = *(uint32_t *)RTA_DATA(tb[RTA_PRIORITY]);
     } else {
         route->metric = 0;
     }
 
-    // 2. Gateway
     if (tb[RTA_GATEWAY]) {
         void *gw_ptr = RTA_DATA(tb[RTA_GATEWAY]);
         if (rt->rtm_family == AF_INET) {
@@ -286,12 +400,10 @@ void process_route_msg(struct nlmsghdr *nh) {
         }
     }
 
-    // 3. Destination (or Default)
     if (rt->rtm_dst_len == 0) {
         strcpy(route->dst, "default");
         route->is_default = true;
         
-        // Update Primary Interface Stats if this is a default route
         if (rt->rtm_family == AF_INET || entry->gateway[0] == '\0') {
             if (route->gw[0] != '\0') {
                 strcpy(entry->gateway, route->gw);
@@ -326,7 +438,7 @@ void send_dump_request(int sock, int type) {
     req.nlh.nlmsg_type = type;
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     req.nlh.nlmsg_seq = time(NULL);
-    req.rtg.rtgen_family = AF_UNSPEC; // All families
+    req.rtg.rtgen_family = AF_UNSPEC; 
 
     send(sock, &req, req.nlh.nlmsg_len, 0);
 }
@@ -357,41 +469,145 @@ void collect_network_state() {
     int sock = open_netlink();
     if (sock < 0) return;
 
-    // 1. Dump Links
     send_dump_request(sock, RTM_GETLINK);
     read_netlink_response(sock);
 
-    // 2. Dump Addresses
     send_dump_request(sock, RTM_GETADDR);
     read_netlink_response(sock);
 
-    // 3. Dump Routes
     send_dump_request(sock, RTM_GETROUTE);
     read_netlink_response(sock);
 
     close(sock);
 }
 
+// --- CONNECTIVITY CHECK (TCP PROBE) ---
+
+bool tcp_probe(const char *ip_str, int port, int family) {
+    int sock = socket(family, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (sock < 0) return false;
+
+    struct timeval timeout;
+    timeout.tv_sec = 2; // 2 second timeout
+    timeout.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    int res = -1;
+    if (family == AF_INET) {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, ip_str, &addr.sin_addr);
+        res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    } else {
+        struct sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(port);
+        inet_pton(AF_INET6, ip_str, &addr.sin6_addr);
+        res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    }
+
+    bool success = false;
+    if (res == 0) {
+        success = true;
+    } else if (errno == EINPROGRESS) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        if (select(sock + 1, NULL, &wfds, NULL, &timeout) > 0) {
+            int so_error;
+            socklen_t len = sizeof so_error;
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+            if (so_error == 0) success = true;
+        }
+    }
+
+    close(sock);
+    return success;
+}
+
+// Parse "IP:Port" string
+void parse_target(char *token, char *ip, int *port) {
+    char *colon = strrchr(token, ':');
+    if (colon) {
+        *colon = '\0';
+        *port = atoi(colon + 1);
+        
+        // Handle [IPv6] brackets
+        if (token[0] == '[' && token[strlen(token)-1] == ']') {
+            token[strlen(token)-1] = '\0'; // remove closing
+            strcpy(ip, token + 1); // skip opening
+        } else {
+            strcpy(ip, token);
+        }
+    }
+}
+
+void cmd_check_internet() {
+    bool v4 = false;
+    bool v6 = false;
+
+    // IPv4 Probe (using runtime list)
+    char list_v4[256];
+    strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4));
+    char *token_v4, *saveptr_v4;
+    token_v4 = strtok_r(list_v4, " ", &saveptr_v4);
+    
+    while (token_v4 != NULL) {
+        char ip[64];
+        int port = 80;
+        parse_target(token_v4, ip, &port);
+        if (tcp_probe(ip, port, AF_INET)) {
+            v4 = true;
+            break; 
+        }
+        token_v4 = strtok_r(NULL, " ", &saveptr_v4);
+    }
+
+    // IPv6 Probe
+    char list_v6[512];
+    strncpy(list_v6, g_conn_targets_v6, sizeof(list_v6));
+    char *token_v6, *saveptr_v6;
+    token_v6 = strtok_r(list_v6, " ", &saveptr_v6);
+    
+    while (token_v6 != NULL) {
+        char ip[128];
+        int port = 80;
+        parse_target(token_v6, ip, &port);
+        if (tcp_probe(ip, port, AF_INET6)) {
+            v6 = true;
+            break;
+        }
+        token_v6 = strtok_r(NULL, " ", &saveptr_v6);
+    }
+
+    printf("{\n");
+    printf("  \"%s\": true,\n", KEY_SUCCESS);
+    printf("  \"connected\": %s,\n", (v4 || v6) ? "true" : "false");
+    printf("  \"ipv4\": %s,\n", v4 ? "true" : "false");
+    printf("  \"ipv6\": %s\n", v6 ? "true" : "false");
+    printf("}\n");
+}
+
 // --- HELPER: Parse Simple Key=Val Config (Proxy) ---
 void get_proxy_config(char* http, char* https, char* no_proxy) {
-    // Construct path: CONF_DIR/proxy.conf
-    char path[512];
-    snprintf(path, sizeof(path), "%s/proxy.conf", CONF_DIR);
+    char path[PATH_MAX];
+    // FIX: Add length check to silence -Wformat-truncation
+    if (strlen(g_conf_dir) + 20 >= sizeof(path)) return;
+    
+    snprintf(path, sizeof(path), "%s/proxy.conf", g_conf_dir);
     
     FILE *f = fopen(path, "r");
     if (!f) return;
     
     char line[512];
     while (fgets(line, sizeof(line), f)) {
-        // Strip quotes if simple 'key="val"'
         char *val_start = strchr(line, '=');
         if (!val_start) continue;
-        val_start++; // Skip =
-        
-        // Remove trailing newline
+        val_start++;
         line[strcspn(line, "\n")] = 0;
-        
-        // Simple dequote
         if (val_start[0] == '"' || val_start[0] == '\'') val_start++;
         char *val_end = val_start + strlen(val_start) - 1;
         if (*val_end == '"' || *val_end == '\'') *val_end = 0;
@@ -410,23 +626,18 @@ void get_proxy_config(char* http, char* https, char* no_proxy) {
 void print_json_status() {
     printf("{\n");
     printf("  \"%s\": true,\n", KEY_SUCCESS);
-    printf("  \"agent_version\": \"%s\",\n", AGENT_VERSION);
+    printf("  \"agent_version\": \"%s\",\n", g_agent_version);
     
-    // Hostname
     char hostname[256] = DEFAULT_HOSTNAME;
     if (gethostname(hostname, sizeof(hostname)) != 0) {
-        // Fallback to /etc/hostname if syscall fails
         FILE *f = fopen("/etc/hostname", "r");
         if (f) {
-            if (fgets(hostname, sizeof(hostname), f)) {
-                hostname[strcspn(hostname, "\n")] = 0;
-            }
+            if (fgets(hostname, sizeof(hostname), f)) hostname[strcspn(hostname, "\n")] = 0;
             fclose(f);
         }
     }
     printf("  \"hostname\": \"%s\",\n", hostname);
 
-    // Global Proxy
     char p_http[256] = "", p_https[256] = "", p_no[256] = "";
     get_proxy_config(p_http, p_https, p_no);
     if (strlen(p_http) > 0 || strlen(p_https) > 0 || strlen(p_no) > 0) {
@@ -463,14 +674,12 @@ void print_json_status() {
         if (ifaces[i].metric > 0)
             printf("      \"metric\": %u,\n", ifaces[i].metric);
         
-        // IPv6 Array
         printf("      \"ipv6\": [");
         for(int j=0; j<ifaces[i].ipv6_count; j++) {
             printf("\"%s\"%s", ifaces[i].ipv6[j], (j < ifaces[i].ipv6_count - 1) ? ", " : "");
         }
         printf("],\n");
         
-        // Routes Array
         printf("      \"routes\": [");
         for(int k=0; k<ifaces[i].route_count; k++) {
             printf("\n        { \"dst\": \"%s\"", ifaces[i].routes[k].dst);
@@ -487,7 +696,6 @@ void print_json_status() {
         const char *type = detect_iface_type(ifaces[i].name);
         printf("      \"type\": \"%s\",\n", type);
         
-        // Bridge Members (Iterate all interfaces to find children of this bridge)
         if (strcmp(type, "bridge") == 0) {
             printf("      \"members\": \"");
             bool first_mem = true;
@@ -501,7 +709,6 @@ void print_json_status() {
             printf("\",\n");
         }
         
-        // Connected Logic (Simplified)
         bool connected = (strcmp(ifaces[i].state, "routable") == 0);
         printf("      \"connected\": %s\n", connected ? "true" : "false");
         
@@ -515,14 +722,16 @@ void print_json_status() {
 // --- COMMAND HANDLERS ---
 
 void cmd_version() {
-    printf("rxnm-agent %s\n", AGENT_VERSION);
-    printf("ConfDir: %s\n", CONF_DIR);
-    printf("RunDir:  %s\n", RUN_DIR);
+    // Use dynamic version
+    printf("rxnm-agent %s\n", g_agent_version);
+    printf("ConfDir: %s\n", g_conf_dir);
+    printf("RunDir:  %s\n", g_run_dir);
 }
 
 void cmd_health() {
+    // Use dynamic version
     printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", 
-           KEY_SUCCESS, AGENT_VERSION);
+           KEY_SUCCESS, g_agent_version);
 }
 
 void cmd_time() {
@@ -535,14 +744,10 @@ void cmd_time() {
     }
 }
 
-// Ported logic from rxnm-constants.sh
 void cmd_is_low_power() {
     const char *cpuinfo = "/proc/cpuinfo";
-    // Use generated macro from rxnm_generated.h
     const char *socs[] = LOW_POWER_SOCS;
-
     bool is_lp = false;
-    // Iterate through NULL-terminated array
     for (int i = 0; socs[i] != NULL; i++) {
         if (file_contains(cpuinfo, socs[i])) {
             is_lp = true;
@@ -553,16 +758,16 @@ void cmd_is_low_power() {
 }
 
 void cmd_dump_status() {
-    // 1. Gather Data (Netlink)
     collect_network_state();
-    
-    // 2. Output JSON
     print_json_status();
 }
 
 // --- MAIN ---
 
 int main(int argc, char *argv[]) {
+    // Phase 5: Load runtime configuration from Bash script if available
+    load_runtime_config();
+
     static struct option long_options[] = {
         {"version", no_argument, 0, 'v'},
         {"help",    no_argument, 0, 'h'},
@@ -570,26 +775,27 @@ int main(int argc, char *argv[]) {
         {"time",    no_argument, 0, 't'},
         {"is-low-power", no_argument, 0, 'L'},
         {"dump",    no_argument, 0, 'd'},
+        {"check-internet", no_argument, 0, 'c'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "vhHtdL", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLc", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': 
-                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n"); 
+                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--check-internet  Verify WAN (TCP probe)\n"); 
                 return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
             case 'd': cmd_dump_status(); return 0;
+            case 'c': cmd_check_internet(); return 0;
             default: return 1;
         }
     }
-    // Default to help if no args
     if (optind < argc) { fprintf(stderr, "Unknown arg\n"); return 1; }
     printf("rxnm-agent: Use --help\n");
     return 1;

@@ -69,6 +69,11 @@ extract_sh_var "RXNM_VERSION" "string" "$CONSTANTS_SH"
 extract_sh_var "DEFAULT_HOSTNAME" "string" "$CONSTANTS_SH"
 
 echo "" >> "$HEADER_FILE"
+echo "// --- Probe Targets ---" >> "$HEADER_FILE"
+extract_sh_var "RXNM_PROBE_TARGETS_V4" "string" "$CONSTANTS_SH"
+extract_sh_var "RXNM_PROBE_TARGETS_V6" "string" "$CONSTANTS_SH"
+
+echo "" >> "$HEADER_FILE"
 echo "// --- Path Constants (from rxnm-constants.sh) ---" >> "$HEADER_FILE"
 extract_sh_var "CONF_DIR" "string" "$CONSTANTS_SH"
 extract_sh_var "STATE_DIR" "string" "$CONSTANTS_SH"
