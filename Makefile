@@ -11,7 +11,8 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11
 # -s: Strip debug symbols
 # -ffunction-sections -fdata-sections: Allow linker to discard unused code
 # -Wl,--gc-sections: Tell linker to garbage collect unused sections
-CFLAGS_TINY = -Os -static -s -ffunction-sections -fdata-sections -Wl,--gc-sections -std=c11
+# -idirafter /usr/include: Fallback to system headers for linux/netlink.h (Required for musl-gcc wrapper)
+CFLAGS_TINY = -Os -static -s -ffunction-sections -fdata-sections -Wl,--gc-sections -idirafter /usr/include -std=c11
 
 # Directories
 BIN_DIR = bin
@@ -51,9 +52,12 @@ tiny: dirs constants
 		musl-gcc $(CFLAGS_TINY) -I$(SRC_DIR) -o $(TARGET) $(SRC_DIR)/rxnm-agent.c; \
 		echo "       [INFO] Used musl-gcc. Optimized for size (~50KB)."; \
 	else \
-		$(CC) $(CFLAGS_TINY) -I$(SRC_DIR) -o $(TARGET) $(SRC_DIR)/rxnm-agent.c; \
 		echo "       [WARN] musl-gcc not found. Using $(CC) -static."; \
 		echo "       [INFO] Binary will be larger (~700KB) due to glibc, but latency remains <5ms."; \
+		$(CC) $(CFLAGS_TINY) -I$(SRC_DIR) -o $(TARGET) $(SRC_DIR)/rxnm-agent.c || \
+		(echo "       [ERROR] Build failed. Missing static libc?" && \
+		 echo "       [HINT] Fedora/Bazzite/RHEL: sudo dnf install glibc-static" && \
+		 echo "       [HINT] Debian/Ubuntu: sudo apt install libc6-dev" && exit 1); \
 	fi
 	@ls -lh $(TARGET)
 
