@@ -131,7 +131,12 @@ void process_link_msg(struct nlmsghdr *nh) {
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
-    entry->mtu = ifi->ifi_mtu; // Can also use IFLA_MTU
+    // FIX: Retrieve MTU from attributes, not struct
+    if (tb[IFLA_MTU]) {
+        entry->mtu = *(unsigned int *)RTA_DATA(tb[IFLA_MTU]);
+    } else {
+        entry->mtu = 0;
+    }
 
     // Map Kernel Flags to Systemd-like State
     // IFF_UP (0x1) && IFF_RUNNING (0x40)
