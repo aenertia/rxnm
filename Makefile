@@ -24,7 +24,7 @@ SCRIPTS_DIR = scripts
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check dirs constants tiny
+.PHONY: all clean check dirs constants tiny test-all
 
 all: dirs constants $(TARGET)
 
@@ -66,6 +66,17 @@ clean:
 	@rm -f $(TARGET)
 	@rm -f $(CONSTANTS_HEADER)
 
+# Quick check (Foundation + Phase 2 Logic)
 check: all
 	@echo "[TEST] Running Foundation Tests..."
 	@bash tests/test_foundation.sh
+	@bash tests/test_phase2.sh
+
+# Full Phase 3 Validation
+test-all: all
+	@echo "[TEST] Running Full Validation Suite..."
+	@bash tests/test_foundation.sh
+	@bash tests/test_phase2.sh
+	@bash tests/test_consistency.sh
+	@bash tests/test_performance.sh
+	@bash tests/test_stability.sh

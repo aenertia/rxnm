@@ -2,6 +2,10 @@
 # CONFIGURATION, PATHS & CONSTANTS
 # ==============================================================================
 
+# System Identity
+: "${RXNM_VERSION:=1.0.0}"
+: "${DEFAULT_HOSTNAME:=ROCKNIX}"
+
 # Default Paths (Override via Environment Variables)
 : "${CONF_DIR:=/storage/.config}"
 : "${STATE_DIR:=/var/lib}"
@@ -34,7 +38,7 @@ IS_LOW_POWER=false
 # - Legacy x86: Atom, Celeron, Pentium, Geode
 # - MIPS:      Generic MIPS/MIPS64 (Routers, Older handhelds)
 # - Specialized: AVR32, Xtensa/Tensilica, Loongson/LoongArch
-if grep -qEi "RK3326|RK3566|RK3128|RK3036|RK3288|H700|H616|H3|H5|H6|A64|A133|A33|sunxi|BCM2835|BCM2836|BCM2837|ATM7051|S905|S805|Meson|X1830|JZ4770|riscv|sun20iw1p1|JH7110|JH7100|Atom|Celeron|Pentium|Geode|mips|avr|xtensa|tensilica|loongson|loongarch" /proc/cpuinfo 2>/dev/null; then
+if grep -qEi "RK3326|RK3566|RK3128|RK3036|RK3288|H700|H616|H3|H5|H6|A64|A133|A33|sunxi|BCM2835|BCM2836|BCM2837|ATM7051|S905|S805|Meson|X1830|JZ4770|riscv|sun20iw1p1|JH7110|JH7100|Atom|Celeron|Pentium|Geode|MIPS32|MIPS64|avr|xtensa|tensilica|loongson|loongarch" /proc/cpuinfo 2>/dev/null; then
     IS_LOW_POWER=true
 fi
 

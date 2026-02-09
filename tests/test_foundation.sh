@@ -27,18 +27,22 @@ pass "Agent binary exists"
 
 # 2. Binary Analysis (Size & Linking)
 filesize=$(stat -c%s "$AGENT_BIN")
-filetype=$(file "$AGENT_BIN")
 info "Binary Size: ${filesize} bytes"
 
-if [[ "$filetype" == *"statically linked"* ]]; then
-    pass "Binary is statically linked (Portable)"
-    if [ "$filesize" -lt 100000 ]; then
-        pass "Binary size is optimal (<100KB)"
+if command -v file >/dev/null; then
+    filetype=$(file "$AGENT_BIN")
+    if [[ "$filetype" == *"statically linked"* ]]; then
+        pass "Binary is statically linked (Portable)"
+        if [ "$filesize" -lt 100000 ]; then
+            pass "Binary size is optimal (<100KB)"
+        else
+            info "Binary size >100KB. Consider using musl-gcc or 'make tiny'."
+        fi
     else
-        info "Binary size >100KB. Consider using musl-gcc or 'make tiny'."
+        info "Binary is dynamically linked. (Use 'make tiny' for extremis targets)"
     fi
 else
-    info "Binary is dynamically linked. (Use 'make tiny' for extremis targets)"
+    info "Skipping 'file' check (utility not installed). Ensure static linking manually."
 fi
 
 # 3. Test Time Consistency

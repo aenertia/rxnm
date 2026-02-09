@@ -26,7 +26,17 @@
 // Include generated SSoT constants
 #include "rxnm_generated.h"
 
-#define AGENT_VERSION "0.2.4-phase2"
+// Fallbacks if header generation fails (Safety)
+#ifndef RXNM_VERSION
+#define RXNM_VERSION "0.0.0-dev"
+#endif
+#ifndef DEFAULT_HOSTNAME
+#define DEFAULT_HOSTNAME "ROCKNIX"
+#endif
+
+// Revert to macro usage for version consistency
+#define AGENT_VERSION RXNM_VERSION
+
 #define BUF_SIZE 8192
 #define MAX_IPV6_PER_IFACE 8
 #define MAX_ROUTES_PER_IFACE 16
@@ -216,18 +226,21 @@ void process_addr_msg(struct nlmsghdr *nh) {
 
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
-        char tmp_buf[INET6_ADDRSTRLEN];
-
+        
         if (ifa->ifa_family == AF_INET) {
-            if (inet_ntop(AF_INET, addr_ptr, tmp_buf, sizeof(tmp_buf))) {
+            // FIX: Use correctly sized buffer for IPv4 to prevent compiler warning
+            char ipv4_buf[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
                 // Combine Addr + PrefixLen (CIDR)
-                snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", tmp_buf, ifa->ifa_prefixlen);
+                snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
             }
         } else if (ifa->ifa_family == AF_INET6) {
+            // Use larger buffer for IPv6
+            char ipv6_buf[INET6_ADDRSTRLEN];
             // Append IPv6 addresses if we have space
             if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
-                if (inet_ntop(AF_INET6, addr_ptr, tmp_buf, sizeof(tmp_buf))) {
-                    snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", tmp_buf, ifa->ifa_prefixlen);
+                if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
+                    snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
                     entry->ipv6_count++;
                 }
             }
@@ -400,7 +413,7 @@ void print_json_status() {
     printf("  \"agent_version\": \"%s\",\n", AGENT_VERSION);
     
     // Hostname
-    char hostname[256] = "ROCKNIX";
+    char hostname[256] = DEFAULT_HOSTNAME;
     if (gethostname(hostname, sizeof(hostname)) != 0) {
         // Fallback to /etc/hostname if syscall fails
         FILE *f = fopen("/etc/hostname", "r");
@@ -522,18 +535,14 @@ void cmd_time() {
     }
 }
 
+// Ported logic from rxnm-constants.sh
 void cmd_is_low_power() {
     const char *cpuinfo = "/proc/cpuinfo";
-    // List from rxnm-constants.sh logic (replicated)
-    const char *socs[] = {
-        "RK3326", "RK3566", "RK3128", "RK3036", "RK3288",
-        "H700", "H616", "H3", "H5", "H6", "A64", "A133", "A33", "sunxi",
-        "BCM2835", "BCM2836", "BCM2837", "ATM7051", "S905", "S805", 
-        "Meson", "X1830", "JZ4770", "riscv", "mips", "avr", "xtensa", 
-        "tensilica", "loongson", "loongarch", "Atom", "Geode", NULL
-    };
+    // Use generated macro from rxnm_generated.h
+    const char *socs[] = LOW_POWER_SOCS;
 
     bool is_lp = false;
+    // Iterate through NULL-terminated array
     for (int i = 0; socs[i] != NULL; i++) {
         if (file_contains(cpuinfo, socs[i])) {
             is_lp = true;
