@@ -30,7 +30,11 @@ IS_LOW_POWER=false
 # - Actions:   ATM7051 (Low end Powkiddy)
 # - Amlogic:   S905/Meson (TV Boxes/Handhelds)
 # - Ingenic:   X1830/JZ4770 (MIPS handhelds)
-if grep -qEi "RK3326|RK3566|RK3128|RK3036|RK3288|H700|H616|H3|H5|H6|A64|A133|A33|sunxi|BCM2835|BCM2836|BCM2837|ATM7051|S905|S805|Meson|X1830|JZ4770" /proc/cpuinfo 2>/dev/null; then
+# - RISC-V:    Allwinner D1, StarFive JH7110 (VisionFive 2)
+# - Legacy x86: Atom, Celeron, Pentium, Geode
+# - MIPS:      Generic MIPS/MIPS64 (Routers, Older handhelds)
+# - Specialized: AVR32, Xtensa/Tensilica, Loongson/LoongArch
+if grep -qEi "RK3326|RK3566|RK3128|RK3036|RK3288|H700|H616|H3|H5|H6|A64|A133|A33|sunxi|BCM2835|BCM2836|BCM2837|ATM7051|S905|S805|Meson|X1830|JZ4770|riscv|sun20iw1p1|JH7110|JH7100|Atom|Celeron|Pentium|Geode|mips|avr|xtensa|tensilica|loongson|loongarch" /proc/cpuinfo 2>/dev/null; then
     IS_LOW_POWER=true
 fi
 
