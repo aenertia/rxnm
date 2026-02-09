@@ -6,7 +6,8 @@
  * Phase 4: Connectivity Probing (TCP)
  * Phase 5: Runtime Configuration Sync
  * Phase 6: Query Interface (Litepath)
- * - Direct Kernel Netlink (RTNETLINK) integration
+ * Phase 7: Wireless Fidelity (nl80211)
+ * - Direct Kernel Netlink (RTNETLINK & GENL)
  * - Zero-dependency JSON generation
  * - Raw TCP WAN Probing
  * - Live parsing of Bash constants for hot-patching
@@ -27,6 +28,7 @@
 #include <sys/time.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/genetlink.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -54,6 +56,50 @@
 #ifndef RXNM_PROBE_TARGETS_V6
 #define RXNM_PROBE_TARGETS_V6 "[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443"
 #endif
+
+// --- NL80211 CONSTANTS (Embedded for portability/static linking) ---
+#define NL80211_GENL_NAME "nl80211"
+#define NL80211_CMD_GET_INTERFACE 5
+#define NL80211_CMD_GET_STATION 17
+
+enum nl80211_attrs {
+    NL80211_ATTR_UNSPEC,
+    NL80211_ATTR_WIPHY,
+    NL80211_ATTR_WIPHY_FREQ,
+    NL80211_ATTR_FREQ,
+    NL80211_ATTR_CHANNEL,
+    NL80211_ATTR_IFINDEX,
+    NL80211_ATTR_IFNAME,
+    NL80211_ATTR_IFTYPE,
+    NL80211_ATTR_MAC,
+    NL80211_ATTR_KEY_DATA,
+    NL80211_ATTR_GENERATION,
+    NL80211_ATTR_FLAGS,
+    NL80211_ATTR_WIPHY_ANTENNA_TX,
+    NL80211_ATTR_WIPHY_ANTENNA_RX,
+    NL80211_ATTR_WIPHY_NAME,
+    NL80211_ATTR_STATUS,
+    NL80211_ATTR_SSID,
+    NL80211_ATTR_MBSSID_CONFIG,
+    NL80211_ATTR_STATION_INFO = 20,
+    __NL80211_ATTR_AFTER_LAST
+};
+#define NL80211_ATTR_MAX (__NL80211_ATTR_AFTER_LAST - 1)
+
+// Nested attributes for STATION_INFO
+enum nl80211_sta_info {
+    __NL80211_STA_INFO_INVALID,
+    NL80211_STA_INFO_INACTIVE_TIME,
+    NL80211_STA_INFO_RX_BYTES,
+    NL80211_STA_INFO_TX_BYTES,
+    NL80211_STA_INFO_LLID,
+    NL80211_STA_INFO_PLID,
+    NL80211_STA_INFO_PLINK_STATE,
+    NL80211_STA_INFO_SIGNAL,
+    __NL80211_STA_INFO_AFTER_LAST
+};
+#define NL80211_STA_INFO_MAX (__NL80211_STA_INFO_AFTER_LAST - 1)
+
 
 // --- RUNTIME CONFIGURATION ---
 // These default to compile-time constants but can be overridden by parsing the bash script at runtime.
@@ -99,6 +145,12 @@ typedef struct {
     char state[16];
     int mtu;
     bool exists;
+
+    // WiFi Specifics
+    bool is_wifi;
+    char ssid[33]; // Max 32 chars + null
+    int signal_dbm; // -100 to 0
+    bool wifi_connected;
 } iface_entry_t;
 
 // Simple fixed-size map for constrained devices (max 32 interfaces)
@@ -141,13 +193,24 @@ iface_entry_t* get_iface(int index) {
             ifaces[i].gateway[0] = '\0';
             ifaces[i].metric = 0;
             ifaces[i].ipv4[0] = '\0'; // Ensure empty init for First-Win logic
+            
+            // WiFi Defaults
+            ifaces[i].is_wifi = false;
+            ifaces[i].ssid[0] = '\0';
+            ifaces[i].signal_dbm = -100;
+            ifaces[i].wifi_connected = false;
+
             return &ifaces[i];
         }
     }
     return NULL; // Full
 }
 
-const char* detect_iface_type(const char* name) {
+const char* detect_iface_type(iface_entry_t *entry) {
+    // Priority: If Kernel says it's WiFi (nl80211), believe it.
+    if (entry->is_wifi) return "wifi";
+
+    const char *name = entry->name;
     if (strncmp(name, "wl", 2) == 0) return "wifi";
     if (strncmp(name, "et", 2) == 0) return "ethernet";
     if (strncmp(name, "en", 2) == 0) return "ethernet";
@@ -471,20 +534,200 @@ void read_netlink_response(int sock) {
     }
 }
 
-void collect_network_state() {
-    int sock = open_netlink();
+// --- GENERIC NETLINK (NL80211) ENGINE ---
+
+int open_netlink_genl() {
+    int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (sock < 0) return -1;
+    
+    struct sockaddr_nl addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.nl_family = AF_NETLINK;
+    
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
+    return sock;
+}
+
+// Helper to find Family ID (CTRL)
+int get_genl_family_id(int sock, const char *family_name) {
+    struct {
+        struct nlmsghdr n;
+        struct genlmsghdr g;
+        char buf[256];
+    } req;
+    
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = GENL_ID_CTRL;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+    req.n.nlmsg_seq = 1;
+    req.n.nlmsg_pid = getpid();
+    req.g.cmd = CTRL_CMD_GETFAMILY;
+    req.g.version = 1;
+
+    struct rtattr *rta = (struct rtattr *) (req.buf);
+    rta->rta_type = CTRL_ATTR_FAMILY_NAME;
+    rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
+    strcpy(RTA_DATA(rta), family_name);
+    req.n.nlmsg_len += rta->rta_len;
+
+    if (send(sock, &req, req.n.nlmsg_len, 0) < 0) return -1;
+
+    char buf[BUF_SIZE];
+    int len = recv(sock, buf, sizeof(buf), 0);
+    if (len < 0) return -1;
+
+    struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+    if (NLMSG_OK(nh, len) && nh->nlmsg_type != NLMSG_ERROR) {
+        struct genlmsghdr *gh = NLMSG_DATA(nh);
+        struct rtattr *tb[CTRL_ATTR_MAX + 1];
+        int attrlen = nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        struct rtattr *attr = (struct rtattr *) ((char *) gh + GENL_HDRLEN);
+        
+        memset(tb, 0, sizeof(tb));
+        while (RTA_OK(attr, attrlen)) {
+            if (attr->rta_type <= CTRL_ATTR_MAX) tb[attr->rta_type] = attr;
+            attr = RTA_NEXT(attr, attrlen);
+        }
+        if (tb[CTRL_ATTR_FAMILY_ID]) {
+            return *(uint16_t *) RTA_DATA(tb[CTRL_ATTR_FAMILY_ID]);
+        }
+    }
+    return -1;
+}
+
+void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
+    struct genlmsghdr *gh = NLMSG_DATA(nh);
+    struct rtattr *tb[NL80211_ATTR_MAX + 1];
+    struct rtattr *attr = (struct rtattr *) ((char *) gh + GENL_HDRLEN);
+    int len = nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+
+    memset(tb, 0, sizeof(tb));
+    while (RTA_OK(attr, len)) {
+        if (attr->rta_type <= NL80211_ATTR_MAX) tb[attr->rta_type] = attr;
+        attr = RTA_NEXT(attr, len);
+    }
+
+    if (!tb[NL80211_ATTR_IFINDEX]) return;
+    int ifindex = *(uint32_t *) RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
+    iface_entry_t *entry = get_iface(ifindex);
+    if (!entry) return;
+
+    // Mark as WiFi interface
+    entry->is_wifi = true;
+
+    if (cmd == NL80211_CMD_GET_INTERFACE) {
+        if (tb[NL80211_ATTR_SSID]) {
+            char *ssid_data = (char *) RTA_DATA(tb[NL80211_ATTR_SSID]);
+            int ssid_len = RTA_PAYLOAD(tb[NL80211_ATTR_SSID]);
+            if (ssid_len > 32) ssid_len = 32;
+            memcpy(entry->ssid, ssid_data, ssid_len);
+            entry->ssid[ssid_len] = '\0';
+            entry->wifi_connected = true;
+        } else {
+            entry->wifi_connected = false;
+        }
+    } 
+    else if (cmd == NL80211_CMD_GET_STATION) {
+        if (tb[NL80211_ATTR_STATION_INFO]) {
+            // Nested Attributes
+            struct rtattr *si = tb[NL80211_ATTR_STATION_INFO];
+            struct rtattr *nested_attr = RTA_DATA(si);
+            int nested_len = RTA_PAYLOAD(si);
+            
+            while (RTA_OK(nested_attr, nested_len)) {
+                if (nested_attr->rta_type == NL80211_STA_INFO_SIGNAL) {
+                    // RSSI is usually int8_t (dBm) or uint8_t
+                    int8_t sig = *(int8_t *) RTA_DATA(nested_attr);
+                    entry->signal_dbm = (int)sig;
+                }
+                nested_attr = RTA_NEXT(nested_attr, nested_len);
+            }
+        }
+    }
+}
+
+void collect_wifi_state() {
+    int sock = open_netlink_genl();
     if (sock < 0) return;
 
-    send_dump_request(sock, RTM_GETLINK);
-    read_netlink_response(sock);
+    int family_id = get_genl_family_id(sock, NL80211_GENL_NAME);
+    if (family_id <= 0) {
+        close(sock);
+        return;
+    }
 
-    send_dump_request(sock, RTM_GETADDR);
-    read_netlink_response(sock);
+    // 1. Get Interfaces (SSID)
+    struct {
+        struct nlmsghdr n;
+        struct genlmsghdr g;
+        char buf[256];
+    } req;
+    
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = family_id;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.n.nlmsg_seq = time(NULL);
+    req.g.cmd = NL80211_CMD_GET_INTERFACE;
+    req.g.version = 1;
+    send(sock, &req, req.n.nlmsg_len, 0);
 
-    send_dump_request(sock, RTM_GETROUTE);
-    read_netlink_response(sock);
+    char buf[BUF_SIZE];
+    int len;
+    
+    // Simple Loop for Dump
+    while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
+        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+            if (nh->nlmsg_type == NLMSG_DONE) goto step2;
+            if (nh->nlmsg_type == NLMSG_ERROR) goto step2;
+            if (nh->nlmsg_type == family_id) process_nl80211_msg(nh, NL80211_CMD_GET_INTERFACE);
+        }
+    }
 
+step2:
+    // 2. Get Station Info (RSSI)
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = family_id;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.n.nlmsg_seq = time(NULL) + 1;
+    req.g.cmd = NL80211_CMD_GET_STATION;
+    req.g.version = 1;
+    send(sock, &req, req.n.nlmsg_len, 0);
+
+    while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
+        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+            if (nh->nlmsg_type == NLMSG_DONE) goto finish;
+            if (nh->nlmsg_type == NLMSG_ERROR) goto finish;
+            if (nh->nlmsg_type == family_id) process_nl80211_msg(nh, NL80211_CMD_GET_STATION);
+        }
+    }
+
+finish:
     close(sock);
+}
+
+void collect_network_state() {
+    // 1. RTNETLINK (Links, IPs, Routes)
+    int sock = open_netlink();
+    if (sock >= 0) {
+        send_dump_request(sock, RTM_GETLINK);
+        read_netlink_response(sock);
+        send_dump_request(sock, RTM_GETADDR);
+        read_netlink_response(sock);
+        send_dump_request(sock, RTM_GETROUTE);
+        read_netlink_response(sock);
+        close(sock);
+    }
+    
+    // 2. GENL (WiFi)
+    collect_wifi_state();
 }
 
 // --- CONNECTIVITY CHECK (TCP PROBE) ---
@@ -698,7 +941,7 @@ void print_json_status() {
         if (ifaces[i].route_count > 0) printf("\n      ");
         printf("],\n");
 
-        const char *type = detect_iface_type(ifaces[i].name);
+        const char *type = detect_iface_type(&ifaces[i]);
         printf("      \"type\": \"%s\",\n", type);
         
         if (strcmp(type, "bridge") == 0) {
@@ -714,6 +957,19 @@ void print_json_status() {
             printf("\",\n");
         }
         
+        // WiFi Specifics
+        if (ifaces[i].is_wifi) {
+            printf("      \"wifi\": {\n");
+            printf("        \"ssid\": \"%s\",\n", ifaces[i].ssid[0] ? ifaces[i].ssid : "");
+            printf("        \"rssi\": %d,\n", ifaces[i].signal_dbm);
+            // Calculate percentage: -100 (0%) to -50 (100%)
+            int strength = (ifaces[i].signal_dbm + 100) * 2;
+            if (strength > 100) strength = 100;
+            if (strength < 0) strength = 0;
+            printf("        \"strength\": %d\n", strength);
+            printf("      },\n");
+        }
+
         bool connected = (strcmp(ifaces[i].state, "routable") == 0);
         printf("      \"connected\": %s\n", connected ? "true" : "false");
         
@@ -769,8 +1025,10 @@ void cmd_get_value(char *key) {
 
     if (strcmp(field, "ip") == 0) printf("%s\n", iface->ipv4);
     else if (strcmp(field, "mac") == 0) printf("%s\n", iface->mac);
+    else if (strcmp(field, "ssid") == 0) printf("%s\n", iface->ssid);
+    else if (strcmp(field, "rssi") == 0) printf("%d\n", iface->signal_dbm);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
-    else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface->name));
+    else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface));
     else if (strcmp(field, "gateway") == 0) printf("%s\n", iface->gateway);
     else if (strcmp(field, "mtu") == 0) printf("%d\n", iface->mtu);
     else if (strcmp(field, "metric") == 0) printf("%u\n", iface->metric);
