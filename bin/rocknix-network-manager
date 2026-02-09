@@ -33,14 +33,12 @@ done
 SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
-# REMEDIATION: Path Hardcoding & Environment Visibility
-# Export LIB_DIR so sourced scripts (like rxnm-system.sh) can access it
-# inside sub-shells or functional contexts.
+# Export LIB_DIR so sourced scripts can access it
 export LIB_DIR
 export RXNM_LIB_DIR="${LIB_DIR}"
 
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
-    # Fallback to system install path if relative path fails (e.g. symlinked binary in /usr/bin)
+    # Fallback to system install path if relative path fails
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
     export LIB_DIR
     export RXNM_LIB_DIR="${LIB_DIR}"
@@ -162,6 +160,8 @@ Actions:
   
   dpp enroll <uri>      Start DPP enrollment (QR code string)
   dpp stop              Stop DPP session
+  
+  roaming monitor       Start opportunistic roaming monitor
 
 Options:
   --password <pass>     WiFi Password
@@ -354,6 +354,7 @@ done
 
 if [ "$IS_VALID_CAT" = false ]; then
     if [ -z "$RAW_CMD" ] || [ "$RAW_CMD" == "status" ]; then
+        # Default to system status if no args or just 'status'
         CATEGORY="system"
         set -- "status"
     else
@@ -369,6 +370,8 @@ case "$CATEGORY" in
     wifi) 
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
+        # NEW: Load Roaming Engine
+        source "${LIB_DIR}/rxnm-roaming.sh"
         ;;
     interface|bridge) source "${LIB_DIR}/rxnm-interfaces.sh" ;;
     vpn|tun|tap) 
@@ -396,7 +399,7 @@ fi
 # Dispatch to Category Handlers
 case "$CATEGORY" in
     wifi)
-        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp")
+        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming")
         shift
         
         ARG_IFACE=""
@@ -406,8 +409,9 @@ case "$CATEGORY" in
                 ARG_IFACE="${ARGS[$((i+1))]}"
             fi
         done
-        if [ -z "$ARG_IFACE" ]; then
-             ARG_IFACE=$(auto_select_interface "wifi")
+        # Roaming monitor might run without a specific iface initially, but we auto-detect
+        if [ -z "$ARG_IFACE" ] && [ "$ACTION" != "roaming" ]; then
+             ARG_IFACE=$(get_wifi_iface || echo "")
         fi
 
         case "$ACTION" in
@@ -438,47 +442,35 @@ case "$CATEGORY" in
                 ;;
             ap)
                 SUBCMD="${1:-}"; shift
-                case "$SUBCMD" in
-                    start)
-                        SSID="${1:-}"; [ -n "$SSID" ] && shift
-                        PASS="${1:-}"; [ -n "$PASS" ] && [[ "$PASS" != --* ]] && shift
-                        MODE="ap"; SHARE="false"; IP=""
-                        IPV6_PD="yes"
-                         while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --ssid) SSID="$2"; shift 2 ;;
-                                --password) PASS="$2"; shift 2 ;;
-                                --mode) MODE="$2"; shift 2 ;;
-                                --share) SHARE="true"; shift ;;
-                                --ip) IP="$2"; shift 2 ;;
-                                --interface) ARG_IFACE="$2"; shift 2 ;;
-                                --ipv6-pd) IPV6_PD="$2"; shift 2 ;;
-                                *) shift ;;
-                            esac
-                        done
-                        action_host "$SSID" "$PASS" "$MODE" "$SHARE" "$IP" "$ARG_IFACE" "" "$IPV6_PD"
-                        ;;
-                    stop)
-                        while [[ $# -gt 0 ]]; do
-                            case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
-                        done
-                        action_client "$ARG_IFACE"
-                        ;;
-                esac
+                if [ "$SUBCMD" == "start" ]; then
+                    SSID="${1:-}"; [ -n "$SSID" ] && shift
+                    PASS="${1:-}"; [ -n "$PASS" ] && [[ "$PASS" != --* ]] && shift
+                    MODE="ap"; SHARE="false"; IP=""; IPV6_PD="yes"
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --ssid) SSID="$2"; shift 2 ;;
+                            --password) PASS="$2"; shift 2 ;;
+                            --mode) MODE="$2"; shift 2 ;;
+                            --share) SHARE="true"; shift ;;
+                            --ip) IP="$2"; shift 2 ;;
+                            --interface) ARG_IFACE="$2"; shift 2 ;;
+                            --ipv6-pd) IPV6_PD="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                    done
+                    action_host "$SSID" "$PASS" "$MODE" "$SHARE" "$IP" "$ARG_IFACE" "" "$IPV6_PD"
+                elif [ "$SUBCMD" == "stop" ]; then
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
+                    done
+                    action_client "$ARG_IFACE"
+                fi
                 ;;
             wps)
                 action_wps "$ARG_IFACE"
                 ;;
             networks|list)
-                SUBCMD="${1:-}"; [ "$SUBCMD" == "list" ] && shift || true
-                if [ "$SUBCMD" == "forget" ]; then shift; fi
-                if [ "$ACTION" == "forget" ] || [ "$SUBCMD" == "forget" ]; then
-                    SSID="${1:-}"; [ -n "$SSID" ] && shift
-                    confirm_action "Forget network '$SSID'?" "$FORCE_ACTION"
-                    action_forget "$SSID"
-                else
-                    action_list_known_networks
-                fi
+                action_list_known_networks
                 ;;
             forget)
                  SSID="${1:-}"; [ -n "$SSID" ] && shift
@@ -486,35 +478,29 @@ case "$CATEGORY" in
                  action_forget "$SSID"
                  ;;
             country)
-                CODE="${1:-}"
-                action_set_country "$CODE"
+                action_set_country "${1:-}"
                 ;;
             p2p)
                 SUBCMD="${1:-}"; shift
                 case "$SUBCMD" in
                     scan) action_p2p_scan ;;
-                    connect) 
-                        PEER="${1:-}"; [ -z "$PEER" ] && { json_error "Peer name required"; exit 1; }
-                        action_p2p_connect "$PEER" 
-                        ;;
+                    connect) action_p2p_connect "${1:-}" ;;
                     disconnect) action_p2p_disconnect ;;
                     status) action_p2p_status ;;
-                    *) json_error "Unknown P2P command. Use: scan, connect, disconnect, status" ;;
                 esac
                 ;;
             dpp)
                 SUBCMD="${1:-}"; shift
-                case "$SUBCMD" in
-                    enroll)
-                        URI="${1:-}"; [ -z "$URI" ] && { json_error "URI string required"; exit 1; }
-                        # Use ARG_IFACE detected earlier
-                        action_dpp_enroll "$ARG_IFACE" "$URI"
-                        ;;
-                    stop)
-                        action_dpp_stop "$ARG_IFACE"
-                        ;;
-                    *) json_error "Unknown DPP command. Use: enroll, stop" ;;
-                esac
+                if [ "$SUBCMD" == "enroll" ]; then action_dpp_enroll "$ARG_IFACE" "${1:-}"; fi
+                if [ "$SUBCMD" == "stop" ]; then action_dpp_stop "$ARG_IFACE"; fi
+                ;;
+            roaming)
+                SUBCMD="${1:-}"; shift
+                if [ "$SUBCMD" == "monitor" ]; then
+                    action_wifi_roaming_monitor
+                else
+                    echo "Usage: rxnm wifi roaming monitor"
+                fi
                 ;;
         esac
         ;;
@@ -703,9 +689,7 @@ case "$CATEGORY" in
                 if [ "$ACTION" == "create" ]; then action_create_bridge "$NAME"; fi
                 if [ "$ACTION" == "add-member" ]; then
                      IFACE="${1:-}"; 
-                     # REMEDIATION: Fixed argument parsing. 'NAME' already contains the interface from position 2.
-                     # We need to parse --bridge flag.
-                     IFACE="$NAME"
+                     if [ -z "$IFACE" ] || [[ "$IFACE" == --* ]]; then IFACE="$NAME"; fi
                      BRIDGE=""
                      while [[ $# -gt 0 ]]; do case "$1" in --bridge) BRIDGE="$2"; shift 2;; *) shift ;; esac; done
                      action_set_member "$IFACE" "$BRIDGE"
@@ -714,7 +698,8 @@ case "$CATEGORY" in
             bond)
                 if [ "$ACTION" == "create" ]; then action_create_bond "$NAME" "active-backup"; fi
                 if [ "$ACTION" == "add-slave" ]; then
-                     IFACE="$NAME"
+                     IFACE="${1:-}";
+                     if [ -z "$IFACE" ] || [[ "$IFACE" == --* ]]; then IFACE="$NAME"; fi
                      BOND=""
                      while [[ $# -gt 0 ]]; do case "$1" in --bond) BOND="$2"; shift 2;; *) shift ;; esac; done
                      action_set_bond_slave "$IFACE" "$BOND"
@@ -727,7 +712,8 @@ case "$CATEGORY" in
                      action_create_vrf "$NAME" "$TABLE"
                 fi
                 if [ "$ACTION" == "add-member" ]; then
-                     IFACE="$NAME"
+                     IFACE="${1:-}";
+                     if [ -z "$IFACE" ] || [[ "$IFACE" == --* ]]; then IFACE="$NAME"; fi
                      VRF=""
                      while [[ $# -gt 0 ]]; do case "$1" in --vrf) VRF="$2"; shift 2;; *) shift ;; esac; done
                      action_set_vrf_member "$IFACE" "$VRF"

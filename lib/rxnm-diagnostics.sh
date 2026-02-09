@@ -1,5 +1,5 @@
 # ==============================================================================
-# REFINED STATUS & DIAGNOSTICS (OPTIMIZED FOR RK3326/ARM)
+# REFINED STATUS & DIAGNOSTICS (HYBRID ARCHITECTURE)
 # ==============================================================================
 
 # --- CACHING CONSTANTS ---
@@ -7,7 +7,6 @@ CACHE_FILE="${RUN_DIR}/status.json"
 CACHE_TTL=5 # Seconds
 
 # Agent Path
-# FIX: Correct relative path is ONE level up from lib
 AGENT_BIN="${RXNM_LIB_DIR}/../bin/rxnm-agent"
 if [ ! -x "$AGENT_BIN" ]; then
     # Fallback for installed system path
@@ -41,6 +40,7 @@ action_status_legacy() {
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
 
     # Source D: Routes
+    # FIX: Ensure we never return 'null' if ip command produces no output
     local routes_json="[]"
     if ip -j route show >/dev/null 2>&1; then
         routes_json=$( { ip -j route show; ip -j -6 route show; } 2>/dev/null | "$JQ_BIN" -s 'add // []' )
@@ -129,8 +129,8 @@ action_status_legacy() {
                         name: .Name,
                         type: .Type,
                         state: .OperationalState,
-                        ip: (if .Addresses then (.Addresses | map(select(.Family==2)) | .[0].Address) else null end),
-                        ipv6: (if .Addresses then (.Addresses | map(select(.Family==10)) | map(.Address)) else [] end),
+                        ip: (if .Addresses then (.Addresses | map(select(.Family==2 and .Scope!="host")) | .[0].Address) else null end),
+                        ipv6: (if .Addresses then (.Addresses | map(select(.Family==10 and .Scope!="host")) | map(.Address)) else [] end),
                         mac: (.HardwareAddress),
                         mtu: (.MTU),
                         connected: (.OperationalState == "routable" or .OperationalState == "enslaved" or .OperationalState == "online" or .OperationalState == "up"),
@@ -153,17 +153,71 @@ action_status_legacy() {
     echo "$json_output"
 }
 
+action_check_internet_legacy() {
+    # 0. TIER 0: NETWORKCTL STATUS
+    if command -v networkctl >/dev/null; then
+         local operstate
+         operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
+         case "$operstate" in
+            off|no-carrier|dormant|carrier)
+                "$JQ_BIN" -n --arg state "$operstate" \
+                    '{ipv4: false, ipv6: false, connected: false, reason: "local_link_down", state: $state}' \
+                    | json_success
+                return 0
+                ;;
+         esac
+    fi
+
+    local curl_fmt="%{http_code}"
+    local target="http://clients3.google.com/generate_204"
+    
+    local t_v4; t_v4=$(mktemp)
+    local t_v6; t_v6=$(mktemp)
+    local pid_v4=0; local pid_v6=0
+    
+    (
+        if ip -4 route show default | grep -q default; then
+            local code
+            code=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
+            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+        else echo "false"; fi
+    ) > "$t_v4" & pid_v4=$!
+    
+    (
+        if ip -6 route show default | grep -q default; then
+            local code
+            code=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
+            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+        else echo "false"; fi
+    ) > "$t_v6" & pid_v6=$!
+    
+    wait $pid_v4 $pid_v6
+    local v4; v4=$(cat "$t_v4")
+    local v6; v6=$(cat "$t_v6")
+    rm -f "$t_v4" "$t_v6"
+    
+    local connected="false"
+    [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
+    
+    "$JQ_BIN" -n --argjson v4 "$v4" --argjson v6 "$v6" --argjson connected "$connected" \
+        '{ipv4: $v4, ipv6: $v6, connected: $connected}' \
+        | json_success
+}
+
 # -----------------------------------------------------------------------------
-# HYBRID DISPATCHER
+# HYBRID DISPATCHER (Priority: Cache > Agent > Legacy)
 # -----------------------------------------------------------------------------
+
 action_status() {
     local filter_iface="${1:-}"
 
+    # 1. READ-THROUGH CACHE
     if [ -f "$CACHE_FILE" ]; then
         local now file_time age
         now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
         file_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
         age=$((now - file_time))
+        
         if [ "$age" -lt "$CACHE_TTL" ]; then
             cat "$CACHE_FILE"
             return 0
@@ -172,17 +226,20 @@ action_status() {
 
     local json_output=""
 
+    # 2. FASTPATH: Native Agent
     if [ -x "$AGENT_BIN" ]; then
         if output=$("$AGENT_BIN" --dump 2>/dev/null) && [[ "$output" == \{* ]]; then
             json_output="$output"
         fi
     fi
 
+    # 3. COLDPATH: Legacy Fallback
     if [ -z "$json_output" ]; then
         log_debug "Agent unavailable or failed. Using legacy status."
         json_output=$(action_status_legacy "$filter_iface")
     fi
 
+    # 4. SAVE CACHE & OUTPUT
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     echo "$json_output" > "$CACHE_FILE"
     
@@ -193,44 +250,8 @@ action_status() {
     fi
 }
 
-action_check_portal() {
-    local iface="$1"
-    local primary_url="http://connectivitycheck.gstatic.com/generate_204"
-    local fallback_urls=("http://nmcheck.gnome.org/check_network_status.txt" "http://detectportal.firefox.com/success.txt")
-    local curl_base_opts=(-s -o /dev/null --max-time 3)
-    [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
-
-    if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
-        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success; return 0
-    fi
-
-    local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
-    local result; result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
-    local code="${result%%:*}"; local effective_url="${result#*:}"
-
-    if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
-        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success; return 0
-    fi
-
-    if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
-        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
-             "$JQ_BIN" -n --arg url "$effective_url" '{portal_detected: true, auto_ack: true, status: "online", target: $url, note: "authorized_by_probe"}' | json_success; return 0
-        fi
-        local hijack_flag="false"; if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
-        "$JQ_BIN" -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
-            '{portal_detected: true, auto_ack: false, status: "portal_locked", target: $url, http_code: $code, hijacked: $hijacked}' | json_success; return 0
-    fi
-
-    for fallback in "${fallback_urls[@]}"; do
-        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
-            "$JQ_BIN" -n --arg url "$fallback" '{portal_detected: false, status: "online", method: "fallback", host: $url}' | json_success; return 0
-        fi
-    done
-    "$JQ_BIN" -n '{portal_detected: false, status: "offline"}' | json_success
-}
-
 action_check_internet() {
-    # 1. FASTPATH: Agent
+    # 1. FASTPATH: Native Agent
     if [ -x "$AGENT_BIN" ]; then
         if output=$("$AGENT_BIN" --check-internet 2>/dev/null) && [[ "$output" == \{* ]]; then
             echo "$output"
@@ -238,18 +259,55 @@ action_check_internet() {
         fi
     fi
 
-    # 2. COLDPATH: Legacy Curl
-    if command -v networkctl >/dev/null; then
-         local operstate; operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
-         case "$operstate" in
-            off|no-carrier|dormant|carrier)
-                "$JQ_BIN" -n --arg state "$operstate" '{ipv4: false, ipv6: false, connected: false, reason: "local_link_down", state: $state}' | json_success; return 0 ;;
-         esac
+    # 2. COLDPATH: Legacy Fallback
+    action_check_internet_legacy
+}
+
+# -----------------------------------------------------------------------------
+# PORTAL CHECK (Legacy Only - No Agent L7 Support Yet)
+# -----------------------------------------------------------------------------
+
+action_check_portal() {
+    local iface="$1"
+    local primary_url="http://connectivitycheck.gstatic.com/generate_204"
+    local fallback_urls=("http://nmcheck.gnome.org/check_network_status.txt" "http://detectportal.firefox.com/success.txt")
+    
+    local curl_base_opts=(-s -o /dev/null --max-time 3)
+    [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
+
+    # Fast check
+    if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
+        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
+        return 0
     fi
-    local curl_fmt="%{http_code}"; local target="http://clients3.google.com/generate_204"
-    local t_v4; t_v4=$(mktemp); local t_v6; t_v6=$(mktemp); local pid_v4=0; local pid_v6=0
-    ( if ip -4 route show default | grep -q default; then local code; code=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000"); if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi; else echo "false"; fi ) > "$t_v4" & pid_v4=$!
-    ( if ip -6 route show default | grep -q default; then local code; code=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000"); if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi; else echo "false"; fi ) > "$t_v6" & pid_v6=$!
-    wait $pid_v4 $pid_v6; local v4; v4=$(cat "$t_v4"); local v6; v6=$(cat "$t_v6"); rm -f "$t_v4" "$t_v6"; local connected="false"; [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
-    "$JQ_BIN" -n --argjson v4 "$v4" --argjson v6 "$v6" --argjson connected "$connected" '{ipv4: $v4, ipv6: $v6, connected: $connected}' | json_success
+
+    # Deep check (Redirects)
+    local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
+    local result; result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
+    local code="${result%%:*}"; local effective_url="${result#*:}"
+
+    if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
+        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success
+        return 0
+    fi
+
+    # Redirect detection logic
+    if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
+        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
+             "$JQ_BIN" -n --arg url "$effective_url" '{portal_detected: true, auto_ack: true, status: "online", target: $url, note: "authorized_by_probe"}' | json_success
+             return 0
+        fi
+        local hijack_flag="false"; if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
+        "$JQ_BIN" -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
+            '{portal_detected: true, auto_ack: false, status: "portal_locked", target: $url, http_code: $code, hijacked: $hijacked}' | json_success
+        return 0
+    fi
+
+    for fallback in "${fallback_urls[@]}"; do
+        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
+            "$JQ_BIN" -n --arg url "$fallback" '{portal_detected: false, status: "online", method: "fallback", host: $url}' | json_success
+            return 0
+        fi
+    done
+    "$JQ_BIN" -n '{portal_detected: false, status: "offline"}' | json_success
 }
