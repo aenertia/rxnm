@@ -411,24 +411,13 @@ action_scan() {
 
     ensure_interface_active "$iface"
 
-    # Phase 8: Hybrid Fastpath Scan
-    # If the Agent is available, use it to fetch results directly from Netlink
-    if [ -x "$RXNM_AGENT_BIN" ]; then
-        # 1. Trigger Scan (iwctl is still reliable for triggering)
-        timeout 2s iwctl station "$iface" scan >/dev/null 2>&1 || true
-        
-        # 2. Wait slightly for kernel events
-        sleep 1.5
-        
-        # 3. Read Results via Agent
-        # Note: 'action_scan' expects full scan results, which rxnm-agent --dump provides
-        # as part of the interface object. However, rxnm-agent's dump is a state snapshot,
-        # not a scan list. For scan *lists*, we still rely on the robust IWD DBus object manager
-        # because the Agent is optimized for *current state*, not neighborhood discovery.
-        # Fallback to DBus logic is correct here for rich data.
-    fi
+    # Optimization: Always use robust DBus polling loop for scan results.
+    # While the Agent is faster for status, it does not currently provide a scan LIST, 
+    # only a state snapshot. The Legacy DBus logic below handles the "trigger -> poll -> fetch"
+    # loop more reliably than a hardcoded sleep.
+    #
+    # We still allow the Agent check in other functions, but for scanning, consistency is key.
 
-    # Standard DBus Scan Logic (Preserved)
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD via DBus"
@@ -445,34 +434,52 @@ action_scan() {
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
-    # Trigger scan if we haven't already
-    if [ ! -x "$RXNM_AGENT_BIN" ]; then
-        busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
-        
-        local sleep_sec
-        if (( SCAN_POLL_MS < 1000 )); then
-            sleep_sec="0.${SCAN_POLL_MS}"
-        else
-            sleep_sec=$((SCAN_POLL_MS / 1000))
-        fi
-        
-        local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
-        
-        for ((i=1; i<=max_polls; i++)); do
-            local scanning
-            scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
-            [ "$scanning" != "true" ] && break
-            sleep "$sleep_sec"
-        done
+    # Trigger scan
+    # Note: We prefer to trigger via busctl here to ensure we are synchronous with the polling loop
+    busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
+    
+    local sleep_sec
+    if (( SCAN_POLL_MS < 1000 )); then
+        sleep_sec="0.${SCAN_POLL_MS}"
+    else
+        sleep_sec=$((SCAN_POLL_MS / 1000))
     fi
+    
+    local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
+    
+    for ((i=1; i<=max_polls; i++)); do
+        local scanning
+        scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
+        [ "$scanning" != "true" ] && break
+        sleep "$sleep_sec"
+    done
     
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to fetch scan results"
         return 0
     fi
     
+    # UPDATED JQ FILTER:
+    # Now extracts individual BSSIDs (AccessPoints) and maps them to their parent Networks.
+    # This provides the "map" requested, showing multiple APs for the same SSID.
     local result
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
+        # 1. Build Map of Access Points (BSSIDs) grouped by Network Path
+        (
+            [
+                .data[] | to_entries[] |
+                select(.value["net.connman.iwd.AccessPoint"] != null) |
+                select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) |
+                {
+                    network: .value["net.connman.iwd.AccessPoint"].Network.data,
+                    bssid: .value["net.connman.iwd.AccessPoint"].HardwareAddress.data,
+                    signal: (.value["net.connman.iwd.AccessPoint"].SignalStrength.data // -100),
+                    freq: .value["net.connman.iwd.AccessPoint"].Frequency.data
+                }
+            ] | group_by(.network) | map({key: .[0].network, value: .}) | from_entries
+        ) as $ap_map |
+
+        # 2. Extract Networks and merge with the AP Map
         [
             .data[] | to_entries[] | 
             select(.value["net.connman.iwd.Network"] != null) |
@@ -482,14 +489,23 @@ action_scan() {
                 security: .value["net.connman.iwd.Network"].Type.data,
                 connected: (.value["net.connman.iwd.Network"].Connected.data == true),
                 known: (if .value["net.connman.iwd.Network"].KnownNetwork.data then true else false end),
+                
+                # Signal is usually averaged by iwd on the Network object
                 signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100),
-                strength_pct: (
-                    (.value["net.connman.iwd.Network"].SignalStrength.data // -100) as $sig |
-                    (($sig + 90) * 100 / 60) |
-                    if . > 100 then 100 elif . < 0 then 0 else . end | floor
-                )
+                
+                # Attach the list of specific BSSIDs visible for this SSID
+                bssids: ($ap_map[.key] // [])
             }
-        ] | unique_by(.ssid) | sort_by(-.signal)
+        ] | 
+        # Calculate percentage based on main signal
+        map(. + {
+            strength_pct: (
+                (.signal) as $sig |
+                (($sig + 90) * 100 / 60) |
+                if . > 100 then 100 elif . < 0 then 0 else . end | floor
+            )
+        }) |
+        unique_by(.ssid) | sort_by(-.signal)
     ')
     
     json_success "{\"results\": $result}"

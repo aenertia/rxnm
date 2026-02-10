@@ -276,7 +276,20 @@ run_active_monitor() {
                      sleep_time=5
                  fi
             else
-                 sleep_time=10
+                 # Legacy Fallback: Full functional adaptive polling without agent
+                 if command -v iwctl >/dev/null; then
+                     local rssi_leg
+                     rssi_leg=$(iwctl station "$iface" show 2>/dev/null | grep "RSSI" | awk '{print $2}')
+                     if [ -n "$rssi_leg" ] && [ "$rssi_leg" -gt -60 ]; then
+                         sleep_time=20
+                     elif [ -n "$rssi_leg" ] && [ "$rssi_leg" -gt -70 ]; then
+                         sleep_time=10
+                     else
+                         sleep_time=5
+                     fi
+                 else
+                     sleep_time=10
+                 fi
             fi
         else
             # Disconnected
