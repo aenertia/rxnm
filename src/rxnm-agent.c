@@ -291,16 +291,16 @@ void udev_enrich(iface_entry_t *entry) {
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "E:ID_VENDOR_FROM_DATABASE=", 26) == 0) {
-            strncpy(entry->vendor, line + 26, sizeof(entry->vendor) - 1);
+            snprintf(entry->vendor, sizeof(entry->vendor), "%s", line + 26);
             entry->vendor[strcspn(entry->vendor, "\n")] = 0;
         } else if (strncmp(line, "E:ID_MODEL_FROM_DATABASE=", 25) == 0) {
-            strncpy(entry->model, line + 25, sizeof(entry->model) - 1);
+            snprintf(entry->model, sizeof(entry->model), "%s", line + 25);
             entry->model[strcspn(entry->model, "\n")] = 0;
         } else if (strncmp(line, "E:ID_NET_DRIVER=", 16) == 0) {
-            strncpy(entry->driver, line + 16, sizeof(entry->driver) - 1);
+            snprintf(entry->driver, sizeof(entry->driver), "%s", line + 16);
             entry->driver[strcspn(entry->driver, "\n")] = 0;
         } else if (strncmp(line, "E:ID_PATH=", 10) == 0) {
-            strncpy(entry->bus_info, line + 10, sizeof(entry->bus_info) - 1);
+            snprintf(entry->bus_info, sizeof(entry->bus_info), "%s", line + 10);
             entry->bus_info[strcspn(entry->bus_info, "\n")] = 0;
         }
     }
@@ -338,8 +338,12 @@ int dbus_trigger_reload() {
     char uid_hex[33];
     for (int i=0; uid_str[i]; i++) snprintf(uid_hex+(i*2), 3, "%02x", uid_str[i]);
     
-    snprintf(auth_buf, sizeof(auth_buf), "\0%s%s\r\n", SASL_AUTH_EXTERNAL, uid_hex);
-    send(sock, auth_buf, strlen(auth_buf), 0);
+    // FIX: buffer index 0 is null (for SCM_CREDS), string starts at 1
+    auth_buf[0] = 0;
+    int len = snprintf(auth_buf + 1, sizeof(auth_buf) - 1, "%s%s\r\n", SASL_AUTH_EXTERNAL, uid_hex);
+    if (len < 0) { close(sock); return -4; }
+
+    send(sock, auth_buf, len + 1, 0);
     
     char resp[512];
     int n = recv(sock, resp, sizeof(resp)-1, 0);
