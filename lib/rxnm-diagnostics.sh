@@ -2,67 +2,48 @@
 # REFINED STATUS & DIAGNOSTICS (HYBRID ARCHITECTURE)
 # ==============================================================================
 
-# --- CACHING CONSTANTS ---
 CACHE_FILE="${RUN_DIR}/status.json"
-CACHE_TTL=5 # Seconds
+CACHE_TTL=5
 
-# Agent Path
-AGENT_BIN="${RXNM_LIB_DIR}/../bin/rxnm-agent"
-if [ ! -x "$AGENT_BIN" ]; then
-    # Fallback for installed system path
-    AGENT_BIN="/usr/bin/rxnm-agent"
-fi
+# Issue 3.4: Consolidate Agent Bin
+AGENT_BIN="${RXNM_AGENT_BIN}"
 
-# -----------------------------------------------------------------------------
-# LEGACY STATUS ENGINE (Preserved Verbatim for Fallback)
-# -----------------------------------------------------------------------------
 action_status_legacy() {
     local filter_iface="${1:-}"
 
-    # 2. DATA COLLECTION
     local hostname="ROCKNIX"
     [ -f /etc/hostname ] && read -r hostname < /etc/hostname
 
-    # Source A: Systemd Networkd
     local net_json="[]"
     if command -v networkctl >/dev/null; then
         net_json=$(timeout 3s networkctl status --all --json=short 2>/dev/null || timeout 3s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
 
-    # Source B: IWD
     local iwd_json="{}"
     if is_service_active "iwd"; then
-        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data[0] // {}' || echo "{}")
+        # Issue 3.1: Fix JQ path for busctl output
+        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data // {}' || echo "{}")
     fi
 
-    # Source C: Global Proxy
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
 
-    # Source D: Routes
-    # FIX: Ensure we never return 'null' if ip command produces no output
     local routes_json="[]"
     if ip -j route show >/dev/null 2>&1; then
         routes_json=$( { ip -j route show; ip -j -6 route show; } 2>/dev/null | "$JQ_BIN" -s 'add // []' )
     fi
 
-    # Source E: IProute2 (Fallback for missing networkd)
-    # UPDATED: Use -s to get stats
     local ip_json="[]"
     if command -v ip >/dev/null; then
         ip_json=$(ip -j -s addr show 2>/dev/null || echo "[]")
     fi
     
-    # Source F: Link Speeds (Sysfs)
-    # Coldpath Optimization: Build a JSON object of {interface: speed}
-    # This avoids calling cat/jq inside the main JQ filter loop
     local speed_json="{}"
     local speed_data=""
     for iface_dir in /sys/class/net/*; do
         if [ -e "$iface_dir/speed" ]; then
             local ifname=$(basename "$iface_dir")
             local s_val=$(cat "$iface_dir/speed" 2>/dev/null || echo -1)
-            # Only include valid positive speeds
             if [ "$s_val" -gt 0 ] 2>/dev/null; then
                 if [ -z "$speed_data" ]; then 
                     speed_data="\"$ifname\": $s_val"
@@ -74,7 +55,6 @@ action_status_legacy() {
     done
     speed_json="{ $speed_data }"
 
-    # 3. MERGE & MAP
     local json_output
     json_output=$("$JQ_BIN" -n \
         --arg hn "$hostname" \
@@ -104,7 +84,8 @@ action_status_legacy() {
             (.iface): {
                 rssi: .rssi, 
                 state: .state,
-                bssid: (if .bssid_path then ($access_points[.bssid_path].HardwareAddress.data) else null end)
+                bssid: (if .bssid_path then ($access_points[.bssid_path].HardwareAddress.data) else null end),
+                frequency: (if .bssid_path then ($access_points[.bssid_path].Frequency.data) else null end)
             }
          }) | add
         ) as $wifi_station_info |
@@ -118,13 +99,8 @@ action_status_legacy() {
         ) as $wifi_network_info |
         (($wifi_network_info // {}) * ($wifi_station_info // {})) as $full_wifi |
         
-        # Route Processing
         (($routes // []) | group_by(.dev) | map({key: .[0].dev, value: .}) | from_entries) as $route_map |
-
-        # Normalize Networkd vs IProute2
         (($net | objects | .Interfaces) // ($net | arrays) // []) as $sysd_net |
-        
-        # Mapping IP stats from ip -j -s output
         ($ip | map({key: .ifname, value: (.stats64 // .stats)}) | from_entries) as $ip_stats |
 
         (if ($sysd_net | length) > 0 then $sysd_net else 
@@ -186,7 +162,6 @@ action_status_legacy() {
 }
 
 action_check_internet_legacy() {
-    # 0. TIER 0: NETWORKCTL STATUS
     if command -v networkctl >/dev/null; then
          local operstate
          operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
@@ -205,7 +180,6 @@ action_check_internet_legacy() {
     
     local t_v4; t_v4=$(mktemp)
     local t_v6; t_v6=$(mktemp)
-    local pid_v4=0; local pid_v6=0
     
     (
         if ip -4 route show default | grep -q default; then
@@ -213,7 +187,7 @@ action_check_internet_legacy() {
             code=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
             if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
         else echo "false"; fi
-    ) > "$t_v4" & pid_v4=$!
+    ) > "$t_v4" & 
     
     (
         if ip -6 route show default | grep -q default; then
@@ -221,9 +195,9 @@ action_check_internet_legacy() {
             code=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
             if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
         else echo "false"; fi
-    ) > "$t_v6" & pid_v6=$!
+    ) > "$t_v6" &
     
-    wait $pid_v4 $pid_v6
+    wait
     local v4; v4=$(cat "$t_v4")
     local v6; v6=$(cat "$t_v6")
     rm -f "$t_v4" "$t_v6"
@@ -236,17 +210,12 @@ action_check_internet_legacy() {
         | json_success
 }
 
-# -----------------------------------------------------------------------------
-# HYBRID DISPATCHER (Priority: Cache > Agent > Legacy)
-# -----------------------------------------------------------------------------
-
 action_status() {
     local filter_iface="${1:-}"
 
-    # 1. READ-THROUGH CACHE
     if [ -f "$CACHE_FILE" ]; then
         local now file_time age
-        now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+        now=$(date +%s)
         file_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
         age=$((now - file_time))
         
@@ -258,20 +227,20 @@ action_status() {
 
     local json_output=""
 
-    # 2. FASTPATH: Native Agent
     if [ -x "$AGENT_BIN" ]; then
         if output=$("$AGENT_BIN" --dump 2>/dev/null) && [[ "$output" == \{* ]]; then
-            json_output="$output"
+            if [ -n "$filter_iface" ]; then
+                json_output=$("$JQ_BIN" --arg f "$filter_iface" '.interfaces |= with_entries(select(.key == $f))' <<< "$output")
+            else
+                json_output="$output"
+            fi
         fi
     fi
 
-    # 3. COLDPATH: Legacy Fallback
     if [ -z "$json_output" ]; then
-        log_debug "Agent unavailable or failed. Using legacy status."
         json_output=$(action_status_legacy "$filter_iface")
     fi
 
-    # 4. SAVE CACHE & OUTPUT
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     echo "$json_output" > "$CACHE_FILE"
     
@@ -283,21 +252,14 @@ action_status() {
 }
 
 action_check_internet() {
-    # 1. FASTPATH: Native Agent
     if [ -x "$AGENT_BIN" ]; then
         if output=$("$AGENT_BIN" --check-internet 2>/dev/null) && [[ "$output" == \{* ]]; then
             echo "$output"
             return 0
         fi
     fi
-
-    # 2. COLDPATH: Legacy Fallback
     action_check_internet_legacy
 }
-
-# -----------------------------------------------------------------------------
-# PORTAL CHECK (Legacy Only - No Agent L7 Support Yet)
-# -----------------------------------------------------------------------------
 
 action_check_portal() {
     local iface="$1"
@@ -307,13 +269,11 @@ action_check_portal() {
     local curl_base_opts=(-s -o /dev/null --max-time 3)
     [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
 
-    # Fast check
     if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
         "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
         return 0
     fi
 
-    # Deep check (Redirects)
     local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
     local result; result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
     local code="${result%%:*}"; local effective_url="${result#*:}"
@@ -323,7 +283,6 @@ action_check_portal() {
         return 0
     fi
 
-    # Redirect detection logic
     if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
         if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
              "$JQ_BIN" -n --arg url "$effective_url" '{portal_detected: true, auto_ack: true, status: "online", target: $url, note: "authorized_by_probe"}' | json_success

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
-# RXNM PHASE 3 CONSISTENCY VALIDATION
-# Compares Agent Output vs Legacy Shell Output
+# RXNM PHASE 5 CONSISTENCY VALIDATION
+# Compares Agent Output vs Legacy Shell Output (Extended for WiFi)
 # ==============================================================================
 
 # Setup Environment
@@ -52,24 +52,20 @@ if [ "$ifaces_legacy" == "$ifaces_agent" ]; then
     log_pass "Interface list matches exactly"
 else
     log_fail "Interface mismatch!"
-    # Don't fail hard, allow partial inspection
 fi
 
 # Deep Dive: Per-Interface IP/Gateway Checks
-# Iterate over agent interfaces
 for iface in $ifaces_agent; do
     # Extract IPs
     ip_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ip // empty")
     ip_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ip // empty")
     
-    # Normalize CIDR for comparison
-    # FIX: Check for empty legacy value to prevent false positives with wildcard match
     if [ -n "$ip_legacy" ] && [[ "$ip_agent" == "$ip_legacy"* ]]; then
         log_pass "[$iface] IP Match: $ip_legacy vs $ip_agent"
     elif [ -z "$ip_legacy" ] && [ -z "$ip_agent" ]; then
         log_pass "[$iface] IP Match: (Both empty)"
     else
-        log_warn "[$iface] IP Divergence: Legacy='$ip_legacy', Agent='$ip_agent' (Legacy might miss CIDR or data)"
+        log_warn "[$iface] IP Divergence: Legacy='$ip_legacy', Agent='$ip_agent'"
     fi
 
     # Check Gateway
@@ -80,6 +76,43 @@ for iface in $ifaces_agent; do
         log_pass "[$iface] Gateway Match: ${gw_agent:-none}"
     else
         log_fail "[$iface] Gateway Mismatch: Legacy='$gw_legacy', Agent='$gw_agent'"
+    fi
+done
+
+# Issue 5.1: Check WiFi fields for wireless interfaces
+echo "--- Checking WiFi Metadata Consistency ---"
+for iface in $ifaces_agent; do
+    is_wifi_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi // \"null\"")
+    is_wifi_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi // \"null\"")
+    
+    if [ "$is_wifi_agent" != "null" ] || [ "$is_wifi_legacy" != "null" ]; then
+        ssid_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.ssid // empty")
+        ssid_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.ssid // empty")
+        
+        if [ "$ssid_agent" = "$ssid_legacy" ]; then
+            log_pass "[$iface] WiFi SSID match: '${ssid_agent:-none}'"
+        else
+            log_fail "[$iface] WiFi SSID mismatch: agent='$ssid_agent', legacy='$ssid_legacy'"
+        fi
+        
+        bssid_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.bssid // empty")
+        bssid_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.bssid // empty")
+        
+        if [ "$bssid_agent" = "$bssid_legacy" ]; then
+            log_pass "[$iface] WiFi BSSID match: '${bssid_agent:-none}'"
+        else
+            # Divergence is expected if using different collection methods, but should be minimal
+            log_warn "[$iface] WiFi BSSID divergence: agent='$bssid_agent', legacy='$bssid_legacy'"
+        fi
+
+        freq_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.frequency // empty")
+        freq_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi.frequency // empty")
+
+        if [ "$freq_agent" = "$freq_legacy" ]; then
+            log_pass "[$iface] WiFi Frequency match: ${freq_agent:-none} MHz"
+        else
+            log_warn "[$iface] WiFi Frequency divergence: agent='$freq_agent', legacy='$freq_legacy'"
+        fi
     fi
 done
 

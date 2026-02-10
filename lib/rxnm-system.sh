@@ -4,15 +4,12 @@
 
 # --- SERVICE STATE MANAGEMENT ---
 cache_service_states() {
-    # Initialize cache with timestamps
     local now
-    # Bash 4.2+ optimization
     now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
     
     local services=("iwd" "systemd-networkd" "avahi-daemon")
     local states
-    # Timeout protection for systemctl calls
-    states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null)
+    states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null || echo "inactive")
     
     local i=0
     while IFS= read -r state; do
@@ -34,7 +31,6 @@ is_service_active() {
     local last_check="${SERVICE_STATE_TS["$svc"]:-0}"
     local age=$((now - last_check))
     
-    # Cache TTL: 2 seconds
     if [ $age -gt 2 ]; then
         local state
         state=$(timeout 1s systemctl is-active "$svc" 2>/dev/null || echo "inactive")
@@ -54,16 +50,8 @@ is_avahi_running() {
 configure_standalone_client() {
     local iface="$1"
     log_warn "Entering Rescue Mode: Configuring $iface as standalone client"
-    
-    # 1. Bring up link
     ip link set "$iface" up
-    
-    # 2. Kill stale DHCP clients
     pkill -f "udhcpc -i $iface" 2>/dev/null
-    
-    # 3. Start minimal DHCP client
-    # -i: interface, -b: background, -q: quit on lease fail (retries handled by us)
-    # -s: script (use default busybox script)
     udhcpc -i "$iface" -b -s /usr/share/udhcpc/default.script
 }
 
@@ -71,12 +59,9 @@ configure_standalone_gadget() {
     local iface="$1"
     local ip="169.254.10.2"
     log_warn "Entering Rescue Mode: Configuring $iface as standalone gadget"
-    
-    # 1. Static IP
     ip link set "$iface" up
     ip addr add "${ip}/24" dev "$iface" 2>/dev/null
     
-    # 2. Minimal DHCP Server (udhcpd)
     local conf="/tmp/udhcpd.${iface}.conf"
     cat <<EOF > "$conf"
 start 169.254.10.10
@@ -100,17 +85,12 @@ action_setup() {
     
     [ -d /run/systemd/netif ] && chown -R systemd-network:systemd-network /run/systemd/netif 2>/dev/null
 
-    # Initial Precedence Sync: Profile (Level 1) + Manual Root (Level 2) -> RAM (Active)
     if type action_profile &>/dev/null; then
         action_profile "boot"
     else
-        # Fallback if profile lib not loaded yet (e.g. direct setup call)
-        # Sourcing relies on LIB_DIR exported by bin/rxnm or rxnm-api.sh derivation
-        if [ -n "${LIB_DIR:-}" ] && [ -f "${LIB_DIR}/rxnm-profiles.sh" ]; then
-             source "${LIB_DIR}/rxnm-profiles.sh"
+        if [ -n "${RXNM_LIB_DIR:-}" ] && [ -f "${RXNM_LIB_DIR}/rxnm-profiles.sh" ]; then
+             source "${RXNM_LIB_DIR}/rxnm-profiles.sh"
              action_profile "boot"
-        else
-             log_error "Cannot load profiles: LIB_DIR not set."
         fi
     fi
 
@@ -123,7 +103,6 @@ action_setup() {
     fix_permissions
     tune_network_stack "client"
     
-    # Optimized RFKill unblock: Check sysfs first to avoid slow fork
     local needs_unblock=0
     for rdir in /sys/class/rfkill/rfkill*; do
         [ -e "$rdir/soft" ] && { read -r s < "$rdir/soft"; [ "$s" -eq 1 ] && needs_unblock=1 && break; }
@@ -149,20 +128,17 @@ action_stop() {
 
 # --- FILE OPERATIONS ---
 ensure_dirs() {
-    # Active State (RAM)
     [ -d "$EPHEMERAL_NET_DIR" ] || mkdir -p "$EPHEMERAL_NET_DIR"
-    
-    # Persistent Storage (Disk)
     [ -d "$PERSISTENT_NET_DIR" ] || mkdir -p "$PERSISTENT_NET_DIR"
     [ -d "${STATE_DIR}/iwd" ] || mkdir -p "${STATE_DIR}/iwd"
     [ -d "${STORAGE_PROFILES_DIR}" ] || mkdir -p "${STORAGE_PROFILES_DIR}"
     [ -d "${STORAGE_RESOLVED_DIR}" ] || mkdir -p "${STORAGE_RESOLVED_DIR}"
+    [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
 }
 
 check_paths() {
-    # Verify that networkd is actually looking at our ephemeral dir
     if [ ! -L "$ETC_NET_DIR" ] && [ "$ETC_NET_DIR" != "$EPHEMERAL_NET_DIR" ]; then
-        log_warn "$ETC_NET_DIR is not pointing to $EPHEMERAL_NET_DIR. Ephemeral state may not apply."
+        log_warn "$ETC_NET_DIR is not pointing to $EPHEMERAL_NET_DIR."
     fi
 }
 
@@ -178,28 +154,18 @@ fix_permissions() {
 reload_networkd() {
     fix_permissions
     
-    # 1. Hybrid Fastpath: Try Agent DBus Trigger
     if [ -x "$RXNM_AGENT_BIN" ]; then
         if "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1; then
-            # Cache Invalidation: Ensure UI sees new state immediately
-            # RUN_DIR comes from rxnm-constants.sh
             [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
             return 0
         fi
     fi
     
-    # 2. Coldpath: Legacy Systemctl/Networkctl
     if is_service_active "systemd-networkd"; then
-        # Hardened against daemon hangs
         timeout 5s networkctl reload 2>/dev/null || log_warn "networkctl reload timed out"
-    else
-        log_warn "systemd-networkd not active. Changes staged but not applied."
     fi
     
-    # Cache Invalidation
-    if [ -n "$RUN_DIR" ]; then
-        rm -f "$RUN_DIR/status.json" 2>/dev/null
-    fi
+    [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
 reconfigure_iface() {
@@ -212,11 +178,7 @@ reconfigure_iface() {
             timeout 5s networkctl reload
         fi
     fi
-    
-    # Cache Invalidation for reconfigure
-    if [ -n "$RUN_DIR" ]; then
-        rm -f "$RUN_DIR/status.json" 2>/dev/null
-    fi
+    [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
 secure_write() {
@@ -224,33 +186,27 @@ secure_write() {
     local content="$2"
     local perms="${3:-644}"
     
-    # Path guard: only allow writes to Ephemeral, State, or Config paths
     if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
        [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
        [[ "$dest" != "${STATE_DIR}/"* ]] && \
-       [[ "$dest" != "${CONF_DIR}/"* ]]; then
+       [[ "$dest" != "${CONF_DIR}/"* ]] && \
+       [[ "$dest" != "${RUN_DIR}/"* ]]; then
          log_error "Illegal file write attempted: $dest"
          return 1
     fi
     
     [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
     
-    # Use mktemp for atomicity
     local tmp
     tmp=$(mktemp "${dest}.XXXXXX") || return 1
-    
     printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
     chmod "$perms" "$tmp"
-    
     sync
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
 
 tune_network_stack() {
     local profile="$1"
-    
-    # Sysctl can fail in containers (read-only /proc), guard with || true
-    # sysctl is fast, no timeout needed
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
@@ -287,24 +243,17 @@ enable_nat_masquerade() {
     fw_tool=$(detect_firewall_tool)
     
     if [ "$fw_tool" == "none" ]; then
-        log_warn "NAT requested but no firewall tool (iptables/nft) found."
+        log_warn "NAT requested but no firewall tool found."
         return 0
     fi
     
     local wan_iface
     wan_iface=$(ip -4 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
-    
-    if [ -z "$wan_iface" ]; then
-        wan_iface=$(ip -6 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
-    fi
+    [ -z "$wan_iface" ] && wan_iface=$(ip -6 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
 
-    if [ -z "$wan_iface" ] || [ "$lan_iface" == "$wan_iface" ]; then
-        return 0
-    fi
+    if [ -z "$wan_iface" ] || [ "$lan_iface" == "$wan_iface" ]; then return 0; fi
     
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
-
-    # Firewall operations guarded with timeout to prevent hang on module load
     local T="timeout 2s"
 
     if [ "$fw_tool" == "iptables" ]; then
@@ -319,18 +268,6 @@ enable_nat_masquerade() {
 
         $T iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
         $T iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
-        
-        if command -v ip6tables >/dev/null && $T ip6tables -t nat -L >/dev/null 2>&1; then
-            $T ip6tables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
-            $T ip6tables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
-            
-            $T ip6tables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-            $T ip6tables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
-            
-            $T ip6tables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-            $T ip6tables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
-        fi
-        
     elif [ "$fw_tool" == "nft" ]; then
         $T nft add table ip rocknix_nat 2>/dev/null
         $T nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
@@ -342,20 +279,15 @@ enable_nat_masquerade() {
         $T nft flush chain ip rocknix_filter forward
         $T nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
         $T nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
-        $T nft add rule ip rocknix_filter forward tcp flags syn tcp option maxseg size set rt mtu
     fi
 }
 
 disable_nat_masquerade() {
-    local fw_tool
-    fw_tool=$(detect_firewall_tool)
+    local fw_tool; fw_tool=$(detect_firewall_tool)
     local T="timeout 2s"
-    
     if [ "$fw_tool" == "iptables" ]; then
         for table in nat filter mangle; do
-            local rules
-            # Cannot safely timeout iptables-save pipe, but it's read-only
-            rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
+            local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 read -r _ chain rest <<< "$line"
@@ -363,24 +295,8 @@ disable_nat_masquerade() {
                 $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
             done <<< "$rules"
         done
-        
-        if command -v ip6tables >/dev/null && $T ip6tables -t nat -L >/dev/null 2>&1; then
-             for table in nat filter mangle; do
-                local rules
-                rules=$(ip6tables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
-                while IFS= read -r line; do
-                    [ -z "$line" ] && continue
-                    read -r _ chain rest <<< "$line"
-                    local rule="${line#-A $chain }"
-                    $T ip6tables -t "$table" -D "$chain" $rule 2>/dev/null || true
-                done <<< "$rules"
-            done
-        fi
-        
     elif [ "$fw_tool" == "nft" ]; then
         $T nft delete table ip rocknix_nat 2>/dev/null
         $T nft delete table ip rocknix_filter 2>/dev/null
-        $T nft delete table ip6 rocknix_nat6 2>/dev/null
-        $T nft delete table ip6 rocknix_filter6 2>/dev/null
     fi
 }

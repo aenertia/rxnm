@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# RXNM PHASE 1 FOUNDATION TESTS
+# RXNM PHASE 5 FOUNDATION TESTS
 # Validates Agent-Shell Consistency & Binary Characteristics
 # ==============================================================================
 
@@ -61,6 +61,7 @@ fi
 source "$CONSTANTS_SH"
 agent_lp=$("$AGENT_BIN" --is-low-power)
 
+# IS_LOW_POWER comes from sourced constants
 if [ "$IS_LOW_POWER" == "$agent_lp" ]; then
     pass "Low Power Detection Logic ($agent_lp)"
 else
@@ -73,6 +74,19 @@ if echo "$health_json" | grep -q "\"success\": true"; then
     pass "Health Check JSON valid"
 else
     fail "Health Check JSON invalid: $health_json"
+fi
+
+# 6. Issue 5.2: Test --get query path
+agent_ifaces=$("$AGENT_BIN" --dump 2>/dev/null | "$JQ_BIN" -r '.interfaces | keys | .[0] // empty')
+if [ -n "$agent_ifaces" ]; then
+    result=$("$AGENT_BIN" --get "interfaces.${agent_ifaces}.state" 2>/dev/null)
+    if [ -n "$result" ]; then
+        pass "--get path works (interfaces.${agent_ifaces}.state = $result)"
+    else
+        fail "--get returned empty for interfaces.${agent_ifaces}.state"
+    fi
+else
+    info "Skipping --get test (no active interfaces detected for query)"
 fi
 
 echo "--- All Foundation Tests Passed ---"

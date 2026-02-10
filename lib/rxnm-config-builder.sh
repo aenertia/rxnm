@@ -35,7 +35,7 @@ build_network_config() {
     local mac_addr="${19:-}"
     local ipv6_privacy="${20:-}"
     local dhcp_client_id="${21:-}"
-    local ipv6_pd="${22:-yes}"  # Default: Client requests/accepts PD if offered
+    local ipv6_pd="${22:-yes}"
 
     # Intelligent conflict avoidance:
     if [ "$mdns" == "yes" ] && is_avahi_running; then
@@ -45,7 +45,6 @@ build_network_config() {
     local config="[Match]\nName=${match_iface}\n"
     [ -n "$match_ssid" ] && config+="SSID=${match_ssid}\n"
     
-    # [Link] Section for Hardware Settings (within .network file scope)
     if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$mac_addr" ]; then
         config+="\n[Link]\n"
         [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
@@ -60,19 +59,13 @@ build_network_config() {
     [ -n "$bond" ] && config+="Bond=${bond}\n"
     [ -n "$vrf" ] && config+="VRF=${vrf}\n"
     [ -n "$vlan" ] && config+="VLAN=${vlan}\n"
-    
-    # Metric setting (applies to DHCP and static routes in [Network] context)
     [ -n "$metric" ] && config+="RouteMetric=${metric}\n"
     
-    # mDNS and LLMNR controls
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     
-    # Fix: IPMasquerade=yes is deprecated. Use "ipv4" to satisfy systemd-networkd warnings.
-    # RFC Compliance: LinkLocalAddressing=yes enables both IPv4LL (169.254/16) and IPv6LL (fe80::/10)
-    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=ipv4\n"
+    # Issue 6.4: Change default IPMasquerade to 'no' for client configs (Security Hardening)
+    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=no\n"
     
-    # IPv6 Privacy Extensions (RFC 4941)
-    # Options: no, yes, prefer-public, kernel
     if [ -n "$ipv6_privacy" ]; then
         config+="IPv6PrivacyExtensions=${ipv6_privacy}\n"
     fi
@@ -96,14 +89,10 @@ build_network_config() {
         for d in "${DOMS[@]}"; do config+="Domains=${d}\n"; done
     fi
     
-    # [DHCPv4] Specifics
-    # ClientIdentifier: mac (compatibility) vs duid (RFC4361 standard)
     if [ -n "$dhcp_client_id" ]; then
          config+="\n[DHCPv4]\nClientIdentifier=${dhcp_client_id}\n"
     fi
     
-    # [DHCPv6] Control
-    # Controls whether we accept delegated prefixes (Upstream)
     if [ "$ipv6_pd" == "no" ]; then
         config+="\n[DHCPv6]\nUseDelegatedPrefix=no\n"
     fi
@@ -111,24 +100,11 @@ build_network_config() {
     if [ -n "$routes" ]; then
         IFS=',' read -ra RTS <<< "$routes"
         for r in "${RTS[@]}"; do
-            # Format: dest@gateway@metric
-            # Using @ allows for IPv6 addresses which contain colons
-            local r_dest=""
-            local r_gw=""
-            local r_metric=""
-            
-            # Split using @
+            local r_dest="" r_gw="" r_metric=""
             IFS='@' read -r r_dest r_gw r_metric <<< "$r"
-            
             config+="\n[Route]\nDestination=${r_dest}\n"
             [ -n "$r_gw" ] && config+="Gateway=${r_gw}\n"
-            
-            # Metric Precedence: Per-route > Global Interface Metric
-            if [ -n "$r_metric" ]; then
-                config+="Metric=${r_metric}\n"
-            elif [ -n "$metric" ]; then
-                config+="Metric=${metric}\n"
-            fi
+            if [ -n "$r_metric" ]; then config+="Metric=${r_metric}\n"; elif [ -n "$metric" ]; then config+="Metric=${metric}\n"; fi
         done
     fi
 
@@ -136,133 +112,56 @@ build_network_config() {
 }
 
 # Device Link Configuration (.link file generation)
-# Handles Speed, Duplex, WakeOnLan, MAC Address, Policies
 build_device_link_config() {
-    local iface="$1"
-    local speed="$2" # Mbps (e.g. 100, 1000)
-    local duplex="$3" # half, full
-    local autoneg="$4" # yes, no
-    local wol="$5" # off, magic
-    local mac_policy="$6" # persistent, random, none
-    local name_policy="$7" # kernel, database, onboard, keep
-    local mac_addr="$8" # Specific MAC address (spoofing)
-    
-    # Matching strategy: 
-    # Prefer matching by OriginalName (kernel name) for embedded devices where
-    # PCI/USB enumeration is usually stable.
+    local iface="$1" speed="$2" duplex="$3" autoneg="$4" wol="$5" mac_policy="$6" name_policy="$7" mac_addr="$8"
     local config="[Match]\nOriginalName=${iface}\n"
-    
     config+="\n[Link]\nDescription=RXNM Hardware Config\n"
-    
-    if [ -n "$speed" ]; then
-        config+="BitsPerSecond=${speed}M\n"
-    fi
-    
-    if [ -n "$duplex" ]; then
-        config+="Duplex=${duplex}\n"
-    fi
-    
-    if [ -n "$autoneg" ]; then
-        config+="AutoNegotiation=${autoneg}\n"
-    fi
-
-    if [ -n "$wol" ]; then
-        config+="WakeOnLan=${wol}\n"
-    fi
-
-    if [ -n "$mac_policy" ]; then
-        config+="MACAddressPolicy=${mac_policy}\n"
-    fi
-
-    if [ -n "$name_policy" ]; then
-        config+="NamePolicy=${name_policy}\n"
-    fi
-
-    if [ -n "$mac_addr" ]; then
-        config+="MACAddress=${mac_addr}\n"
-    fi
-    
+    [ -n "$speed" ] && config+="BitsPerSecond=${speed}M\n"
+    [ -n "$duplex" ] && config+="Duplex=${duplex}\n"
+    [ -n "$autoneg" ] && config+="AutoNegotiation=${autoneg}\n"
+    [ -n "$wol" ] && config+="WakeOnLan=${wol}\n"
+    [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
+    [ -n "$name_policy" ] && config+="NamePolicy=${name_policy}\n"
+    [ -n "$mac_addr" ] && config+="MACAddress=${mac_addr}\n"
     printf "%b" "$config"
 }
 
 # Gateway/Host/Sharing Config Builder (LAN/Downstream)
 build_gateway_config() {
-    local iface="$1"
-    local ip="$2"
-    local share="$3"
-    local desc="$4"
-    local mdns="${5:-yes}"
-    local llmnr="${6:-yes}"
-    local ipv6_pd="${7:-yes}" # Default: Distribute PD if sharing is enabled
-    
-    if [ "$mdns" == "yes" ] && is_avahi_running; then
-        mdns="no"
-    fi
+    local iface="$1" ip="$2" share="$3" desc="$4" mdns="${5:-yes}" llmnr="${6:-yes}" ipv6_pd="${7:-yes}"
+    if [ "$mdns" == "yes" ] && is_avahi_running; then mdns="no"; fi
 
-    # Auto-IP Strategy
     if [ -z "$ip" ]; then
         local detected_ip=""
-        
-        # Try to detect from system templates first to ensure consistency with bundled defaults
         if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
              detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
              [ -z "$detected_ip" ] && detected_ip=$(_get_system_template_val "70-br-usb-host.network" "Address")
         elif [[ "$iface" == wlan* ]] && [ "$share" == "true" ]; then
              detected_ip=$(_get_system_template_val "70-wifi-ap.network" "Address")
         fi
-        
-        if [ -n "$detected_ip" ]; then
-            ip="$detected_ip"
+        if [ -n "$detected_ip" ]; then ip="$detected_ip"
         else
-            # Fallback if templates missing or no match
-            if [ "$share" == "true" ]; then
-                 # Use configured default or fall back to original RXNM default (192.168.212.1/24)
-                 # This avoids common conflicts (0.1, 1.1, 8.1, 42.1, 100.1, 254.1)
-                 ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
+            if [ "$share" == "true" ]; then ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
             else
-                 # Local/No-Share: Link Local strategy
-                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
-                     # RFC 3927: Avoid 169.254.0.0/24 and 169.254.255.0/24
-                     ip="169.254.10.2/24"
-                 else
-                     ip="169.254.1.1/16" 
-                 fi
+                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then ip="169.254.10.2/24"
+                 else ip="169.254.1.1/16" ; fi
             fi
         fi
     fi
 
     local config="[Match]\nName=${iface}\n\n[Network]\nDescription=${desc}\n"
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
-    
     [ -n "$ip" ] && config+="Address=${ip}\n"
-    
-    # Ensure IPv6 Link Local is ALWAYS enabled (RFC Compliance)
     config+="LinkLocalAddressing=yes\n"
     
     if [ "$share" == "true" ]; then
-        # --- SHARING ENABLED (Gateway/Router) ---
-        config+="IPForwarding=yes\n"
-        config+="IPv6SendRA=yes\n"
-        
-        # IPv6 Prefix Delegation (Downstream Distribution)
-        if [ "$ipv6_pd" != "no" ]; then
-             config+="DHCPPrefixDelegation=yes\n"
-        fi
-        
-        # Add a stable ULA Address for isolated IPv6 connectivity (RFC 4193)
-        # This ensures local IPv6 reachability even without upstream PD
-        # Suffix "arcade" in hexspeak: a7ca:de
+        config+="IPForwarding=yes\nIPv6SendRA=yes\n"
+        if [ "$ipv6_pd" != "no" ]; then config+="DHCPPrefixDelegation=yes\n"; fi
         config+="Address=fd00:cafe:feed::a7ca:de/64\n"
-        
         config+="DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
         config+="[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
     else
-        # --- SHARING DISABLED (Local/Link-Local) ---
-        config+="IPv6AcceptRA=no\n" # We are not a client on this isolated link
-        config+="DHCPServer=yes\n\n[DHCPServer]\n"
-        config+="EmitDNS=yes\n"
-        config+="EmitRouter=no\n"
+        config+="IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
     fi
-    
     printf "%b" "$config"
 }
