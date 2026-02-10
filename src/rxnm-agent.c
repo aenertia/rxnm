@@ -25,12 +25,18 @@
 #include <sys/un.h>
 #include <sys/select.h>
 #include <sys/time.h>
+
+/* CRITICAL: Include glibc network headers BEFORE linux kernel headers 
+ * to prevent redeclaration conflicts (e.g., IFF_UP, struct ifreq). */
+#include <net/if.h>
+#include <arpa/inet.h>
+
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
 #include <linux/if_link.h>
-#include <net/if.h>
-#include <arpa/inet.h>
+#include <linux/if_arp.h>
+
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
@@ -151,6 +157,7 @@ typedef struct {
     // WiFi
     bool is_wifi;
     char ssid[33];
+    char bssid[18];
     int signal_dbm;
     uint32_t frequency;
     bool wifi_connected;
@@ -273,6 +280,16 @@ void load_runtime_config() {
     fclose(f);
 }
 
+// Helper for safe, warning-free string copies in udev_enrich
+static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src) {
+    if (!src || !dest) return;
+    size_t len = strlen(src);
+    if (len > 0 && src[len-1] == '\n') len--;
+    if (len >= dest_size) len = dest_size - 1;
+    memcpy(dest, src, len);
+    dest[len] = '\0';
+}
+
 // --- UDEV PARSER (DIRECT READ) ---
 // Reads from /run/udev/data/n<ifindex> or +net:<ifindex>
 void udev_enrich(iface_entry_t *entry) {
@@ -291,18 +308,13 @@ void udev_enrich(iface_entry_t *entry) {
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "E:ID_VENDOR_FROM_DATABASE=", 26) == 0) {
-            // Using explicit precision to silence GCC -Wformat-truncation
-            snprintf(entry->vendor, sizeof(entry->vendor), "%.63s", line + 26);
-            entry->vendor[strcspn(entry->vendor, "\n")] = 0;
+            safe_udev_copy(entry->vendor, sizeof(entry->vendor), line + 26);
         } else if (strncmp(line, "E:ID_MODEL_FROM_DATABASE=", 25) == 0) {
-            snprintf(entry->model, sizeof(entry->model), "%.63s", line + 25);
-            entry->model[strcspn(entry->model, "\n")] = 0;
+            safe_udev_copy(entry->model, sizeof(entry->model), line + 25);
         } else if (strncmp(line, "E:ID_NET_DRIVER=", 16) == 0) {
-            snprintf(entry->driver, sizeof(entry->driver), "%.31s", line + 16);
-            entry->driver[strcspn(entry->driver, "\n")] = 0;
+            safe_udev_copy(entry->driver, sizeof(entry->driver), line + 16);
         } else if (strncmp(line, "E:ID_PATH=", 10) == 0) {
-            snprintf(entry->bus_info, sizeof(entry->bus_info), "%.31s", line + 10);
-            entry->bus_info[strcspn(entry->bus_info, "\n")] = 0;
+            safe_udev_copy(entry->bus_info, sizeof(entry->bus_info), line + 10);
         }
     }
     fclose(f);
@@ -438,6 +450,12 @@ void process_link_msg(struct nlmsghdr *nh) {
     else entry->mtu = 0;
     if (tb[IFLA_MASTER]) entry->master_index = *(int *)RTA_DATA(tb[IFLA_MASTER]);
     
+    // WiFi Detection via Hardware Type or Name Fallback (for Containers)
+    if (ifi->ifi_type == ARPHRD_IEEE80211 || ifi->ifi_type == ARPHRD_IEEE80211_RADIOTAP ||
+        strncmp(entry->name, "wl", 2) == 0) {
+        entry->is_wifi = true;
+    }
+
     // Stats
     if (tb[IFLA_STATS64]) {
         struct rtnl_link_stats64 *stats = (struct rtnl_link_stats64 *)RTA_DATA(tb[IFLA_STATS64]);
@@ -914,6 +932,7 @@ void print_json_status() {
         if (ifaces[i].is_wifi) {
             printf("      \"wifi\": {\n");
             printf("        \"ssid\": \"%s\",\n", ifaces[i].ssid);
+            printf("        \"bssid\": \"%s\",\n", ifaces[i].bssid);
             printf("        \"rssi\": %d,\n", ifaces[i].signal_dbm);
             printf("        \"frequency\": %u\n", ifaces[i].frequency);
             printf("      },\n");
@@ -969,6 +988,7 @@ void cmd_get_value(char *key) {
         char *sub = strtok(NULL, ".");
         if (sub) {
             if (strcmp(sub, "ssid") == 0) printf("%s\n", iface->ssid);
+            else if (strcmp(sub, "bssid") == 0) printf("%s\n", iface->bssid);
             else if (strcmp(sub, "rssi") == 0) printf("%d\n", iface->signal_dbm);
             else if (strcmp(sub, "frequency") == 0) printf("%u\n", iface->frequency);
         }
