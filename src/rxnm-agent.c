@@ -291,16 +291,17 @@ void udev_enrich(iface_entry_t *entry) {
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "E:ID_VENDOR_FROM_DATABASE=", 26) == 0) {
-            snprintf(entry->vendor, sizeof(entry->vendor), "%s", line + 26);
+            // Using explicit precision to silence GCC -Wformat-truncation
+            snprintf(entry->vendor, sizeof(entry->vendor), "%.63s", line + 26);
             entry->vendor[strcspn(entry->vendor, "\n")] = 0;
         } else if (strncmp(line, "E:ID_MODEL_FROM_DATABASE=", 25) == 0) {
-            snprintf(entry->model, sizeof(entry->model), "%s", line + 25);
+            snprintf(entry->model, sizeof(entry->model), "%.63s", line + 25);
             entry->model[strcspn(entry->model, "\n")] = 0;
         } else if (strncmp(line, "E:ID_NET_DRIVER=", 16) == 0) {
-            snprintf(entry->driver, sizeof(entry->driver), "%s", line + 16);
+            snprintf(entry->driver, sizeof(entry->driver), "%.31s", line + 16);
             entry->driver[strcspn(entry->driver, "\n")] = 0;
         } else if (strncmp(line, "E:ID_PATH=", 10) == 0) {
-            snprintf(entry->bus_info, sizeof(entry->bus_info), "%s", line + 10);
+            snprintf(entry->bus_info, sizeof(entry->bus_info), "%.31s", line + 10);
             entry->bus_info[strcspn(entry->bus_info, "\n")] = 0;
         }
     }
@@ -462,7 +463,8 @@ void process_addr_msg(struct nlmsghdr *nh) {
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         if (ifa->ifa_family == AF_INET) {
-            if (entry->ipv4[0] == '\0') {
+            // FIX: Parity with RXNM legacy API - exclude host scope (127.0.0.1) from primary ip field
+            if (entry->ipv4[0] == '\0' && ifa->ifa_scope < RT_SCOPE_HOST) {
                 char ipv4_buf[INET_ADDRSTRLEN];
                 if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
                     snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
@@ -706,6 +708,7 @@ bool tcp_probe(const char *ip_str, int port, int family) {
         memset(&addr, 0, sizeof(addr));
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(port);
+        // FIX: sockaddr_in6 uses sin6_addr member
         inet_pton(AF_INET6, ip_str, &addr.sin6_addr);
         res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     }
@@ -849,6 +852,9 @@ void print_json_status() {
     bool first = true;
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists) continue;
+        // Skip unnamed interfaces to clean up duplicate JSON keys and avoid invalid entries
+        if (ifaces[i].name[0] == '\0') continue;
+
         if (!first) printf(",\n");
         
         // Basic Info
