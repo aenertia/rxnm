@@ -49,6 +49,47 @@ is_avahi_running() {
     is_service_active "avahi-daemon"
 }
 
+# --- RESCUE MODE HELPERS (Phase 8) ---
+
+configure_standalone_client() {
+    local iface="$1"
+    log_warn "Entering Rescue Mode: Configuring $iface as standalone client"
+    
+    # 1. Bring up link
+    ip link set "$iface" up
+    
+    # 2. Kill stale DHCP clients
+    pkill -f "udhcpc -i $iface" 2>/dev/null
+    
+    # 3. Start minimal DHCP client
+    # -i: interface, -b: background, -q: quit on lease fail (retries handled by us)
+    # -s: script (use default busybox script)
+    udhcpc -i "$iface" -b -s /usr/share/udhcpc/default.script
+}
+
+configure_standalone_gadget() {
+    local iface="$1"
+    local ip="169.254.10.2"
+    log_warn "Entering Rescue Mode: Configuring $iface as standalone gadget"
+    
+    # 1. Static IP
+    ip link set "$iface" up
+    ip addr add "${ip}/24" dev "$iface" 2>/dev/null
+    
+    # 2. Minimal DHCP Server (udhcpd)
+    local conf="/tmp/udhcpd.${iface}.conf"
+    cat <<EOF > "$conf"
+start 169.254.10.10
+end 169.254.10.20
+interface $iface
+option subnet 255.255.255.0
+option router $ip
+option dns $ip
+EOF
+    pkill -f "udhcpd $conf" 2>/dev/null
+    udhcpd "$conf"
+}
+
 # --- LIFECYCLE ACTIONS ---
 action_setup() {
     log_info "Initializing Network Manager..."
@@ -127,7 +168,7 @@ check_paths() {
 
 fix_permissions() {
     if [ -d "$EPHEMERAL_NET_DIR" ]; then
-        find "$EPHEMERAL_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' \) -exec chmod 644 {} + 2>/dev/null
+        find "$EPHEMERAL_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' -o -name '*.link' \) -exec chmod 644 {} + 2>/dev/null
     fi
     if [ -d "${STATE_DIR}/iwd" ]; then
         find "${STATE_DIR}/iwd" -type f \( -name '*.psk' -o -name '*.8021x' \) -exec chmod 600 {} + 2>/dev/null
@@ -136,13 +177,26 @@ fix_permissions() {
 
 reload_networkd() {
     fix_permissions
+    
+    # 1. Hybrid Fastpath: Try Agent DBus Trigger
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        if "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1; then
+            # Cache Invalidation: Ensure UI sees new state immediately
+            # RUN_DIR comes from rxnm-constants.sh
+            [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
+            return 0
+        fi
+    fi
+    
+    # 2. Coldpath: Legacy Systemctl/Networkctl
     if is_service_active "systemd-networkd"; then
         # Hardened against daemon hangs
         timeout 5s networkctl reload 2>/dev/null || log_warn "networkctl reload timed out"
+    else
+        log_warn "systemd-networkd not active. Changes staged but not applied."
     fi
     
-    # Cache Invalidation: Ensure UI sees new state immediately
-    # RUN_DIR comes from rxnm-constants.sh
+    # Cache Invalidation
     if [ -n "$RUN_DIR" ]; then
         rm -f "$RUN_DIR/status.json" 2>/dev/null
     fi

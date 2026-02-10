@@ -411,6 +411,24 @@ action_scan() {
 
     ensure_interface_active "$iface"
 
+    # Phase 8: Hybrid Fastpath Scan
+    # If the Agent is available, use it to fetch results directly from Netlink
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        # 1. Trigger Scan (iwctl is still reliable for triggering)
+        timeout 2s iwctl station "$iface" scan >/dev/null 2>&1 || true
+        
+        # 2. Wait slightly for kernel events
+        sleep 1.5
+        
+        # 3. Read Results via Agent
+        # Note: 'action_scan' expects full scan results, which rxnm-agent --dump provides
+        # as part of the interface object. However, rxnm-agent's dump is a state snapshot,
+        # not a scan list. For scan *lists*, we still rely on the robust IWD DBus object manager
+        # because the Agent is optimized for *current state*, not neighborhood discovery.
+        # Fallback to DBus logic is correct here for rich data.
+    fi
+
+    # Standard DBus Scan Logic (Preserved)
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD via DBus"
@@ -427,24 +445,26 @@ action_scan() {
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
-    busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
-    
-    local sleep_sec
-    if (( SCAN_POLL_MS < 1000 )); then
-        sleep_sec="0.${SCAN_POLL_MS}"
-    else
-        sleep_sec=$((SCAN_POLL_MS / 1000))
+    # Trigger scan if we haven't already
+    if [ ! -x "$RXNM_AGENT_BIN" ]; then
+        busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
+        
+        local sleep_sec
+        if (( SCAN_POLL_MS < 1000 )); then
+            sleep_sec="0.${SCAN_POLL_MS}"
+        else
+            sleep_sec=$((SCAN_POLL_MS / 1000))
+        fi
+        
+        local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
+        
+        for ((i=1; i<=max_polls; i++)); do
+            local scanning
+            scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
+            [ "$scanning" != "true" ] && break
+            sleep "$sleep_sec"
+        done
     fi
-    
-    local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
-    
-    for ((i=1; i<=max_polls; i++)); do
-        local scanning
-        # Use builtin timeout for property check
-        scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
-        [ "$scanning" != "true" ] && break
-        sleep "$sleep_sec"
-    done
     
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to fetch scan results"
@@ -452,12 +472,6 @@ action_scan() {
     fi
     
     local result
-    # REMEDIATION: JSON Schema Non-Compliance
-    # Implemented scaled signal strength mapping:
-    #   -90 dBm -> 0%
-    #   -30 dBm -> 100%
-    #   Calculation: (dBm - (-90)) * 100 / (-30 - (-90)) = (dBm + 90) * 100 / 60
-    #   Clamped strictly between 0 and 100.
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         [
             .data[] | to_entries[] | 
@@ -563,12 +577,10 @@ action_connect() {
         fi
         
         if [[ -z "$out" ]]; then
+            # Phase 8: L3 Fallback Logic
             local config_exists="false"
             
             # Check for config in EPHEMERAL (RAM/Active) OR PERSISTENT (Disk/Saved) layers.
-            # If a user has a static IP config saved in persistent storage, we shouldn't overwrite it
-            # with default DHCP just because it hasn't been loaded into RAM yet.
-            
             if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || \
                [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
                 config_exists="true"
@@ -582,15 +594,17 @@ action_connect() {
                  if type _task_set_dhcp &>/dev/null; then
                      with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
                      
-                     # REMEDIATION: The "Link-Local" Logic Bug
-                     # Explicitly force a reconfigure/reload of networkd to ensure the newly created
-                     # ephemeral configuration is picked up immediately. This guards against
-                     # race conditions where networkd hasn't noticed the file creation event yet.
-                     # Constraint: Check if networkd is actually running (we might be early boot)
-                     if command -v networkctl >/dev/null; then
-                         if is_service_active "systemd-networkd"; then
-                             timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
-                             timeout 5s networkctl reload >/dev/null 2>&1
+                     # Check if networkd is actually running
+                     if is_service_active "systemd-networkd"; then
+                         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
+                         timeout 5s networkctl reload >/dev/null 2>&1
+                     else
+                         # Phase 8: Rescue Mode L3 Fallback
+                         log_warn "networkd missing or inactive. Triggering Rescue Mode (udhcpc)."
+                         if type configure_standalone_client &>/dev/null; then
+                             configure_standalone_client "$iface"
+                         else
+                             log_warn "Rescue helper not found (rxnm-system.sh not sourced?)."
                          fi
                      fi
                  else

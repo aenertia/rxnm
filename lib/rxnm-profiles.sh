@@ -32,7 +32,13 @@ _sync_active_configs() {
         cp "${nets[@]}" "${dest_dir}/" 2>/dev/null
     fi
     
-    # 3. Proxy Configs
+    # 3. Hardware Configs (.link) - Phase 8 Support
+    local links=("${src_dir}"/*.link)
+    if [ ${#links[@]} -gt 0 ] && [ -e "${links[0]}" ]; then
+        cp "${links[@]}" "${dest_dir}/" 2>/dev/null
+    fi
+    
+    # 4. Proxy Configs
     local proxies=("${src_dir}"/proxy-*.conf)
     if [ ${#proxies[@]} -gt 0 ] && [ -e "${proxies[0]}" ]; then
         cp "${proxies[@]}" "${dest_dir}/" 2>/dev/null
@@ -47,12 +53,15 @@ _task_profile_save_global() {
     rm -rf "$profile_dir"
     mkdir -p "$profile_dir"
     
-    # 1. Save NetworkD and Virtual Device files from RAM
+    # 1. Save NetworkD, Virtual Device, and Link files from RAM
     local nets=("${EPHEMERAL_NET_DIR}"/*.network)
     [ ${#nets[@]} -gt 0 ] && cp "${nets[@]}" "$profile_dir/" 2>/dev/null
     
     local devs=("${EPHEMERAL_NET_DIR}"/*.netdev)
     [ ${#devs[@]} -gt 0 ] && cp "${devs[@]}" "$profile_dir/" 2>/dev/null
+    
+    local links=("${EPHEMERAL_NET_DIR}"/*.link)
+    [ ${#links[@]} -gt 0 ] && cp "${links[@]}" "$profile_dir/" 2>/dev/null
     
     # 2. Save Per-Interface Proxy Configs from RAM
     local interface_proxies=("${EPHEMERAL_NET_DIR}"/proxy-*.conf)
@@ -89,6 +98,7 @@ _task_profile_load_global() {
     # 1. Wipe current Ephemeral session (RAM)
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
+    find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
     
     # 2. Restore all configs (User Intent > Hardware Presence)
@@ -147,6 +157,7 @@ action_profile() {
                      confirm_action "Reset active configuration to system defaults?" "$FORCE_ACTION"
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
+                     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
                      reload_networkd
                      json_success '{"action": "loaded_default", "note": "ephemeral_wiped"}'
@@ -190,6 +201,7 @@ action_profile() {
                 # 1. Clean RAM state
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
+                find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
                 
                 # 2. First Pass: Sync User Profile (Profile Default -> RAM)
                 # This establishes the last known RXNM-managed state.
@@ -213,33 +225,52 @@ action_profile() {
     local profile_iface_dir="${STORAGE_PROFILES_DIR}/${iface}"
     mkdir -p "$profile_iface_dir"
     local active_cfg="${EPHEMERAL_NET_DIR}/75-config-${iface}.network"
+    local active_link="${EPHEMERAL_NET_DIR}/10-rxnm-${iface}.link"
     local active_proxy="${EPHEMERAL_NET_DIR}/proxy-${iface}.conf"
     local profile_path="${profile_iface_dir}/${name}.network"
+    local profile_link="${profile_iface_dir}/${name}.link"
     local profile_proxy="${profile_iface_dir}/${name}.proxy.conf"
 
     case "$cmd" in
         save)
-            [ ! -f "$active_cfg" ] && { json_error "No active config to save for $iface"; return 1; }
-            cp "$active_cfg" "$profile_path"
+            if [ ! -f "$active_cfg" ] && [ ! -f "$active_link" ]; then
+                 json_error "No active config to save for $iface"; return 1
+            fi
+            [ -f "$active_cfg" ] && cp "$active_cfg" "$profile_path"
+            [ -f "$active_link" ] && cp "$active_link" "$profile_link"
             [ -f "$active_proxy" ] && cp "$active_proxy" "$profile_proxy"
             json_success '{"action": "saved", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
         load)
-            [ ! -f "$profile_path" ] && { json_error "Profile not found"; return 1; }
-            cp "$profile_path" "$active_cfg"
+            if [ ! -f "$profile_path" ] && [ ! -f "$profile_link" ]; then
+                 json_error "Profile not found"; return 1
+            fi
+            [ -f "$profile_path" ] && cp "$profile_path" "$active_cfg"
+            [ -f "$profile_link" ] && cp "$profile_link" "$active_link"
             if [ -f "$profile_proxy" ]; then cp "$profile_proxy" "$active_proxy"; else rm -f "$active_proxy"; fi
+            
+            # If a link file changed, we might need udev trigger, but generally reconfigure/reload handles netdev
             reconfigure_iface "$iface"
             json_success '{"action": "loaded", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
         list)
             local clean_files=()
-            for f in "${profile_iface_dir}"/*.network; do [ -e "$f" ] && clean_files+=("$(basename "$f" .network)"); done
+            # List both network and link files, deduping by name
+            for f in "${profile_iface_dir}"/*.network "${profile_iface_dir}"/*.link; do 
+                [ -e "$f" ] && clean_files+=("$(basename "$f" | sed 's/\.network$//;s/\.link$//')")
+            done
             local json_list="[]"
-            [ ${#clean_files[@]} -gt 0 ] && json_list=$(printf '%s\n' "${clean_files[@]}" | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
+            # Sort and unique
+            if [ ${#clean_files[@]} -gt 0 ]; then
+                local unique_files
+                unique_files=$(printf '%s\n' "${clean_files[@]}" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
+                json_list="$unique_files"
+            fi
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;
         delete)
             [ -f "$profile_path" ] && rm -f "$profile_path"
+            [ -f "$profile_link" ] && rm -f "$profile_link"
             [ -f "$profile_proxy" ] && rm -f "$profile_proxy"
             json_success '{"action": "deleted", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;

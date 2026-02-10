@@ -136,12 +136,16 @@ build_network_config() {
 }
 
 # Device Link Configuration (.link file generation)
-# Handles Speed, Duplex, WakeOnLan, etc.
+# Handles Speed, Duplex, WakeOnLan, MAC Address, Policies
 build_device_link_config() {
     local iface="$1"
     local speed="$2" # Mbps (e.g. 100, 1000)
     local duplex="$3" # half, full
     local autoneg="$4" # yes, no
+    local wol="$5" # off, magic
+    local mac_policy="$6" # persistent, random, none
+    local name_policy="$7" # kernel, database, onboard, keep
+    local mac_addr="$8" # Specific MAC address (spoofing)
     
     # Matching strategy: 
     # Prefer matching by OriginalName (kernel name) for embedded devices where
@@ -151,7 +155,6 @@ build_device_link_config() {
     config+="\n[Link]\nDescription=RXNM Hardware Config\n"
     
     if [ -n "$speed" ]; then
-        # systemd .link expects e.g. "100M" or bits. We assume Mbps input.
         config+="BitsPerSecond=${speed}M\n"
     fi
     
@@ -161,6 +164,22 @@ build_device_link_config() {
     
     if [ -n "$autoneg" ]; then
         config+="AutoNegotiation=${autoneg}\n"
+    fi
+
+    if [ -n "$wol" ]; then
+        config+="WakeOnLan=${wol}\n"
+    fi
+
+    if [ -n "$mac_policy" ]; then
+        config+="MACAddressPolicy=${mac_policy}\n"
+    fi
+
+    if [ -n "$name_policy" ]; then
+        config+="NamePolicy=${name_policy}\n"
+    fi
+
+    if [ -n "$mac_addr" ]; then
+        config+="MACAddress=${mac_addr}\n"
     fi
     
     printf "%b" "$config"

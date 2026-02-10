@@ -3,18 +3,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
  *
- * Phase 2: Core Network Status (Netlink)
- * Phase 4: Connectivity Probing (TCP)
- * Phase 5: Runtime Configuration Sync
- * Phase 6: Query Interface (Litepath)
- * Phase 7: Wireless Fidelity (nl80211)
- *
- * - Direct Kernel Netlink (RTNETLINK & GENL)
- * - Zero-dependency JSON generation
- * - Raw TCP WAN Probing
- * - Live parsing of Bash constants for hot-patching
- * - Dot-notation key retrieval (jq replacement)
- * - Architecture: Ephemeral (One-Shot), No Resident Loop
+ * Phase 8: Hybrid Fastpath & Rescue Resilience (Merged)
+ * - Netlink (RT/GENL) for instant status
+ * - Udev Parser (Direct /run read)
+ * - LitePath DBus (Direct socket)
+ * - TCP Connectivity Probing
+ * - Runtime Configuration Sync
+ * - Query Interface (Litepath)
  */
 
 #define _GNU_SOURCE
@@ -27,6 +22,7 @@
 #include <getopt.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <linux/netlink.h>
@@ -36,12 +32,13 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ctype.h>
 #include <limits.h>
 
-// Include generated SSoT constants
 #include "rxnm_generated.h"
+#include "rxnm_dbus_lite.h"
 
-// Fallbacks if header generation fails (Safety)
+// Fallbacks
 #ifndef RXNM_VERSION
 #define RXNM_VERSION "0.0.0-dev"
 #endif
@@ -61,7 +58,22 @@
 #define RXNM_PROBE_TARGETS_V6 "[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443"
 #endif
 
-// --- NL80211 CONSTANTS ---
+// --- GLOBALS & CONFIG ---
+char g_conf_dir[PATH_MAX] = CONF_DIR;
+char g_run_dir[PATH_MAX] = RUN_DIR;
+char g_agent_version[64] = RXNM_VERSION;
+char g_conn_targets_v4[256] = RXNM_PROBE_TARGETS_V4;
+char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
+
+#define BUF_SIZE 8192
+#define MAX_IFACES 64
+#define MAX_IPV6_PER_IFACE 8
+#define MAX_ROUTES_PER_IFACE 32
+
+#define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
+#define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
+
+// NL80211 Constants
 #define NL80211_GENL_NAME "nl80211"
 #define NL80211_CMD_GET_INTERFACE 5
 #define NL80211_CMD_GET_STATION 17
@@ -101,24 +113,6 @@ enum nl80211_sta_info {
     NL80211_STA_INFO_SIGNAL,
     __NL80211_STA_INFO_AFTER_LAST
 };
-#define NL80211_STA_INFO_MAX (__NL80211_STA_INFO_AFTER_LAST - 1)
-
-
-// --- RUNTIME CONFIGURATION ---
-char g_conf_dir[PATH_MAX] = CONF_DIR;
-char g_run_dir[PATH_MAX] = RUN_DIR;
-char g_agent_version[64] = RXNM_VERSION;
-char g_conn_targets_v4[256] = RXNM_PROBE_TARGETS_V4;
-char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
-
-#define BUF_SIZE 8192
-#define MAX_IPV6_PER_IFACE 8
-#define MAX_ROUTES_PER_IFACE 16
-
-#define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
-#define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
-
-// --- DATA STRUCTURES ---
 
 typedef struct {
     char dst[IPV6_CIDR_LEN];
@@ -133,14 +127,12 @@ typedef struct {
     char name[IFNAMSIZ];
     char mac[18];
     char ipv4[IPV4_CIDR_LEN];
-    char ipv6[MAX_IPV6_PER_IFACE][IPV6_CIDR_LEN]; 
+    char ipv6[MAX_IPV6_PER_IFACE][IPV6_CIDR_LEN];
     int ipv6_count;
-    
     char gateway[INET6_ADDRSTRLEN];
     uint32_t metric;
     route_entry_t routes[MAX_ROUTES_PER_IFACE];
     int route_count;
-
     char state[16];
     int mtu;
     bool exists;
@@ -148,18 +140,22 @@ typedef struct {
     // Stats
     uint64_t rx_bytes;
     uint64_t tx_bytes;
-    
-    // Speed
     int speed_mbps;
+    
+    // Metadata (Udev) - Phase 8
+    char vendor[64];
+    char model[64];
+    char driver[32];
+    char bus_info[32];
 
-    // WiFi Specifics
+    // WiFi
     bool is_wifi;
-    char ssid[33]; 
+    char ssid[33];
     int signal_dbm;
+    uint32_t frequency;
     bool wifi_connected;
 } iface_entry_t;
 
-#define MAX_IFACES 32
 iface_entry_t ifaces[MAX_IFACES];
 
 // --- UTILS ---
@@ -182,22 +178,12 @@ iface_entry_t* get_iface(int index) {
     }
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists) {
+            memset(&ifaces[i], 0, sizeof(iface_entry_t));
             ifaces[i].exists = true;
             ifaces[i].index = index;
-            ifaces[i].master_index = 0;
-            strcpy(ifaces[i].state, "unknown");
-            ifaces[i].ipv6_count = 0;
-            ifaces[i].route_count = 0;
-            ifaces[i].gateway[0] = '\0';
-            ifaces[i].metric = 0;
-            ifaces[i].ipv4[0] = '\0';
-            ifaces[i].is_wifi = false;
-            ifaces[i].ssid[0] = '\0';
             ifaces[i].signal_dbm = -100;
-            ifaces[i].wifi_connected = false;
-            ifaces[i].rx_bytes = 0;
-            ifaces[i].tx_bytes = 0;
             ifaces[i].speed_mbps = -1;
+            strcpy(ifaces[i].state, "unknown");
             return &ifaces[i];
         }
     }
@@ -287,6 +273,129 @@ void load_runtime_config() {
     fclose(f);
 }
 
+// --- UDEV PARSER (DIRECT READ) ---
+// Reads from /run/udev/data/n<ifindex> or +net:<ifindex>
+void udev_enrich(iface_entry_t *entry) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/run/udev/data/n%d", entry->index);
+    
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        // Try alternate path (some systemd versions)
+        snprintf(path, sizeof(path), "/run/udev/data/+net:%s", entry->name);
+        f = fopen(path, "r");
+    }
+    
+    if (!f) return;
+    
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "E:ID_VENDOR_FROM_DATABASE=", 26) == 0) {
+            strncpy(entry->vendor, line + 26, sizeof(entry->vendor) - 1);
+            entry->vendor[strcspn(entry->vendor, "\n")] = 0;
+        } else if (strncmp(line, "E:ID_MODEL_FROM_DATABASE=", 25) == 0) {
+            strncpy(entry->model, line + 25, sizeof(entry->model) - 1);
+            entry->model[strcspn(entry->model, "\n")] = 0;
+        } else if (strncmp(line, "E:ID_NET_DRIVER=", 16) == 0) {
+            strncpy(entry->driver, line + 16, sizeof(entry->driver) - 1);
+            entry->driver[strcspn(entry->driver, "\n")] = 0;
+        } else if (strncmp(line, "E:ID_PATH=", 10) == 0) {
+            strncpy(entry->bus_info, line + 10, sizeof(entry->bus_info) - 1);
+            entry->bus_info[strcspn(entry->bus_info, "\n")] = 0;
+        }
+    }
+    fclose(f);
+}
+
+// --- DBUS LITE (RELOAD TRIGGER) ---
+void append_string(uint8_t **ptr, const char *str) {
+    uint32_t len = strlen(str);
+    *((uint32_t *)*ptr) = len;
+    *ptr += 4;
+    memcpy(*ptr, str, len + 1);
+    *ptr += len + 1;
+}
+
+int dbus_trigger_reload() {
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+    
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, DBUS_SOCK_PATH, sizeof(addr.sun_path)-1);
+    
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -2;
+    }
+    
+    // SASL Auth
+    char uid_str[16];
+    snprintf(uid_str, sizeof(uid_str), "%u", getuid());
+    char auth_buf[128];
+    // Hex encode UID
+    char uid_hex[33];
+    for (int i=0; uid_str[i]; i++) snprintf(uid_hex+(i*2), 3, "%02x", uid_str[i]);
+    
+    snprintf(auth_buf, sizeof(auth_buf), "\0%s%s\r\n", SASL_AUTH_EXTERNAL, uid_hex);
+    send(sock, auth_buf, strlen(auth_buf), 0);
+    
+    char resp[512];
+    int n = recv(sock, resp, sizeof(resp)-1, 0);
+    if (n <= 0 || strncmp(resp, "OK", 2) != 0) { close(sock); return -3; }
+    
+    send(sock, SASL_BEGIN, strlen(SASL_BEGIN), 0);
+    
+    // Send Method Call: org.freedesktop.network1.Manager.Reload
+    uint8_t msg[1024];
+    memset(msg, 0, sizeof(msg));
+    
+    dbus_header_t *hdr = (dbus_header_t *)msg;
+    hdr->endian = DBUS_ENDIAN_LITTLE;
+    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr->flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED;
+    hdr->version = DBUS_PROTOCOL_VERSION;
+    hdr->serial = 1;
+    
+    uint8_t *ptr = msg + sizeof(dbus_header_t);
+    
+    // Fields
+    // 1. PATH
+    *ptr++ = DBUS_HEADER_FIELD_PATH;
+    *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
+    append_string(&ptr, "/org/freedesktop/network1");
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+
+    // 2. DESTINATION
+    *ptr++ = DBUS_HEADER_FIELD_DESTINATION;
+    *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "org.freedesktop.network1");
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    // 3. INTERFACE
+    *ptr++ = DBUS_HEADER_FIELD_INTERFACE;
+    *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "org.freedesktop.network1.Manager");
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    // 4. MEMBER
+    *ptr++ = DBUS_HEADER_FIELD_MEMBER;
+    *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "Reload");
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    // Finalize Header
+    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
+    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0;
+    
+    hdr->body_len = 0; // No body arguments
+    
+    send(sock, msg, (ptr - msg), 0);
+    close(sock);
+    return 0;
+}
+
 // --- RTNETLINK ENGINE ---
 
 int open_netlink_rt() {
@@ -295,7 +404,6 @@ int open_netlink_rt() {
     struct sockaddr_nl addr;
     memset(&addr, 0, sizeof(addr));
     addr.nl_family = AF_NETLINK;
-    // addr.nl_groups = 0; // Unicast/Dump only (Default)
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(sock); return -1; }
     return sock;
 }
@@ -318,7 +426,8 @@ void process_link_msg(struct nlmsghdr *nh) {
     if (tb[IFLA_IFNAME]) strncpy(entry->name, (char *)RTA_DATA(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
     if (tb[IFLA_ADDRESS]) {
         unsigned char *mac = (unsigned char *)RTA_DATA(tb[IFLA_ADDRESS]);
-        snprintf(entry->mac, sizeof(entry->mac), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        snprintf(entry->mac, sizeof(entry->mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
     if (tb[IFLA_MTU]) entry->mtu = *(unsigned int *)RTA_DATA(tb[IFLA_MTU]);
     else entry->mtu = 0;
@@ -334,6 +443,9 @@ void process_link_msg(struct nlmsghdr *nh) {
     if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
     else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
     else strcpy(entry->state, "off");
+
+    // Phase 8: Trigger Udev Enrichment
+    udev_enrich(entry);
 }
 
 void process_addr_msg(struct nlmsghdr *nh) {
@@ -346,7 +458,6 @@ void process_addr_msg(struct nlmsghdr *nh) {
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         if (ifa->ifa_family == AF_INET) {
-            // First Writer Wins logic (ignore secondary IPs for summary)
             if (entry->ipv4[0] == '\0') {
                 char ipv4_buf[INET_ADDRSTRLEN];
                 if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
@@ -431,15 +542,12 @@ void read_rtnetlink_response(int sock) {
     }
 }
 
-// --- GENERIC NETLINK (NL80211) ENGINE ---
-
+// --- GENL WIFI ---
 int open_netlink_genl() {
     int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if (sock < 0) return -1;
-    struct sockaddr_nl addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.nl_family = AF_NETLINK;
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(sock); return -1; }
+    struct sockaddr_nl addr = { .nl_family = AF_NETLINK };
+    bind(sock, (struct sockaddr *)&addr, sizeof(addr));
     return sock;
 }
 
@@ -448,44 +556,32 @@ int get_genl_family_id(int sock, const char *family_name) {
         struct nlmsghdr n;
         struct genlmsghdr g;
         char buf[256];
-    } req;
-    
-    memset(&req, 0, sizeof(req));
-    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
-    req.n.nlmsg_type = GENL_ID_CTRL;
-    req.n.nlmsg_flags = NLM_F_REQUEST;
-    req.n.nlmsg_seq = 1;
-    req.n.nlmsg_pid = getpid();
-    req.g.cmd = CTRL_CMD_GETFAMILY;
-    req.g.version = 1;
-
-    struct rtattr *rta = (struct rtattr *) (req.buf);
+    } req = {
+        .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN),
+        .n.nlmsg_type = GENL_ID_CTRL,
+        .n.nlmsg_flags = NLM_F_REQUEST,
+        .n.nlmsg_seq = 1,
+        .n.nlmsg_pid = getpid(),
+        .g.cmd = CTRL_CMD_GETFAMILY,
+        .g.version = 1
+    };
+    struct rtattr *rta = (struct rtattr *) req.buf;
     rta->rta_type = CTRL_ATTR_FAMILY_NAME;
     rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
     strcpy(RTA_DATA(rta), family_name);
     req.n.nlmsg_len += rta->rta_len;
-
-    if (send(sock, &req, req.n.nlmsg_len, 0) < 0) return -1;
+    send(sock, &req, req.n.nlmsg_len, 0);
 
     char buf[BUF_SIZE];
     int len = recv(sock, buf, sizeof(buf), 0);
     if (len < 0) return -1;
-
+    
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     if (NLMSG_OK(nh, len) && nh->nlmsg_type != NLMSG_ERROR) {
         struct genlmsghdr *gh = NLMSG_DATA(nh);
         struct rtattr *tb[CTRL_ATTR_MAX + 1];
-        int attrlen = nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-        struct rtattr *attr = (struct rtattr *) ((char *) gh + GENL_HDRLEN);
-        
-        memset(tb, 0, sizeof(tb));
-        while (RTA_OK(attr, attrlen)) {
-            if (attr->rta_type <= CTRL_ATTR_MAX) tb[attr->rta_type] = attr;
-            attr = RTA_NEXT(attr, attrlen);
-        }
-        if (tb[CTRL_ATTR_FAMILY_ID]) {
-            return *(uint16_t *) RTA_DATA(tb[CTRL_ATTR_FAMILY_ID]);
-        }
+        parse_rtattr(tb, CTRL_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
+        if (tb[CTRL_ATTR_FAMILY_ID]) return *(uint16_t *)RTA_DATA(tb[CTRL_ATTR_FAMILY_ID]);
     }
     return -1;
 }
@@ -493,50 +589,36 @@ int get_genl_family_id(int sock, const char *family_name) {
 void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     struct genlmsghdr *gh = NLMSG_DATA(nh);
     struct rtattr *tb[NL80211_ATTR_MAX + 1];
-    struct rtattr *attr = (struct rtattr *) ((char *) gh + GENL_HDRLEN);
-    int len = nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
-
-    memset(tb, 0, sizeof(tb));
-    while (RTA_OK(attr, len)) {
-        if (attr->rta_type <= NL80211_ATTR_MAX) tb[attr->rta_type] = attr;
-        attr = RTA_NEXT(attr, len);
-    }
+    parse_rtattr(tb, NL80211_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
 
     if (!tb[NL80211_ATTR_IFINDEX]) return;
-    int ifindex = *(uint32_t *) RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
+    int ifindex = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
     iface_entry_t *entry = get_iface(ifindex);
     if (!entry) return;
-
-    // Mark as WiFi interface
     entry->is_wifi = true;
 
     if (cmd == NL80211_CMD_GET_INTERFACE) {
         if (tb[NL80211_ATTR_SSID]) {
-            char *ssid_data = (char *) RTA_DATA(tb[NL80211_ATTR_SSID]);
+            char *ssid_data = (char *)RTA_DATA(tb[NL80211_ATTR_SSID]);
             int ssid_len = RTA_PAYLOAD(tb[NL80211_ATTR_SSID]);
             if (ssid_len > 32) ssid_len = 32;
             memcpy(entry->ssid, ssid_data, ssid_len);
             entry->ssid[ssid_len] = '\0';
             entry->wifi_connected = true;
-        } else {
-            entry->wifi_connected = false;
         }
-    } 
-    else if (cmd == NL80211_CMD_GET_STATION) {
+        if (tb[NL80211_ATTR_WIPHY_FREQ]) {
+            entry->frequency = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY_FREQ]);
+        }
+    } else if (cmd == NL80211_CMD_GET_STATION) {
         if (tb[NL80211_ATTR_STATION_INFO]) {
-            // Nested Attributes
             struct rtattr *si = tb[NL80211_ATTR_STATION_INFO];
-            struct rtattr *nested_attr = RTA_DATA(si);
-            int nested_len = RTA_PAYLOAD(si);
-            
-            while (RTA_OK(nested_attr, nested_len)) {
-                if (nested_attr->rta_type == NL80211_STA_INFO_SIGNAL) {
-                    // RSSI is usually int8_t (dBm) or uint8_t
-                    // Netlink treats it as u8 in struct, but meaningful value is signed
-                    int8_t sig = *(int8_t *) RTA_DATA(nested_attr);
-                    entry->signal_dbm = (int)sig;
+            struct rtattr *nested = RTA_DATA(si);
+            int len = RTA_PAYLOAD(si);
+            while (RTA_OK(nested, len)) {
+                if (nested->rta_type == NL80211_STA_INFO_SIGNAL) {
+                    entry->signal_dbm = (int)(*(int8_t *)RTA_DATA(nested));
                 }
-                nested_attr = RTA_NEXT(nested_attr, nested_len);
+                nested = RTA_NEXT(nested, len);
             }
         }
     }
@@ -545,63 +627,38 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
 void collect_wifi_state() {
     int sock = open_netlink_genl();
     if (sock < 0) return;
+    int fid = get_genl_family_id(sock, NL80211_GENL_NAME);
+    if (fid <= 0) { close(sock); return; }
 
-    int family_id = get_genl_family_id(sock, NL80211_GENL_NAME);
-    if (family_id <= 0) {
-        close(sock);
-        return;
-    }
-
-    // 1. Get Interfaces (SSID)
-    struct {
-        struct nlmsghdr n;
-        struct genlmsghdr g;
-        char buf[256];
-    } req;
-    
-    memset(&req, 0, sizeof(req));
-    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
-    req.n.nlmsg_type = family_id;
-    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req.n.nlmsg_seq = time(NULL);
-    req.g.cmd = NL80211_CMD_GET_INTERFACE;
-    req.g.version = 1;
+    // Request Interface Info (SSID, Freq)
+    struct { struct nlmsghdr n; struct genlmsghdr g; char buf[4]; } req = {
+        .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid, .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP,
+        .g.cmd = NL80211_CMD_GET_INTERFACE, .g.version = 1
+    };
     send(sock, &req, req.n.nlmsg_len, 0);
-
+    
     char buf[BUF_SIZE];
     int len;
-    
-    // Simple Loop for Dump
     while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
         struct nlmsghdr *nh = (struct nlmsghdr *)buf;
         for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
-            if (nh->nlmsg_type == NLMSG_DONE) goto step2;
-            if (nh->nlmsg_type == NLMSG_ERROR) goto step2;
-            if (nh->nlmsg_type == family_id) process_nl80211_msg(nh, NL80211_CMD_GET_INTERFACE);
+            if (nh->nlmsg_type == fid) process_nl80211_msg(nh, NL80211_CMD_GET_INTERFACE);
+            else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto step2;
         }
     }
-
 step2:
-    // 2. Get Station Info (RSSI)
-    memset(&req, 0, sizeof(req));
-    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
-    req.n.nlmsg_type = family_id;
-    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    req.n.nlmsg_seq = time(NULL) + 1;
+    // Request Station Info (RSSI)
     req.g.cmd = NL80211_CMD_GET_STATION;
-    req.g.version = 1;
+    req.n.nlmsg_seq++;
     send(sock, &req, req.n.nlmsg_len, 0);
-
     while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
         struct nlmsghdr *nh = (struct nlmsghdr *)buf;
         for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
-            if (nh->nlmsg_type == NLMSG_DONE) goto finish;
-            if (nh->nlmsg_type == NLMSG_ERROR) goto finish;
-            if (nh->nlmsg_type == family_id) process_nl80211_msg(nh, NL80211_CMD_GET_STATION);
+            if (nh->nlmsg_type == fid) process_nl80211_msg(nh, NL80211_CMD_GET_STATION);
+            else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto done;
         }
     }
-
-finish:
+done:
     close(sock);
 }
 
@@ -622,7 +679,7 @@ void collect_network_state() {
     collect_wifi_state();
 }
 
-// --- CONNECTIVITY CHECK (TCP PROBE) ---
+// --- TCP PROBE (Restored functionality) ---
 bool tcp_probe(const char *ip_str, int port, int family) {
     int sock = socket(family, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (sock < 0) return false;
@@ -658,7 +715,7 @@ bool tcp_probe(const char *ip_str, int port, int family) {
         FD_SET(sock, &wfds);
         if (select(sock + 1, NULL, &wfds, NULL, &timeout) > 0) {
             int so_error;
-            socklen_t len = sizeof so_error;
+            socklen_t len = sizeof(so_error);
             getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
             if (so_error == 0) success = true;
         }
@@ -668,17 +725,14 @@ bool tcp_probe(const char *ip_str, int port, int family) {
     return success;
 }
 
-// Parse "IP:Port" string
 void parse_target(char *token, char *ip, int *port) {
     char *colon = strrchr(token, ':');
     if (colon) {
         *colon = '\0';
         *port = atoi(colon + 1);
-        
-        // Handle [IPv6] brackets
         if (token[0] == '[' && token[strlen(token)-1] == ']') {
-            token[strlen(token)-1] = '\0'; // remove closing
-            strcpy(ip, token + 1); // skip opening
+            token[strlen(token)-1] = '\0'; 
+            strcpy(ip, token + 1); 
         } else {
             strcpy(ip, token);
         }
@@ -689,7 +743,7 @@ void cmd_check_internet() {
     bool v4 = false;
     bool v6 = false;
 
-    // IPv4 Probe (using runtime list)
+    // IPv4 Probe
     char list_v4[256];
     strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4));
     char *token_v4, *saveptr_v4;
@@ -734,7 +788,6 @@ void cmd_check_internet() {
 // --- HELPER: Parse Simple Key=Val Config (Proxy) ---
 void get_proxy_config(char* http, char* https, char* no_proxy) {
     char path[PATH_MAX];
-    // FIX: Add length check to silence -Wformat-truncation
     if (strlen(g_conf_dir) + 20 >= sizeof(path)) return;
     
     snprintf(path, sizeof(path), "%s/proxy.conf", g_conf_dir);
@@ -761,11 +814,9 @@ void get_proxy_config(char* http, char* https, char* no_proxy) {
     fclose(f);
 }
 
-// --- JSON GENERATION (Simple Printer) ---
-
+// --- MAIN OUTPUT ---
 void print_json_status() {
-    printf("{\n");
-    printf("  \"%s\": true,\n", KEY_SUCCESS);
+    printf("{\n  \"%s\": true,\n", KEY_SUCCESS);
     printf("  \"agent_version\": \"%s\",\n", g_agent_version);
     
     char hostname[256] = DEFAULT_HOSTNAME;
@@ -791,28 +842,28 @@ void print_json_status() {
     }
 
     printf("  \"interfaces\": {\n");
-
     bool first = true;
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists) continue;
-        
         if (!first) printf(",\n");
+        
+        // Basic Info
         printf("    \"%s\": {\n", ifaces[i].name);
         printf("      \"name\": \"%s\",\n", ifaces[i].name);
         printf("      \"state\": \"%s\",\n", ifaces[i].state);
         printf("      \"mtu\": %d,\n", ifaces[i].mtu);
+        printf("      \"type\": \"%s\",\n", detect_iface_type(&ifaces[i]));
         
-        if (strlen(ifaces[i].mac) > 0) 
-            printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
+        // Metadata
+        if (ifaces[i].mac[0]) printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
+        if (ifaces[i].vendor[0]) printf("      \"vendor\": \"%s\",\n", ifaces[i].vendor);
+        if (ifaces[i].driver[0]) printf("      \"driver\": \"%s\",\n", ifaces[i].driver);
+        if (ifaces[i].bus_info[0]) printf("      \"bus_info\": \"%s\",\n", ifaces[i].bus_info);
         
-        if (strlen(ifaces[i].ipv4) > 0) 
-            printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
-        
-        if (strlen(ifaces[i].gateway) > 0)
-            printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
-        
-        if (ifaces[i].metric > 0)
-            printf("      \"metric\": %u,\n", ifaces[i].metric);
+        // IP Config
+        if (ifaces[i].ipv4[0]) printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
+        if (ifaces[i].gateway[0]) printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
+        if (ifaces[i].metric > 0) printf("      \"metric\": %u,\n", ifaces[i].metric);
         
         printf("      \"ipv6\": [");
         for(int j=0; j<ifaces[i].ipv6_count; j++) {
@@ -820,42 +871,25 @@ void print_json_status() {
         }
         printf("],\n");
         
+        // Routes
         printf("      \"routes\": [");
         for(int k=0; k<ifaces[i].route_count; k++) {
             printf("\n        { \"dst\": \"%s\"", ifaces[i].routes[k].dst);
-            if (strlen(ifaces[i].routes[k].gw) > 0)
-                printf(", \"gw\": \"%s\"", ifaces[i].routes[k].gw);
-            if (ifaces[i].routes[k].metric > 0)
-                printf(", \"metric\": %u", ifaces[i].routes[k].metric);
+            if (ifaces[i].routes[k].gw[0]) printf(", \"gw\": \"%s\"", ifaces[i].routes[k].gw);
+            if (ifaces[i].routes[k].metric > 0) printf(", \"metric\": %u", ifaces[i].routes[k].metric);
             printf(" }");
             if (k < ifaces[i].route_count - 1) printf(",");
         }
         if (ifaces[i].route_count > 0) printf("\n      ");
         printf("],\n");
-
-        const char *type = detect_iface_type(&ifaces[i]);
-        printf("      \"type\": \"%s\",\n", type);
-        
-        if (strcmp(type, "bridge") == 0) {
-            printf("      \"members\": \"");
-            bool first_mem = true;
-            for (int c = 0; c < MAX_IFACES; c++) {
-                if (ifaces[c].exists && ifaces[c].master_index == ifaces[i].index) {
-                    if (!first_mem) printf(",");
-                    printf("%s", ifaces[c].name);
-                    first_mem = false;
-                }
-            }
-            printf("\",\n");
-        }
         
         // Stats
         printf("      \"stats\": {\n");
         printf("        \"rx_bytes\": %llu,\n", (unsigned long long)ifaces[i].rx_bytes);
         printf("        \"tx_bytes\": %llu\n", (unsigned long long)ifaces[i].tx_bytes);
         printf("      },\n");
-
-        // Speed (Read from sysfs on demand)
+        
+        // Speed
         int speed_mbps = -1;
         char speed_path[256];
         snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", ifaces[i].name);
@@ -865,78 +899,43 @@ void print_json_status() {
             fclose(f_speed);
         }
         if (speed_mbps > 0) printf("      \"speed\": %d,\n", speed_mbps);
-        
-        // WiFi Specifics
+
+        // WiFi
         if (ifaces[i].is_wifi) {
             printf("      \"wifi\": {\n");
-            printf("        \"ssid\": \"%s\",\n", ifaces[i].ssid[0] ? ifaces[i].ssid : "");
+            printf("        \"ssid\": \"%s\",\n", ifaces[i].ssid);
             printf("        \"rssi\": %d,\n", ifaces[i].signal_dbm);
-            // Calculate percentage: -100 (0%) to -50 (100%)
-            int strength = (ifaces[i].signal_dbm + 100) * 2;
-            if (strength > 100) strength = 100;
-            if (strength < 0) strength = 0;
-            printf("        \"strength\": %d\n", strength);
+            printf("        \"frequency\": %u\n", ifaces[i].frequency);
             printf("      },\n");
         }
-
-        bool connected = (strcmp(ifaces[i].state, "routable") == 0);
-        printf("      \"connected\": %s\n", connected ? "true" : "false");
         
+        printf("      \"connected\": %s\n", (strcmp(ifaces[i].state, "routable") == 0) ? "true" : "false");
         printf("    }");
         first = false;
     }
-    printf("\n  }\n");
-    printf("}\n");
+    printf("\n  }\n}\n");
 }
 
 // --- QUERY INTERFACE (LITEPATH) ---
-
 void cmd_get_value(char *key) {
-    // Force collect data first
     collect_network_state();
-
-    // Key format: interfaces.<name>.<field>
-    // e.g., interfaces.wlan0.ip
-    // Or wifi.ssid, wifi.signal
     
+    // Simple parser for interfaces.<name>.<field>
     char *segment = strtok(key, ".");
-
-    if (segment && strcmp(segment, "wifi") == 0) {
-        // Handle Global WiFi queries (find first connected wifi)
-        char *sub = strtok(NULL, ".");
-        if (!sub) return;
-
-        for (int i = 0; i < MAX_IFACES; i++) {
-            if (ifaces[i].exists && ifaces[i].is_wifi && ifaces[i].wifi_connected) {
-                if (strcmp(sub, "ssid") == 0) printf("%s\n", ifaces[i].ssid);
-                else if (strcmp(sub, "signal") == 0) printf("%d\n", ifaces[i].signal_dbm);
-                else if (strcmp(sub, "rssi") == 0) printf("%d\n", ifaces[i].signal_dbm);
-                return;
-            }
-        }
+    
+    // Handle Global
+    if (segment && strcmp(segment, "hostname") == 0) {
+        char hostname[256] = DEFAULT_HOSTNAME;
+        gethostname(hostname, sizeof(hostname));
+        printf("%s\n", hostname);
         return;
     }
-
-    if (!segment || strcmp(segment, "interfaces") != 0) {
-        // Handle top-level keys
-        if (segment && strcmp(segment, "hostname") == 0) {
-            char hostname[256] = DEFAULT_HOSTNAME;
-            gethostname(hostname, sizeof(hostname));
-            printf("%s\n", hostname);
-            return;
-        }
-        if (segment && strcmp(segment, "agent_version") == 0) {
-            printf("%s\n", g_agent_version);
-            return;
-        }
-        return;
-    }
-
-    // Next: Interface Name
+    
+    if (!segment || strcmp(segment, "interfaces") != 0) return;
+    
     char *ifname = strtok(NULL, ".");
     if (!ifname) return;
-
-    // Find Interface
+    
     iface_entry_t *iface = NULL;
     for (int i = 0; i < MAX_IFACES; i++) {
         if (ifaces[i].exists && strcmp(ifaces[i].name, ifname) == 0) {
@@ -944,44 +943,29 @@ void cmd_get_value(char *key) {
             break;
         }
     }
-    if (!iface) return; // Interface not found
-
-    // Next: Field
+    if (!iface) return;
+    
     char *field = strtok(NULL, ".");
     if (!field) return;
-
+    
+    // Field dispatch
     if (strcmp(field, "ip") == 0) printf("%s\n", iface->ipv4);
-    else if (strcmp(field, "ssid") == 0) printf("%s\n", iface->ssid);
-    else if (strcmp(field, "rssi") == 0) printf("%d\n", iface->signal_dbm);
+    else if (strcmp(field, "mac") == 0) printf("%s\n", iface->mac);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
+    else if (strcmp(field, "gateway") == 0) printf("%s\n", iface->gateway);
     else if (strcmp(field, "type") == 0) printf("%s\n", detect_iface_type(iface));
-    else if (strcmp(field, "speed") == 0) {
-        int speed_mbps = -1;
-        char speed_path[256];
-        snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", iface->name);
-        FILE *f_speed = fopen(speed_path, "r");
-        if (f_speed) {
-            if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1;
-            fclose(f_speed);
-        }
-        printf("%d\n", speed_mbps);
-    }
-    else if (strcmp(field, "stats") == 0) {
-        char *sub = strtok(NULL, ".");
-        if (!sub) return;
-        if (strcmp(sub, "rx_bytes") == 0) printf("%llu\n", (unsigned long long)iface->rx_bytes);
-        else if (strcmp(sub, "tx_bytes") == 0) printf("%llu\n", (unsigned long long)iface->tx_bytes);
-    }
+    else if (strcmp(field, "vendor") == 0) printf("%s\n", iface->vendor);
     else if (strcmp(field, "wifi") == 0) {
         char *sub = strtok(NULL, ".");
-        if (!sub) return;
-        if (strcmp(sub, "ssid") == 0) printf("%s\n", iface->ssid);
-        else if (strcmp(sub, "signal") == 0) printf("%d\n", iface->signal_dbm);
+        if (sub) {
+            if (strcmp(sub, "ssid") == 0) printf("%s\n", iface->ssid);
+            else if (strcmp(sub, "rssi") == 0) printf("%d\n", iface->signal_dbm);
+            else if (strcmp(sub, "frequency") == 0) printf("%u\n", iface->frequency);
+        }
     }
 }
 
 // --- COMMAND HANDLERS ---
-
 void cmd_version() {
     printf("rxnm-agent %s\n", g_agent_version);
     printf("ConfDir: %s\n", g_conf_dir);
@@ -1003,25 +987,27 @@ void cmd_time() {
     }
 }
 
+// Original "Low Power" detection via file string search
 void cmd_is_low_power() {
-    const char *cpuinfo = "/proc/cpuinfo";
-    const char *socs[] = LOW_POWER_SOCS;
+    // This string list matches the original shell script regex
+    const char *socs[] = { 
+        "RK3326", "RK3566", "RK3128", "RK3036", "RK3288", 
+        "H700", "H616", "H3", "H5", "H6", "A64", "A133", "A33", 
+        "sunxi", "BCM2835", "BCM2836", "BCM2837", "ATM7051", 
+        "S905", "S805", "Meson", "X1830", "JZ4770", "riscv", 
+        "sun20iw1p1", "JH7110", "JH7100", "Atom", "Celeron", 
+        "Pentium", "Geode", "MIPS32", "MIPS64", "avr", 
+        "xtensa", "tensilica", "loongson", "loongarch", NULL 
+    };
     bool is_lp = false;
     for (int i = 0; socs[i] != NULL; i++) {
-        if (file_contains(cpuinfo, socs[i])) {
+        if (file_contains("/proc/cpuinfo", socs[i])) {
             is_lp = true;
             break;
         }
     }
     printf("%s\n", is_lp ? "true" : "false");
 }
-
-void cmd_dump_status() {
-    collect_network_state();
-    print_json_status();
-}
-
-// --- MAIN ---
 
 int main(int argc, char *argv[]) {
     // Phase 5: Load runtime configuration from Bash script if available
@@ -1035,6 +1021,7 @@ int main(int argc, char *argv[]) {
         {"is-low-power", no_argument, 0, 'L'},
         {"dump",    no_argument, 0, 'd'},
         {"check-internet", no_argument, 0, 'c'},
+        {"reload",  no_argument, 0, 'r'},
         {"get",     required_argument, 0, 'g'},
         {0, 0, 0, 0}
     };
@@ -1042,22 +1029,32 @@ int main(int argc, char *argv[]) {
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "vhHtdLcg:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': 
-                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value (e.g. interfaces.wlan0.ip)\n"); 
+                printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n"); 
                 return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
-            case 'd': cmd_dump_status(); return 0;
+            case 'd': 
+                collect_network_state();
+                print_json_status(); 
+                return 0;
             case 'c': cmd_check_internet(); return 0;
+            case 'r': return dbus_trigger_reload();
             case 'g': cmd_get_value(optarg); return 0;
             default: return 1;
         }
     }
-    if (optind < argc) { fprintf(stderr, "Unknown arg\n"); return 1; }
-    printf("rxnm-agent: Use --help\n");
+    
+    // Default action if no args: dump status
+    if (optind == 1) {
+        collect_network_state();
+        print_json_status();
+        return 0;
+    }
+    
     return 1;
 }

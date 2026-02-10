@@ -1,0 +1,19 @@
+[Unit]
+Description=RXNM WiFi Roaming Monitor & Steering Agent
+Documentation=https://github.com/rocknix/rocknix-network-manager
+After=network-online.target iwd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run the monitor in the foreground
+ExecStart=/usr/bin/rxnm wifi roaming monitor
+
+# Recovery settings
+Restart=on-failure
+RestartSec=5
+# Low priority to prevent interfering with gaming/foreground tasks
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

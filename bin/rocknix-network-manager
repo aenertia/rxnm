@@ -161,7 +161,9 @@ Actions:
   dpp enroll <uri>      Start DPP enrollment (QR code string)
   dpp stop              Stop DPP session
   
-  roaming monitor       Start opportunistic roaming monitor
+  roaming monitor       Start opportunistic roaming monitor (Foreground)
+  roaming enable        Enable roaming background service
+  roaming disable       Disable roaming background service
 
 Options:
   --password <pass>     WiFi Password
@@ -179,6 +181,7 @@ Usage: rxnm interface [name] <action> [options]
 
 Actions:
   show                  Show interface details
+  hotplug               Trigger hotplug event (Standard/Rescue)
   set dhcp              Enable DHCP
   set static <ip>       Set Static IP (CIDR format)
   set hardware          Set physical link properties (speed, duplex)
@@ -199,6 +202,9 @@ Options:
   --speed <mbps>        Link speed (e.g. 100, 1000)
   --duplex <mode>       Duplex mode (half, full)
   --autoneg <yes|no>    Enable/Disable auto-negotiation
+  --wol <magic|off>     Wake-on-LAN
+  --mac-policy <opt>    MAC Policy (persistent, random, none)
+  --name-policy <opt>   Name Policy (kernel, database, onboard, keep)
 EOF
             ;;
         profile)
@@ -502,11 +508,22 @@ case "$CATEGORY" in
                 ;;
             roaming)
                 SUBCMD="${1:-}"; shift
-                if [ "$SUBCMD" == "monitor" ]; then
-                    action_wifi_roaming_monitor
-                else
-                    echo "Usage: rxnm wifi roaming monitor"
-                fi
+                case "$SUBCMD" in
+                    monitor)
+                        action_wifi_roaming_monitor "$@"
+                        ;;
+                    enable)
+                        systemctl enable --now rxnm-roaming
+                        json_success '{"action": "roaming_enable", "status": "active"}'
+                        ;;
+                    disable)
+                        systemctl disable --now rxnm-roaming
+                        json_success '{"action": "roaming_disable", "status": "inactive"}'
+                        ;;
+                    *)
+                        echo "Usage: rxnm wifi roaming {monitor|enable|disable}"
+                        ;;
+                esac
                 ;;
         esac
         ;;
@@ -517,7 +534,7 @@ case "$CATEGORY" in
         ACTION=""
         
         # Valid actions for this category
-        VALID_ACTS=("show" "set" "enable" "disable" "list")
+        VALID_ACTS=("show" "set" "enable" "disable" "list" "hotplug")
         
         # Attempt expansion of first arg as a keyword
         EXPANDED=$(expand_alias "$ARG_1" "${VALID_ACTS[@]}")
@@ -566,8 +583,33 @@ case "$CATEGORY" in
                 [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }
                 action_set_link "$TARGET" "off" "off"
                 ;;
+            hotplug)
+                [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }
+                action_hotplug "$TARGET"
+                ;;
             set)
                 SUBCMD="${1:-}"; shift
+                
+                # Check for hardware override
+                if [ "$SUBCMD" == "hardware" ]; then
+                     SPEED=""; DUPLEX=""; AUTONEG=""; WOL=""; MACPOL=""; NAMEPOL=""; MAC=""
+                     while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --speed) SPEED="$2"; shift 2 ;;
+                            --duplex) DUPLEX="$2"; shift 2 ;;
+                            --autoneg) AUTONEG="$2"; shift 2 ;;
+                            --wol) WOL="$2"; shift 2 ;;
+                            --mac-policy) MACPOL="$2"; shift 2 ;;
+                            --name-policy) NAMEPOL="$2"; shift 2 ;;
+                            --mac) MAC="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                     done
+                     action_set_hardware "$TARGET" "$SPEED" "$DUPLEX" "$AUTONEG" "$WOL" "$MACPOL" "$NAMEPOL" "$MAC"
+                     exit 0
+                fi
+
+                # Standard Configuration
                 METRIC=""
                 MTU=""
                 MAC=""
@@ -577,6 +619,8 @@ case "$CATEGORY" in
                 case "$SUBCMD" in
                     dhcp)
                          ROUTES=""
+                         DNS=""
+                         DOMAINS=""
                          while [[ $# -gt 0 ]]; do
                             case "$1" in 
                                 --metric) METRIC="$2"; shift 2 ;; 
@@ -586,19 +630,22 @@ case "$CATEGORY" in
                                 --dhcp-id) DHCP_ID="$2"; shift 2 ;;
                                 --ipv6-pd) IPV6_PD="$2"; shift 2 ;;
                                 --routes) ROUTES="$2"; shift 2 ;;
+                                --dns) DNS="$2"; shift 2 ;;
+                                --domains) DOMAINS="$2"; shift 2 ;;
                                 *) shift ;; 
                             esac
                         done
-                         action_set_dhcp "$TARGET" "" "" "" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
+                         action_set_dhcp "$TARGET" "" "$DNS" "$DOMAINS" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
                          ;;
                     static)
                          IP="${1:-}"; [ -n "$IP" ] && [[ "$IP" != --* ]] && shift
-                         GW=""; DNS=""; ROUTES=""
+                         GW=""; DNS=""; ROUTES=""; DOMAINS=""
                          while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --ip) IP="$2"; shift 2 ;;
                                 --gateway) GW="$2"; shift 2 ;;
                                 --dns) DNS="$2"; shift 2 ;;
+                                --domains) DOMAINS="$2"; shift 2 ;;
                                 --metric) METRIC="$2"; shift 2 ;;
                                 --mtu) MTU="$2"; shift 2 ;;
                                 --mac) MAC="$2"; shift 2 ;;
@@ -608,19 +655,7 @@ case "$CATEGORY" in
                                 *) shift ;;
                             esac
                         done
-                         action_set_static "$TARGET" "$IP" "$GW" "$DNS" "" "" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID"
-                         ;;
-                    hardware)
-                         SPEED=""; DUPLEX=""; AUTONEG=""
-                         while [[ $# -gt 0 ]]; do
-                            case "$1" in
-                                --speed) SPEED="$2"; shift 2 ;;
-                                --duplex) DUPLEX="$2"; shift 2 ;;
-                                --autoneg) AUTONEG="$2"; shift 2 ;;
-                                *) shift ;;
-                            esac
-                         done
-                         action_set_hardware "$TARGET" "$SPEED" "$DUPLEX" "$AUTONEG"
+                         action_set_static "$TARGET" "$IP" "$GW" "$DNS" "" "$DOMAINS" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID"
                          ;;
                 esac
                 ;;

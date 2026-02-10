@@ -160,11 +160,35 @@
           "type": "integer",
           "description": "Link speed in Mbps"
         },
+        "vendor": {
+          "type": "string",
+          "description": "Hardware vendor from udev"
+        },
+        "model": {
+          "type": "string",
+          "description": "Hardware model from udev"
+        },
+        "driver": {
+          "type": "string",
+          "description": "Kernel driver in use"
+        },
+        "bus_info": {
+          "type": "string",
+          "description": "Bus location (e.g. usb-0:1)"
+        },
+        "gwmac": {
+          "type": "string",
+          "description": "MAC address of the gateway (ARP)"
+        },
         "stats": {
           "type": "object",
           "properties": {
-            "rx_bytes": { "type": "integer" },
-            "tx_bytes": { "type": "integer" }
+            "rx_bytes": {
+              "type": "integer"
+            },
+            "tx_bytes": {
+              "type": "integer"
+            }
           }
         },
         "wifi": {
@@ -193,9 +217,16 @@
           "items": {
             "type": "object",
             "properties": {
-              "dst": { "type": "string" },
-              "gw": { "type": "string" },
-              "metric": { "type": "integer" }
+              "dst": {
+                "type": "string",
+                "description": "Destination subnet with CIDR (e.g., 192.168.1.0/24)"
+              },
+              "gw": {
+                "type": "string"
+              },
+              "metric": {
+                "type": "integer"
+              }
             }
           }
         }
@@ -212,6 +243,10 @@
         },
         "rssi": {
           "type": "integer"
+        },
+        "frequency": {
+          "type": "integer",
+          "description": "Frequency in MHz"
         },
         "state": {
           "type": "string"
@@ -256,6 +291,10 @@
               "signal": {
                 "type": "integer",
                 "description": "Raw dBm"
+              },
+              "frequency": {
+                "type": "integer",
+                "description": "Frequency in MHz"
               },
               "strength_pct": {
                 "type": "integer",
@@ -347,8 +386,12 @@
           "items": {
             "type": "object",
             "properties": {
-              "name": { "type": "string" },
-              "mac": { "type": "string" }
+              "name": {
+                "type": "string"
+              },
+              "mac": {
+                "type": "string"
+              }
             }
           }
         },
