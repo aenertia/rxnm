@@ -25,6 +25,70 @@ action_status_legacy() {
         iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data // {}' || echo "{}")
     fi
 
+    # Standalone WiFi Fallback (Multi-stack: NM, WPA-Supplicant, IW)
+    # Used when iwd is missing (e.g. general Linux distros, containers)
+    local sw="{}"
+    if [[ "$iwd_json" == "{}" ]]; then
+        # 1. Probe NetworkManager (nmcli)
+        if command -v nmcli >/dev/null; then
+            local nm_out; nm_out=$(nmcli -t -f active,device,ssid,bssid,freq,signal dev wifi list | grep "^yes" | head -n1 || true)
+            if [[ -n "$nm_out" ]]; then
+                IFS=':' read -r _ dev ssid bssid freq sig <<< "$nm_out"
+                # Map score (0-100) to approximate dBm (-100 to -50)
+                sw=$(echo "$sw" | "$JQ_BIN" --arg dev "$dev" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
+                    '. + {($dev): {ssid: $ssid, bssid: $bssid, frequency: ($freq | split(" ") | .[0] | tonumber // 0), rssi: (($sig | tonumber / 2) - 100)}}')
+            fi
+        fi
+
+        # 2. Probe wpa_supplicant (wpa_cli) - if NM found nothing
+        if [[ "$sw" == "{}" ]] && command -v wpa_cli >/dev/null; then
+             for iface_path in /sys/class/net/*; do
+                 [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || continue
+                 local ifname=$(basename "$iface_path")
+                 local wpa_out; wpa_out=$(wpa_cli -i "$ifname" status 2>/dev/null || true)
+                 if echo "$wpa_out" | grep -q "wpa_state=COMPLETED"; then
+                     local ssid; ssid=$(echo "$wpa_out" | sed -n 's/^ssid=\(.*\)/\1/p')
+                     local bssid; bssid=$(echo "$wpa_out" | sed -n 's/^bssid=\(.*\)/\1/p')
+                     local freq; freq=$(echo "$wpa_out" | sed -n 's/^freq=\(.*\)/\1/p')
+                     local sig="-100"
+                     local sig_poll; sig_poll=$(wpa_cli -i "$ifname" signal_poll 2>/dev/null || true)
+                     sig=$(echo "$sig_poll" | sed -n 's/^RSSI=\(.*\)/\1/p')
+                     [ -z "$sig" ] && sig="-100"
+                     
+                     sw=$(echo "$sw" | "$JQ_BIN" --arg ifname "$ifname" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
+                        '. + {($ifname): {ssid: $ssid, bssid: $bssid, frequency: ($freq | tonumber // 0), rssi: ($sig | tonumber // -100)}}')
+                     break # Stop after first connected iface found
+                 fi
+             done
+        fi
+
+        # 3. Fallback to generic iw tools
+        if [[ "$sw" == "{}" ]]; then
+            for iface_path in /sys/class/net/*; do
+                [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || continue
+                local ifname=$(basename "$iface_path")
+                local ssid="" bssid="" freq="" sig="-100"
+                if command -v iw >/dev/null; then
+                    local iw_out; iw_out=$(iw dev "$ifname" link 2>/dev/null || true)
+                    if [[ -n "$iw_out" ]]; then
+                        bssid=$(echo "$iw_out" | awk '/Connected to/ {print $3}')
+                        ssid=$(echo "$iw_out" | sed -n 's/.*SSID: \(.*\)/\1/p')
+                        freq=$(echo "$iw_out" | sed -n 's/.*freq: \(.*\)/\1/p')
+                    fi
+                fi
+                if [ -f /proc/net/wireless ]; then
+                    # Extract link quality/level from procfs
+                    sig=$(grep "$ifname" /proc/net/wireless | awk '{print $4}' | tr -d '.')
+                    [ -z "$sig" ] && sig="-100"
+                fi
+                if [[ -n "$ssid" ]]; then
+                    sw=$(echo "$sw" | "$JQ_BIN" --arg ifname "$ifname" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
+                        '. + {($ifname): {ssid: $ssid, bssid: $bssid, frequency: ($freq | tonumber // 0), rssi: ($sig | tonumber // -100)}}')
+                fi
+            done
+        fi
+    fi
+
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
 
@@ -62,6 +126,7 @@ action_status_legacy() {
         --argjson gp "$global_proxy_json" \
         --argjson net "$net_json" \
         --argjson iwd "$iwd_json" \
+        --argjson sw "$sw" \
         --argjson routes "$routes_json" \
         --argjson ip "$ip_json" \
         --argjson speeds "$speed_json" \
@@ -97,7 +162,10 @@ action_status_legacy() {
          map(select(.iface != null)) |
          map({(.iface): {ssid: .ssid}}) | add
         ) as $wifi_network_info |
-        (($wifi_network_info // {}) * ($wifi_station_info // {})) as $full_wifi |
+        
+        (($wifi_network_info // {}) * ($wifi_station_info // {})) as $managed_wifi |
+        # Ensure full fallback check correctly identifies empty/null states
+        ($managed_wifi | if . == {} or . == null then $sw else . end) as $full_wifi |
         
         (($routes // []) | group_by(.dev) | map({key: .[0].dev, value: .}) | from_entries) as $route_map |
         (($net | objects | .Interfaces) // ($net | arrays) // []) as $sysd_net |

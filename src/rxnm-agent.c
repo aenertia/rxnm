@@ -161,7 +161,7 @@ iface_entry_t* get_iface(int index) {
             ifaces[i].index = index;
             ifaces[i].signal_dbm = -100;
             ifaces[i].speed_mbps = -1;
-            strcpy(ifaces[i].state, "unknown");
+            strncpy(ifaces[i].state, "unknown", sizeof(ifaces[i].state) - 1);
             return &ifaces[i];
         }
     }
@@ -268,7 +268,7 @@ static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src)
 }
 
 void udev_enrich(iface_entry_t *entry) {
-    char path[PATH_MAX];
+    char path[PATH_MAX + 32];
     snprintf(path, sizeof(path), "/run/udev/data/n%d", entry->index);
     
     FILE *f = fopen(path, "r");
@@ -417,11 +417,11 @@ void process_link_msg(struct nlmsghdr *nh) {
         entry->tx_bytes = stats->tx_bytes;
     }
 
-    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
-    else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
-    else strcpy(entry->state, "off");
+    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strncpy(entry->state, "routable", sizeof(entry->state) - 1);
+    else if (ifi->ifi_flags & IFF_UP) strncpy(entry->state, "no-carrier", sizeof(entry->state) - 1);
+    else strncpy(entry->state, "off", sizeof(entry->state) - 1);
 
-    if (tb[IFLA_MASTER]) strcpy(entry->state, "enslaved");
+    if (tb[IFLA_MASTER]) strncpy(entry->state, "enslaved", sizeof(entry->state) - 1);
 
     udev_enrich(entry);
 }
@@ -473,10 +473,10 @@ void process_route_msg(struct nlmsghdr *nh) {
         else if (rt->rtm_family == AF_INET6) inet_ntop(AF_INET6, gw_ptr, route->gw, INET6_ADDRSTRLEN);
     }
     if (rt->rtm_dst_len == 0) {
-        strcpy(route->dst, "default");
+        strncpy(route->dst, "default", sizeof(route->dst) - 1);
         route->is_default = true;
         if (rt->rtm_family == AF_INET || entry->gateway[0] == '\0') {
-            if (route->gw[0] != '\0') strcpy(entry->gateway, route->gw);
+            if (route->gw[0] != '\0') strncpy(entry->gateway, route->gw, sizeof(entry->gateway) - 1);
             entry->metric = route->metric;
         }
     } else if (tb[RTA_DST]) {
@@ -536,7 +536,7 @@ int get_genl_family_id(int sock, const char *family_name) {
     struct rtattr *rta = (struct rtattr *) req.buf;
     rta->rta_type = CTRL_ATTR_FAMILY_NAME;
     rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
-    strcpy(RTA_DATA(rta), family_name);
+    strncpy(RTA_DATA(rta), family_name, 255);
     req.n.nlmsg_len += rta->rta_len;
     send(sock, &req, req.n.nlmsg_len, 0);
 
@@ -723,7 +723,7 @@ void cmd_check_internet() {
 }
 
 void get_proxy_config(char* http, char* https, char* no_proxy) {
-    char path[PATH_MAX + 128]; // Larger buffer to prevent format-truncation warning
+    char path[PATH_MAX + 128];
     snprintf(path, sizeof(path), "%s/proxy.conf", g_conf_dir);
     FILE *f = fopen(path, "r"); if (!f) return;
     char line[1024];

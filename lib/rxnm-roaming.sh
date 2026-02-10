@@ -1,11 +1,19 @@
 # ==============================================================================
 # RXNM ROAMING ENGINE (DUAL-PATH: PASSIVE EVENT VS ACTIVE POLL)
+# Now with Session-based BSSID Mapping & One-Shot Triggering
 # ==============================================================================
 
 # State Tracking
 LAST_SCAN_TIME=0
 LAST_MATCH_VAL=""
 CURRENT_PROFILE=""
+
+# Nudge Backoff Tracking
+NUDGE_COUNT=0
+LAST_NUDGE_BSSID=""
+
+# Map Storage (Session-based in RAM)
+ROAM_MAP_FILE="${RUN_DIR:-/run/rocknix}/roaming_map.json"
 
 # Logger
 log_roam() {
@@ -23,13 +31,14 @@ load_roaming_config() {
     : "${ROAM_STRATEGY:=passive}"        # passive (event-driven) or active (polling)
     : "${RXNM_FEATURE_STEERING:=true}"   # Enable signal-based scanning/steering
     : "${RXNM_FEATURE_PROFILES:=true}"   # Enable location-aware profile switching
+    : "${RXNM_FEATURE_MAP:=true}"        # Build a session map of BSSIDs/Channels
     : "${ROAM_THRESHOLD_KICK:=-75}"      # dBm: Force scan if below
     : "${ROAM_THRESHOLD_SEEK:=-65}"      # dBm: Look for better bands if above
     : "${SCAN_COOLDOWN_PANIC:=10}"       # Seconds between panic scans
-    : "${SCAN_COOLDOWN_SEEK:=120}"       # Seconds between band-steering seek scans
+    : "${SCAN_COOLDOWN_SEEK:=120}"       # Base seconds between seek scans
     : "${BAND_5G_MIN:=5000}"             # Minimum MHz for 5GHz
     : "${BAND_6G_MIN:=5900}"             # Minimum MHz for 6GHz
-    : "${RXNM_PROFILE_MAP:=}"            # Explicit mappings "Type:Value:Profile" or "SSID:Profile"
+    : "${MAX_NUDGE_BACKOFF:=3600}"       # Maximum wait (1 hour) for redundant nudges
 
     # 2. Load Config Override
     local conf_file="${CONF_DIR}/rxnm-roaming.conf"
@@ -39,31 +48,63 @@ load_roaming_config() {
     fi
 }
 
+# --- MAP ENGINE ---
+
+update_roaming_map() {
+    local iface="$1"
+    [ "${RXNM_FEATURE_MAP:-true}" != "true" ] && return
+    
+    # We use a lock to ensure map updates don't collide if triggered rapidly
+    with_iface_lock "roam_map" _task_update_map "$iface"
+}
+
+_task_update_map() {
+    local iface="$1"
+    local scan_json
+    scan_json=$(rxnm wifi scan --interface "$iface" --format json 2>/dev/null || echo "{}")
+    
+    if [[ "$scan_json" == *"results"* ]]; then
+        local now; now=$(date +%s)
+        local current_map="{}"
+        [ -f "$ROAM_MAP_FILE" ] && current_map=$(cat "$ROAM_MAP_FILE")
+        
+        echo "$scan_json" | "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$(cat)" --arg now "$now" '
+            ($scan.results | map(
+                (.bssids // []) | map({
+                    key: .bssid, 
+                    value: {
+                        ssid: .ssid, 
+                        freq: .freq, 
+                        rssi: .signal, 
+                        last_seen: ($now | tonumber)
+                    }
+                })
+            ) | flatten | from_entries) as $new_data |
+            $map * $new_data
+        ' > "$ROAM_MAP_FILE"
+    fi
+}
+
 # --- DECISION ENGINE (SHARED) ---
 
 # Core logic: evaluating context to decide on Profile Switch or Scan Nudge
 evaluate_roaming_state() {
     local iface="$1"
-    
-    local rssi=""
-    local ssid=""
-    local freq=""
-    local gateway=""
-    local bssid=""
-    local gwmac=""
+    local is_oneshot="${2:-false}"
+    local rssi="" ssid="" freq="" gateway="" bssid=""
     
     # 1. Fetch Core Context (Hybrid Fastpath)
     if [ -x "$RXNM_AGENT_BIN" ]; then
         local tsv_data
-        # Extract WiFi data AND Gateway IP in one pass
+        # We fetch the gateway even for WiFi to allow wired-location awareness
         tsv_data=$("$RXNM_AGENT_BIN" --dump 2>/dev/null | \
-            "$JQ_BIN" -r ".interfaces[\"$iface\"] | \"\(.wifi.rssi // -100)\t\(.wifi.ssid // \"\")\t\(.wifi.frequency // 0)\t\(.gateway // \"\")\"")
+            "$JQ_BIN" -r ".interfaces[\"$iface\"] | \"\(.wifi.rssi // -100)\t\(.wifi.ssid // \"\")\t\(.wifi.frequency // 0)\t\(.gateway // \"\")\t\(.wifi.bssid // \"\")\"")
         
         if [ -n "$tsv_data" ]; then
-            IFS=$'\t' read -r rssi ssid freq gateway <<< "$tsv_data"
+            IFS=$'\t' read -r rssi ssid freq gateway bssid <<< "$tsv_data"
         fi
     else
-        # Legacy Fallback (iwctl parsing)
+        # Legacy Fallback
         local status
         status=$(iwctl station "$iface" show 2>/dev/null)
         if [ -n "$status" ]; then
@@ -71,249 +112,191 @@ evaluate_roaming_state() {
             rssi=$(echo "$status" | grep "RSSI" | awk '{print $2}')
             freq=$(echo "$status" | grep "Frequency" | awk '{print $2}')
         fi
-        # Fetch gateway via ip route
         gateway=$(ip -4 route show dev "$iface" | grep default | awk '{print $3}' | head -n1)
     fi
 
-    # 2. Enrich Extended Context (Shell Tools)
-    # These are slower, so only fetch if we have a basic connection
-    if [ -n "$ssid" ] || [ -n "$gateway" ]; then
-        # Fetch BSSID (WiFi only)
-        if [ -n "$ssid" ] && command -v iw >/dev/null; then
-            bssid=$(iw dev "$iface" link 2>/dev/null | awk '/connected to/ {print $3}')
-        fi
-        
-        # Fetch Gateway MAC (Wired/WiFi)
-        if [ -n "$gateway" ] && command -v ip >/dev/null; then
-            gwmac=$(ip neigh show dev "$iface" | grep "^$gateway " | awk '{print $3}')
-        fi
+    # 2. Backoff Reset Logic: If BSSID changed since last nudge, reset penalty
+    if [ "$is_oneshot" == "false" ] && [ -n "$bssid" ] && [ "$bssid" != "$LAST_NUDGE_BSSID" ] && [ -n "$LAST_NUDGE_BSSID" ]; then
+        log_roam "Roam detected ($LAST_NUDGE_BSSID -> $bssid). Resetting backoff."
+        NUDGE_COUNT=0
+        LAST_NUDGE_BSSID=""
     fi
 
     # 3. Evaluate
-    # Proceed if we have EITHER a valid WiFi connection OR a Wired Gateway
     local connected=0
     if [ -n "$ssid" ] && [ -n "$rssi" ] && [ "$rssi" -ne -100 ]; then connected=1; fi
     if [ -n "$gateway" ]; then connected=1; fi
 
     if [ "$connected" -eq 1 ]; then
+        # Path 1: Profile Switching (Works in Monitor AND One-shot)
         if [ "${RXNM_FEATURE_PROFILES:-true}" == "true" ]; then
-            _logic_profile_switch "$iface" "$ssid" "$bssid" "$gateway" "$gwmac"
+            _logic_profile_switch "$iface" "$ssid" "$bssid" "$gateway"
         fi
         
-        # Steering is WiFi specific
-        if [ -n "$ssid" ] && [ "${RXNM_FEATURE_STEERING:-true}" == "true" ]; then
-            _logic_signal_steering "$iface" "$rssi" "$freq"
+        # Path 2: Signal Steering (Only makes sense in Monitor mode)
+        if [ "$is_oneshot" == "false" ] && [ -n "$ssid" ] && [ "${RXNM_FEATURE_STEERING:-true}" == "true" ]; then
+            _logic_signal_steering "$iface" "$ssid" "$rssi" "$freq" "$bssid"
         fi
         
-        return 0 # Connected
+        return 0 
     else
-        # Reset state if disconnected
-        if [ -n "$LAST_MATCH_VAL" ]; then
+        if [ "$is_oneshot" == "false" ] && [ -n "$LAST_MATCH_VAL" ]; then
             log_roam "Disconnected."
             LAST_MATCH_VAL=""
+            NUDGE_COUNT=0
         fi
-        return 1 # Disconnected
+        return 1
     fi
 }
 
 _logic_profile_switch() {
-    local iface="$1"
-    local ssid="$2"
-    local bssid="$3"
-    local gw="$4"
-    local gwmac="$5"
-    
-    local target_profile=""
-    local match_val=""
+    local iface="$1" ssid="$2" bssid="$3" gw="$4"
+    local target_profile="" match_val=""
 
-    # 1. Explicit Mapping (Profile Map)
-    # Supports: "SSID:Profile" (Legacy) OR "Type:Value:Profile" (Advanced)
+    # 1. Explicit Mapping
     if [ -n "${RXNM_PROFILE_MAP:-}" ]; then
         for mapping in $RXNM_PROFILE_MAP; do
-            # Count colons to determine format
             local colons="${mapping//[^:]}"
-            
-            local type=""
-            local val=""
-            local prof=""
-            
+            local type="" val="" prof=""
             if [ "${#colons}" -eq 2 ]; then
-                # Format: Type:Value:Profile
                 IFS=':' read -r type val prof <<< "$mapping"
             else
-                # Format: SSID:Profile (Default)
-                type="ssid"
-                IFS=':' read -r val prof <<< "$mapping"
+                type="ssid"; IFS=':' read -r val prof <<< "$mapping"
             fi
-            
-            # Check match based on type
             case "$type" in
-                ssid)  [ -n "$ssid" ] && [ "$val" == "$ssid" ] && target_profile="$prof" ;;
-                bssid) [ -n "$bssid" ] && [[ "${bssid,,}" == "${val,,}" ]] && target_profile="$prof" ;;
-                gw)    [ -n "$gw" ] && [ "$val" == "$gw" ] && target_profile="$prof" ;;
-                gwmac) [ -n "$gwmac" ] && [[ "${gwmac,,}" == "${val,,}" ]] && target_profile="$prof" ;;
+                ssid)  [ "$val" == "$ssid" ] && target_profile="$prof" ;;
+                bssid) [[ "${bssid,,}" == "${val,,}" ]] && target_profile="$prof" ;;
+                gw)    [ "$val" == "$gw" ] && target_profile="$prof" ;;
             esac
-            
-            if [ -n "$target_profile" ]; then
-                match_val="${type}=${val}"
-                log_roam "Location match (Map): '$match_val' -> '$target_profile'"
-                break
-            fi
+            [ -n "$target_profile" ] && { match_val="${type}=${val}"; break; }
         done
     fi
 
-    # 2. Implicit Mapping (Directory Existence) - SSID Only
+    # 2. Implicit Mapping
     if [ -z "$target_profile" ] && [ -n "$ssid" ]; then
         local profile_path="${STORAGE_PROFILES_DIR}/global/${ssid}"
-        if [ -d "$profile_path" ]; then
-            target_profile="$ssid"
-            match_val="ssid=${ssid}"
-            log_roam "Location match (Auto): '$ssid' profile found"
-        fi
+        [ -d "$profile_path" ] && { target_profile="$ssid"; match_val="ssid=${ssid}"; }
     fi
     
-    # Debounce based on the matched value (not just SSID, to allow switching between wired nets)
-    if [ "$match_val" == "$LAST_MATCH_VAL" ]; then return; fi
+    # Check if we are already in this state
+    [ "$match_val" == "$LAST_MATCH_VAL" ] && return
     LAST_MATCH_VAL="$match_val"
     
     # 3. Apply
-    if [ -n "$target_profile" ]; then
-        if [ "$CURRENT_PROFILE" != "$target_profile" ]; then
-            log_roam "Activating profile: $target_profile"
-            if type action_profile &>/dev/null; then
-                action_profile "load" "$target_profile" >/dev/null
-                CURRENT_PROFILE="$target_profile"
-            fi
+    if [ -n "$target_profile" ] && [ "$CURRENT_PROFILE" != "$target_profile" ]; then
+        log_roam "Location match: '$match_val'. Applying profile: $target_profile"
+        if type action_profile &>/dev/null; then
+            action_profile "load" "$target_profile" >/dev/null
+            CURRENT_PROFILE="$target_profile"
         fi
     fi
 }
 
 _logic_signal_steering() {
-    local iface="$1"
-    local rssi="$2"
-    local freq="$3"
-    
-    # Sanity check: RSSI must be valid number
-    if [ -z "$rssi" ] || [ "$rssi" -eq -100 ]; then return; fi
+    local iface="$1" ssid="$2" rssi="$3" freq="$4" bssid="$5"
+    [ -z "$rssi" ] || [ "$rssi" -eq -100 ] && return
 
-    local now
-    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+    local now; now=$(date +%s)
     local time_since_scan=$((now - LAST_SCAN_TIME))
     local scan_needed=0
     local scan_reason=""
 
-    # A. Panic Check
+    local dynamic_cooldown=$(( SCAN_COOLDOWN_SEEK * (1 + NUDGE_COUNT) ))
+    [ "$dynamic_cooldown" -gt "${MAX_NUDGE_BACKOFF:-3600}" ] && dynamic_cooldown="${MAX_NUDGE_BACKOFF:-3600}"
+
+    local map_has_better=false
+    if [ -f "$ROAM_MAP_FILE" ] && [ "${RXNM_FEATURE_MAP:-true}" == "true" ]; then
+        map_has_better=$(cat "$ROAM_MAP_FILE" | "$JQ_BIN" -r --arg ssid "$ssid" --arg current_sig "$rssi" '
+            to_entries | map(select(.value.ssid == $ssid and (.value.rssi | tonumber) > ($current_sig | tonumber + 12))) | length > 0
+        ')
+    fi
+
     if [ "$rssi" -lt "$ROAM_THRESHOLD_KICK" ]; then
         if [ "$time_since_scan" -ge "$SCAN_COOLDOWN_PANIC" ]; then
             scan_needed=1
-            scan_reason="Critical signal ($rssi dBm < $ROAM_THRESHOLD_KICK dBm)"
+            scan_reason="Critical signal ($rssi dBm)"
         fi
     fi
 
-    # B. Band Seeking
-    if [ "$scan_needed" -eq 0 ] && [ "$freq" -lt "$BAND_5G_MIN" ] && [ "$freq" -gt 0 ]; then
-        if [ "$rssi" -gt "$ROAM_THRESHOLD_SEEK" ]; then
-            if [ "$time_since_scan" -ge "$SCAN_COOLDOWN_SEEK" ]; then
+    if [ "$scan_needed" -eq 0 ]; then
+        if { [ "$freq" -lt "$BAND_5G_MIN" ] && [ "$freq" -gt 0 ] && [ "$rssi" -gt "$ROAM_THRESHOLD_SEEK" ]; } || [ "$map_has_better" == "true" ]; then
+            if [ "$time_since_scan" -ge "$dynamic_cooldown" ]; then
                 scan_needed=1
-                scan_reason="Band seek (On 2.4GHz @ $rssi dBm)"
+                [ "$map_has_better" == "true" ] && scan_reason="Map nudge (Stronger AP known)" || scan_reason="Band seek nudge"
             fi
         fi
     fi
 
     if [ "$scan_needed" -eq 1 ]; then
-        log_roam "$scan_reason. Nudging scan..."
+        log_roam "$scan_reason. Nudging iwd (Backoff: $NUDGE_COUNT, Next check in ${dynamic_cooldown}s)..."
         if command -v iwctl >/dev/null; then
             iwctl station "$iface" scan >/dev/null 2>&1
+            LAST_SCAN_TIME="$now"
+            LAST_NUDGE_BSSID="$bssid"
+            ((NUDGE_COUNT++))
+            update_roaming_map "$iface" &
         fi
-        LAST_SCAN_TIME="$now"
     fi
 }
 
-# --- STRATEGY A: PASSIVE MONITOR (Battery Optimal) ---
-# Listens for IWD DBus events. Zero CPU usage when idle.
+# --- MONITORING STRATEGIES ---
+
 run_passive_monitor() {
     local iface="$1"
     log_roam "Mode: Passive (Event Driven)"
-    
-    if ! command -v busctl >/dev/null; then
-        log_roam "Error: busctl not found. Falling back to active polling."
-        run_active_monitor "$iface"
-        return
-    fi
+    if ! command -v busctl >/dev/null; then run_active_monitor "$iface"; return; fi
 
-    # Perform initial check on startup
-    evaluate_roaming_state "$iface"
+    evaluate_roaming_state "$iface" "false"
 
-    # Listen for Property Changes
-    # We filter for SignalStrength (RSSI change) or ConnectedNetwork (SSID change)
     busctl monitor net.connman.iwd --match "member='PropertiesChanged'" | \
     grep --line-buffered -E "SignalStrength|ConnectedNetwork" | \
     while read -r line; do
-        # On ANY relevant event, we trigger a full state evaluation.
-        evaluate_roaming_state "$iface"
+        evaluate_roaming_state "$iface" "false"
     done
 }
 
-# --- STRATEGY B: ACTIVE POLLING (Aggressive) ---
-# Polls on a fixed/adaptive interval. Guaranteed checking regardless of daemon events.
 run_active_monitor() {
     local iface="$1"
     log_roam "Mode: Active (Adaptive Polling)"
-    
     local sleep_time=5
-    
     while true; do
-        if evaluate_roaming_state "$iface"; then
-            # We are connected. Optimize sleep based on signal.
-            if [ -x "$RXNM_AGENT_BIN" ]; then
-                 local rssi
-                 rssi=$("$RXNM_AGENT_BIN" --get "interfaces.${iface}.wifi.rssi")
-                 if [ -n "$rssi" ] && [ "$rssi" -gt -60 ]; then
-                     sleep_time=20
-                 elif [ -n "$rssi" ] && [ "$rssi" -gt -70 ]; then
-                     sleep_time=10
-                 else
-                     sleep_time=5
-                 fi
-            else
-                 # Legacy Fallback: Full functional adaptive polling without agent
-                 if command -v iwctl >/dev/null; then
-                     local rssi_leg
-                     rssi_leg=$(iwctl station "$iface" show 2>/dev/null | grep "RSSI" | awk '{print $2}')
-                     if [ -n "$rssi_leg" ] && [ "$rssi_leg" -gt -60 ]; then
-                         sleep_time=20
-                     elif [ -n "$rssi_leg" ] && [ "$rssi_leg" -gt -70 ]; then
-                         sleep_time=10
-                     else
-                         sleep_time=5
-                     fi
-                 else
-                     sleep_time=10
-                 fi
-            fi
+        if evaluate_roaming_state "$iface" "false"; then
+            local r
+            if [ -x "$RXNM_AGENT_BIN" ]; then r=$("$RXNM_AGENT_BIN" --get "interfaces.${iface}.wifi.rssi"); else r=$(iwctl station "$iface" show | grep "RSSI" | awk '{print $2}'); fi
+            if [ -n "$r" ] && [ "$r" -gt -60 ]; then sleep_time=20; elif [ -n "$r" ] && [ "$r" -gt -70 ]; then sleep_time=10; else sleep_time=5; fi
         else
-            # Disconnected
             sleep_time=5
         fi
         sleep "$sleep_time"
     done
 }
 
-# --- ENTRYPOINT ---
+# --- ACTIONS ---
+
+# One-shot trigger for opportunistic profile switching
+action_wifi_roaming_trigger() {
+    local iface="${1:-wlan0}"
+    load_roaming_config
+    
+    log_roam "Opportunistic Trigger: Checking location context for $iface..."
+    if evaluate_roaming_state "$iface" "true"; then
+        log_roam "Context evaluation complete."
+    else
+        log_roam "No active connection or context match found."
+    fi
+}
 
 action_wifi_roaming_monitor() {
     local iface="${1:-wlan0}"
-    
-    # Initialize
     : "${STORAGE_PROFILES_DIR:=${CONF_DIR}/network/profiles}"
     load_roaming_config
     
+    rm -f "$ROAM_MAP_FILE"
+    
     log_roam "Starting Roaming Monitor on $iface"
-    log_roam "  Features: Steering=${RXNM_FEATURE_STEERING:-true}, Profiles=${RXNM_FEATURE_PROFILES:-true}"
-    log_roam "  Kick: <${ROAM_THRESHOLD_KICK}dBm | Seek: >${ROAM_THRESHOLD_SEEK}dBm"
-    if [ -n "$RXNM_PROFILE_MAP" ]; then
-        log_roam "  Profiles: Mapped ($(echo "$RXNM_PROFILE_MAP" | wc -w) entries)"
-    fi
+    log_roam "  Features: Steering=${RXNM_FEATURE_STEERING}, Map=${RXNM_FEATURE_MAP}, Profiles=${RXNM_FEATURE_PROFILES}"
+    
+    update_roaming_map "$iface"
 
     if [ "$ROAM_STRATEGY" == "active" ]; then
         run_active_monitor "$iface"
