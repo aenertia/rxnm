@@ -3,13 +3,23 @@
 # ==============================================================================
 
 # Helper to peek at system templates to ensure consistency
+# Phase 2 Refactor: Pure Bash Implementation (Removed grep/sed/cut forks)
 _get_system_template_val() {
     local fname="$1"
     local key="$2"
     local f="/usr/lib/systemd/network/$fname"
-    if [ -f "$f" ]; then
-         grep "^${key}=" "$f" | sed 's/#.*//' | cut -d= -f2- | tr -d '[:space:]' | head -n1
-    fi
+    [ -f "$f" ] || return
+    
+    while read -r line; do
+        # Check if line starts with key followed by =
+        if [[ "$line" == "${key}="* ]]; then
+             local val="${line#*=}"
+             val="${val%%#*}" # Strip comments starting with #
+             val="${val//[[:space:]]/}" # Trim all whitespace
+             echo "$val"
+             return
+        fi
+    done < "$f"
 }
 
 # Generic Client/Station Config Builder (WAN/Upstream)

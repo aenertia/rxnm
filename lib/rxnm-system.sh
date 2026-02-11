@@ -197,6 +197,14 @@ secure_write() {
     
     [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
     
+    # Phase 2 Refactor: Use Native Agent if available (Atomic/Idempotent)
+    if [ -x "${RXNM_AGENT_BIN}" ]; then
+        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" "$perms" 2>/dev/null; then
+            return 0
+        fi
+        # Fallback if agent write fails
+    fi
+    
     local tmp
     tmp=$(mktemp "${dest}.XXXXXX") || return 1
     printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -207,6 +215,15 @@ secure_write() {
 
 tune_network_stack() {
     local profile="$1"
+    
+    # Phase 1 Refactor: Use native agent for sysctl tuning if available
+    if [ -x "${RXNM_AGENT_BIN}" ]; then
+        if "${RXNM_AGENT_BIN}" --tune "$profile" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    
+    # Legacy Fallback
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true

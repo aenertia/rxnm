@@ -8,6 +8,10 @@
  * match standard IP tool output and legacy script behavior.
  * - Parity Fix: IPv6 addresses now respect RT_SCOPE_HOST filtering to hide
  * loopback (::1) addresses, matching legacy script filtering.
+ *
+ * Phase 1 Refactor (Hybrid Fastpath):
+ * - Added atomic_write capability to reduce shell fork overhead during config gen.
+ * - Added native sysctl tuning to remove sysctl binary dependencies.
  */
 
 #define _GNU_SOURCE
@@ -24,6 +28,7 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 
 /* CRITICAL: Include glibc network headers BEFORE linux kernel headers */
 #include <net/if.h>
@@ -862,6 +867,95 @@ void cmd_get_value(char *key) {
     }
 }
 
+// --- PHASE 1 ADDITIONS: Native Sysctl & Atomic Write ---
+
+void write_sysctl(const char *path, const char *value) {
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "%s", value);
+        fclose(f);
+    }
+}
+
+void cmd_tune(char *profile) {
+    write_sysctl("/proc/sys/net/netfilter/nf_conntrack_max", "16384");
+    write_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3");
+    write_sysctl("/proc/sys/net/ipv4/tcp_keepalive_time", "300");
+
+    if (access("/proc/sys/net/bridge", F_OK) == 0) {
+        write_sysctl("/proc/sys/net/bridge/bridge-nf-call-iptables", "0");
+        write_sysctl("/proc/sys/net/bridge/bridge-nf-call-ip6tables", "0");
+        write_sysctl("/proc/sys/net/bridge/bridge-nf-call-arptables", "0");
+    }
+
+    if (profile && strcmp(profile, "host") == 0) {
+        write_sysctl("/proc/sys/net/ipv4/ip_forward", "1");
+        write_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", "1");
+        write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+        write_sysctl("/proc/sys/net/ipv4/ip_local_port_range", "1024 65535");
+    } else {
+        // Default client tuning for forwarding
+        write_sysctl("/proc/sys/net/ipv4/ip_forward", "1");
+        write_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", "1");
+        write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+    }
+    printf("{\"success\": true, \"action\": \"tune\", \"profile\": \"%s\"}\n", profile ? profile : "client");
+}
+
+// Atomic Write
+// Reads from stdin
+void cmd_atomic_write(char *path, char *perm_str) {
+    // Read stdin
+    char buf[65536]; // 64KB limit for config files
+    size_t len = fread(buf, 1, sizeof(buf), stdin);
+    
+    // Check existing
+    bool changed = true;
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char ex_buf[65536];
+        size_t ex_len = fread(ex_buf, 1, sizeof(ex_buf), f);
+        fclose(f);
+        if (len == ex_len && memcmp(buf, ex_buf, len) == 0) {
+            changed = false;
+        }
+    }
+    
+    if (!changed) {
+        // Idempotency: no change
+        return; 
+    }
+    
+    char tmp_path[PATH_MAX];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, getpid());
+    
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "Error creating temp file\n");
+        exit(1);
+    }
+    
+    if (write(fd, buf, len) != (ssize_t)len) {
+        fprintf(stderr, "Error writing to temp file\n");
+        close(fd);
+        unlink(tmp_path);
+        exit(1);
+    }
+    
+    // Permissions
+    int mode = strtol(perm_str, NULL, 8);
+    fchmod(fd, mode);
+    
+    fsync(fd);
+    close(fd);
+    
+    if (rename(tmp_path, path) != 0) {
+         fprintf(stderr, "Error renaming temp file\n");
+         unlink(tmp_path);
+         exit(1);
+    }
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -874,12 +968,25 @@ void cmd_is_low_power() {
 
 int main(int argc, char *argv[]) {
     load_runtime_config();
-    static struct option long_options[] = { {"version", no_argument, 0, 'v'}, {"help", no_argument, 0, 'h'}, {"health",  no_argument, 0, 'H'}, {"time",    no_argument, 0, 't'}, {"is-low-power", no_argument, 0, 'L'}, {"dump",    no_argument, 0, 'd'}, {"check-internet", no_argument, 0, 'c'}, {"reload",  no_argument, 0, 'r'}, {"get",     required_argument, 0, 'g'}, {0, 0, 0, 0} };
+    static struct option long_options[] = { 
+        {"version", no_argument, 0, 'v'}, 
+        {"help", no_argument, 0, 'h'}, 
+        {"health",  no_argument, 0, 'H'}, 
+        {"time",    no_argument, 0, 't'}, 
+        {"is-low-power", no_argument, 0, 'L'}, 
+        {"dump",    no_argument, 0, 'd'}, 
+        {"check-internet", no_argument, 0, 'c'}, 
+        {"reload",  no_argument, 0, 'r'}, 
+        {"get",     required_argument, 0, 'g'}, 
+        {"atomic-write", required_argument, 0, 'W'}, // Phase 1
+        {"tune", required_argument, 0, 'T'},         // Phase 1
+        {0, 0, 0, 0} 
+    };
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:T:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--atomic-write <path>  Write stdin to path (requires 2nd arg for perms, parsed manually)\n--tune <profile>  Optimize sysctl\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -887,6 +994,16 @@ int main(int argc, char *argv[]) {
             case 'c': cmd_check_internet(); return 0;
             case 'r': return dbus_trigger_reload();
             case 'g': cmd_get_value(optarg); return 0;
+            case 'T': cmd_tune(optarg); return 0;
+            case 'W': 
+                // Hacky argument parsing for --atomic-write <path> <perms>
+                if (optind < argc) {
+                    cmd_atomic_write(optarg, argv[optind]);
+                    return 0;
+                } else {
+                    fprintf(stderr, "Usage: --atomic-write <path> <perms>\n");
+                    return 1;
+                }
             default: return 1;
         }
     }
