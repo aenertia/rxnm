@@ -234,8 +234,11 @@ action_status_legacy() {
                 # Standardize "wlan" -> "wifi" to match Agent/Schema
                 # Standardize "none" -> "unknown" to match Agent/Schema
                 Type: (
-                    if .link_type=="wlan" or (.ifname | startswith("wl")) or (.ifname | startswith("mlan")) then "wifi" 
+                    if .link_type=="wlan" or ((.ifname // "") | startswith("wl")) or ((.ifname // "") | startswith("mlan")) then "wifi" 
                     elif .link_type=="ether" then "ethernet" 
+                    elif .link_type=="wireguard" or ((.ifname // "") | startswith("wg")) then "wireguard"
+                    elif .link_type=="tun" or ((.ifname // "") | startswith("tun")) then "tun"
+                    elif .link_type=="tap" or ((.ifname // "") | startswith("tap")) then "tap"
                     elif .link_type=="none" then "unknown"
                     else .link_type end
                 ),
@@ -261,9 +264,13 @@ action_status_legacy() {
                 ($ip_stats[.Name] // {}) as $my_stats |
                 
                 # Normalize Type here (Applies to both systemd-networkd and IP data)
+                # Fix: Guard .Name with empty string default to prevent startswith errors on null inputs
                 (
-                    if .Type=="wlan" or (.Name | startswith("wl")) or (.Name | startswith("mlan")) then "wifi" 
+                    if .Type=="wlan" or ((.Name // "") | startswith("wl")) or ((.Name // "") | startswith("mlan")) then "wifi" 
                     elif .Type=="ether" then "ethernet" 
+                    elif .Type=="wireguard" or ((.Name // "") | startswith("wg")) then "wireguard"
+                    elif .Type=="tun" or ((.Name // "") | startswith("tun")) then "tun"
+                    elif .Type=="tap" or ((.Name // "") | startswith("tap")) then "tap"
                     elif .Type=="none" then "unknown"
                     else .Type end
                 ) as $normalized_type |

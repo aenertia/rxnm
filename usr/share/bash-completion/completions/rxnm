@@ -25,15 +25,13 @@ _rxnm_completion() {
     # --- LIVE QUERY HELPERS ---
 
     # Helper: Get interfaces from live state, optionally filtered by type
-    # Types: wlan, ethernet, bridge, bond, vrf, vlan, etc.
+    # Types: wifi, ethernet, bridge, bond, vrf, vlan, etc.
     _rxnm_live_interfaces() {
         local type_filter="$1"
         
         # 1. Try to read from hot cache (Fastest)
         if [ -s "$STATUS_CACHE" ] && command -v jq >/dev/null; then
             if [ -n "$type_filter" ]; then
-                # Map complex types (e.g., 'wifi' -> 'wlan') for loose matching if needed
-                # But RXNM mostly uses standard types in JSON
                 jq -r --arg t "$type_filter" '.interfaces | to_entries[] | select(.value.type == $t) | .key' "$STATUS_CACHE" 2>/dev/null
             else
                 jq -r '.interfaces | keys[]' "$STATUS_CACHE" 2>/dev/null
@@ -131,7 +129,7 @@ _rxnm_completion() {
                         COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
                     else
                         # Context Aware: Only show WiFi interfaces
-                        COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wlan)" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wifi)" -- "$cur") )
                     fi
                     ;;
                 ap)
