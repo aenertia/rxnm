@@ -1,5 +1,5 @@
 # ==============================================================================
-# INTERFACE CONFIGURATION (Bridge, Static, DHCP)
+# INTERFACE CONFIGURATION (Bridge, Static, DHCP, Hardware, Hotplug)
 # ==============================================================================
 
 # --- TASKS ---
@@ -34,7 +34,6 @@ _task_set_dhcp() {
     
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
-    # Fix: Always ensure a file is written to satisfy persistence/test checks
     ensure_dirs
     set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
     reconfigure_iface "$iface"
@@ -57,19 +56,16 @@ _task_set_static() {
     local dhcp_id="${14}"
 
     # 1. Cleanup conflicting configs
-    # Remove generic/DHCP config if it exists
     rm -f "${STORAGE_NET_DIR}/75-config-${iface}.network" 2>/dev/null
     rm -f "${STORAGE_NET_DIR}/75-config-${iface}-"*.network 2>/dev/null
     
     ensure_dirs
     
     # 2. Build Content
-    # build_network_config args: 
-    # iface ssid dhcp desc addresses gateway dns bridge vlan domains mac_policy routes mdns llmnr bond metric vrf mtu mac priv dhcp_id
     local content
     content=$(build_network_config "$iface" "$ssid" "no" "Static Configuration" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id")
     
-    # 3. Write File to 75-static-* to match test expectations and avoid conflict with dhcp cleanup
+    # 3. Write File
     local filename="${STORAGE_NET_DIR}/75-static-${iface}.network"
     secure_write "$filename" "$content" "644"
     
@@ -89,6 +85,33 @@ _task_set_link() {
     local content="[Match]\nName=${iface}\n\n[Network]\nDescription=Link Toggles\nDHCP=${dhcp}\nLinkLocalAddressing=${ll}\nIPv6AcceptRA=${ra}\n"
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
+}
+
+_task_set_hardware() {
+    local iface="$1"
+    local speed="$2"
+    local duplex="$3"
+    local autoneg="$4"
+    local wol="$5"
+    local mac_policy="$6"
+    local name_policy="$7"
+    local mac_addr="$8"
+    
+    ensure_dirs
+    local link_file="${STORAGE_NET_DIR}/10-rxnm-${iface}.link"
+    
+    local content
+    content=$(build_device_link_config "$iface" "$speed" "$duplex" "$autoneg" "$wol" "$mac_policy" "$name_policy" "$mac_addr")
+    
+    secure_write "$link_file" "$content" "644"
+    
+    # CRITICAL: .link files are applied by udevd. Trigger reload.
+    if command -v udevadm >/dev/null; then
+        udevadm control --reload
+        udevadm trigger --verbose --type=devices --action=change --subsystem-match=net --sysname-match="$iface" >/dev/null 2>&1
+    else
+        log_warn "udevadm not found. Link settings may require reboot to apply."
+    fi
 }
 
 _task_set_proxy() {
@@ -132,6 +155,43 @@ set_network_cfg() {
 }
 
 # --- ACTIONS ---
+
+action_hotplug() {
+    local iface="$1"
+    [ -z "$iface" ] && return 1
+    
+    # 1. Identify Type
+    local is_usb_gadget=false
+    if [[ "$iface" == "usb"* ]] || [[ "$iface" == "rndis"* ]]; then
+        is_usb_gadget=true
+    fi
+    
+    # 2. Check for System Daemon Health
+    if ! is_service_active "systemd-networkd"; then
+        log_warn "Network daemon inactive during hotplug of $iface."
+        
+        # 3. Enter Rescue Mode (Phase 8 Resilience)
+        if [ "$is_usb_gadget" = true ]; then
+            if type configure_standalone_gadget &>/dev/null; then
+                configure_standalone_gadget "$iface"
+            else
+                log_warn "Rescue gadget helper not found."
+            fi
+        else
+            if type configure_standalone_client &>/dev/null; then
+                configure_standalone_client "$iface"
+            else
+                log_warn "Rescue client helper not found."
+            fi
+        fi
+        json_success '{"action": "hotplug", "mode": "rescue", "iface": "'"$iface"'"}'
+        return 0
+    fi
+    
+    # 4. Standard Mode: Reconfigure via networkd
+    reconfigure_iface "$iface"
+    json_success '{"action": "hotplug", "mode": "standard", "iface": "'"$iface"'"}'
+}
 
 action_create_bridge() {
     local name="$1"
@@ -194,8 +254,7 @@ action_set_dhcp() {
     [ -n "$mac" ] && ! validate_mac "$mac" && { json_error "Invalid MAC"; return 1; }
     [ -n "$mtu" ] && ! validate_mtu "$mtu" && { json_error "Invalid MTU"; return 1; }
     
-    # Sane Default Metrics for Handhelds:
-    # Prefer Ethernet (100) over WiFi (600)
+    # Sane Default Metrics
     if [ -z "$metric" ]; then
         if [[ "$iface" == wlan* ]] || [[ "$iface" == wlp* ]] || [[ "$iface" == uap* ]]; then
              metric="600"
@@ -215,23 +274,15 @@ action_set_static() {
 
     [ -z "$iface" ] || [ -z "$ip" ] && { log_error "Interface and IP required"; return 1; }
     
-    # Handle Multiple IPs (Aliases) by iterating through comma-separated list
+    # Handle Multiple IPs
     local final_ips=""
     local IFS=','
     read -ra ADDR_LIST <<< "$ip"
     for addr in "${ADDR_LIST[@]}"; do
-        # Trim spaces
         addr="${addr// /}"
         [ -z "$addr" ] && continue
-        
-        # Default CIDR /24 if missing
         if [[ "$addr" != *"/"* ]]; then addr="${addr}/24"; fi
-        
-        # Validate individual IP (CIDR aware)
-        if ! validate_ip "$addr"; then
-             return 1
-        fi
-        
+        if ! validate_ip "$addr"; then return 1; fi
         if [ -z "$final_ips" ]; then final_ips="$addr"; else final_ips="$final_ips,$addr"; fi
     done
     unset IFS
@@ -239,7 +290,6 @@ action_set_static() {
     [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
     [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
     
-    # Sane Default Metrics
     if [ -z "$metric" ]; then
         if [[ "$iface" == wlan* ]] || [[ "$iface" == wlp* ]] || [[ "$iface" == uap* ]]; then
              metric="600"
@@ -251,6 +301,23 @@ action_set_static() {
     with_iface_lock "$iface" _task_set_static "$iface" "$ip" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
     
     json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'", "metric": "'"$metric"'", "mac": "'"${mac:-default}"'", "mtu": "'"${mtu:-default}"'", "ipv6_privacy": "'"${ipv6_priv:-default}"'", "dhcp_id": "'"${dhcp_id:-default}"'"}'
+}
+
+action_set_hardware() {
+    local iface="$1"; local speed="$2"; local duplex="$3"; local autoneg="$4"
+    local wol="$5"; local mac_policy="$6"; local name_policy="$7"; local mac_addr="$8"
+    
+    [ -z "$iface" ] && { json_error "Interface required"; return 1; }
+    
+    if [ -n "$speed" ] && ! validate_link_speed "$speed"; then return 1; fi
+    if [ -n "$duplex" ] && ! validate_duplex "$duplex"; then return 1; fi
+    if [ -n "$autoneg" ] && ! validate_autoneg "$autoneg"; then return 1; fi
+    if [ -n "$mac_addr" ] && ! validate_mac "$mac_addr"; then return 1; fi
+    
+    # Phase 8: Uses extended arguments including WOL/Policies/MAC
+    with_iface_lock "$iface" _task_set_hardware "$iface" "$speed" "$duplex" "$autoneg" "$wol" "$mac_policy" "$name_policy" "$mac_addr"
+    
+    json_success '{"action": "set_hardware", "iface": "'"$iface"'"}'
 }
 
 action_set_link() {
@@ -265,7 +332,6 @@ action_set_link() {
 action_set_proxy() {
     local iface="$1"; local http="$2"; local https="$3"; local noproxy="$4"
     
-    # Fix: Lock by interface or global
     with_iface_lock "${iface:-global_proxy}" _task_set_proxy "$iface" "$http" "$https" "$noproxy"
         
     json_success '{"action": "set_proxy"}'

@@ -2,6 +2,24 @@
 # VALIDATION & HELPER FUNCTIONS
 # ==============================================================================
 
+# --- CACHING & OPTIMIZATION HELPERS ---
+declare -A _sysfs_cache
+
+# Optimization: Batch read sysfs attributes to reduce forks/IO overhead
+# Returns: operstate:address:mtu
+get_iface_sysfs() {
+    local iface=$1
+    [ -n "${_sysfs_cache[$iface]}" ] && echo "${_sysfs_cache[$iface]}" && return
+    
+    local data=""
+    if [ -d "/sys/class/net/$iface" ]; then
+        # Read multiple attributes in one fork using paste
+        data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
+    fi
+    _sysfs_cache[$iface]="$data"
+    echo "$data"
+}
+
 cleanup() {
     # Remove temporary files safely
     local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
@@ -210,48 +228,86 @@ json_success() {
             echo "$full_json"
             ;;
         table)
-            # Route based on content type for tabular display
-            if echo "$full_json" | "$JQ_BIN" -e '.results' >/dev/null 2>&1; then
-                print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
-            elif echo "$full_json" | "$JQ_BIN" -e '.networks' >/dev/null 2>&1; then
-                print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
-            elif echo "$full_json" | "$JQ_BIN" -e '.interfaces' >/dev/null 2>&1; then
-                local arr_data
-                arr_data=$(echo "$full_json" | "$JQ_BIN" '[.interfaces[]]')
-                print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
-            elif echo "$full_json" | "$JQ_BIN" -e '.profiles' >/dev/null 2>&1; then
-                if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
-                     echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
-                else
-                     print_table "$(echo "$full_json" | "$JQ_BIN" '.profiles')" "name:NAME,iface:INTERFACE"
-                fi
-            elif echo "$full_json" | "$JQ_BIN" -e '.devices' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
-            else
-                # Fallback to Key-Value
-                echo "$full_json" | "$JQ_BIN" -r 'to_entries | .[] | "\(.key): \(.value)"'
-            fi
+            # OPTIMIZATION: Determine content type in one pass to avoid multiple JQ forks
+            local type_detect
+            type_detect=$(echo "$full_json" | "$JQ_BIN" -r '
+                if .results then "results" 
+                elif .networks then "networks" 
+                elif .interfaces then "interfaces" 
+                elif .profiles then "profiles" 
+                elif .devices then "devices" 
+                else "unknown" end')
+
+            case "$type_detect" in
+                results)
+                    print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
+                    ;;
+                networks)
+                    print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
+                    ;;
+                interfaces)
+                    local arr_data
+                    arr_data=$(echo "$full_json" | "$JQ_BIN" '[.interfaces[]]')
+                    print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
+                    ;;
+                profiles)
+                    # Check profile structure (array of strings or objects)
+                    if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
+                         echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
+                    else
+                         print_table "$(echo "$full_json" | "$JQ_BIN" '.profiles')" "name:NAME,iface:INTERFACE"
+                    fi
+                    ;;
+                devices)
+                    print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
+                    ;;
+                *)
+                    # Fallback to Key-Value
+                    echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
+                    ;;
+            esac
             ;;
         *)
             # Human readable pretty print (Default)
-            if echo "$full_json" | "$JQ_BIN" -e '.message' >/dev/null 2>&1; then
-                echo "$full_json" | "$JQ_BIN" -r '.message'
-            elif echo "$full_json" | "$JQ_BIN" -e '.action' >/dev/null 2>&1; then
-                local action=$(echo "$full_json" | "$JQ_BIN" -r '.action')
-                local target=$(echo "$full_json" | "$JQ_BIN" -r '.iface // .ssid // .name // "system"')
-                echo "✓ Success: $action performed on $target"
-            elif echo "$full_json" | "$JQ_BIN" -e '.connected == true' >/dev/null 2>&1; then
-                echo "✓ Successfully connected to $(echo "$full_json" | "$JQ_BIN" -r '.ssid')."
-            elif echo "$full_json" | "$JQ_BIN" -e '.results' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
-            elif echo "$full_json" | "$JQ_BIN" -e '.networks' >/dev/null 2>&1; then
-                 print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
-            elif echo "$full_json" | "$JQ_BIN" -e '.interfaces' >/dev/null 2>&1; then
-                 echo "--- Network Status ---"
-                 echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
-            else
-                echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
-            fi
+            # OPTIMIZATION: Check for keys in one pass to reduce JQ calls
+            local key_detect
+            key_detect=$(echo "$full_json" | "$JQ_BIN" -r '
+                if .message then "message"
+                elif .action then "action"
+                elif .connected == true then "connected"
+                elif .results then "results"
+                elif .networks then "networks"
+                elif .interfaces then "interfaces"
+                else "unknown" end')
+            
+            case "$key_detect" in
+                message)
+                    echo "$full_json" | "$JQ_BIN" -r '.message'
+                    ;;
+                action)
+                    local action_str
+                    action_str=$(echo "$full_json" | "$JQ_BIN" -r '"✓ Success: " + .action + " performed on " + (.iface // .ssid // .name // "system")')
+                    echo "$action_str"
+                    ;;
+                connected)
+                    local ssid
+                    ssid=$(echo "$full_json" | "$JQ_BIN" -r '.ssid')
+                    echo "✓ Successfully connected to $ssid."
+                    ;;
+                results)
+                     print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
+                     ;;
+                networks)
+                     print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
+                     ;;
+                interfaces)
+                     echo "--- Network Status ---"
+                     echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
+                     ;;
+                *)
+                    echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
+                    ;;
+            esac
             ;;
     esac
 }
@@ -438,14 +494,22 @@ validate_routes() {
     local routes="$1"
     IFS=',' read -ra RTS <<< "$routes"
     for r in "${RTS[@]}"; do
-        local dest="${r%%:*}"
+        # Supports: dest  OR  dest@gateway  OR  dest@gateway@metric
+        # Use @ separator to be IPv6 safe
+        local dest=""
         local rgw=""
-        if [[ "$r" == *":"* ]]; then
-            rgw="${r#*:}"
-        fi
+        local rmet=""
+        
+        # Split by @
+        IFS='@' read -r dest rgw rmet <<< "$r"
+        
+        if [ -z "$dest" ]; then return 1; fi
         if ! validate_ip "$dest"; then return 1; fi
         if [ -n "$rgw" ]; then
             if ! validate_ip "$rgw"; then return 1; fi
+        fi
+        if [ -n "$rmet" ]; then
+            if ! validate_integer "$rmet"; then return 1; fi
         fi
     done
     return 0
@@ -498,6 +562,28 @@ validate_mtu() {
     return 1
 }
 
+validate_link_speed() {
+    local spd="$1"
+    # Accept integers (Mbps) like 10, 100, 1000, 2500, 10000
+    if [[ "$spd" =~ ^[0-9]+$ ]] && [ "$spd" -ge 10 ]; then return 0; fi
+    json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
+    return 1
+}
+
+validate_duplex() {
+    local dup="$1"
+    if [[ "$dup" =~ ^(half|full)$ ]]; then return 0; fi
+    json_error "Invalid duplex mode: $dup" "1" "Must be 'half' or 'full'"
+    return 1
+}
+
+validate_autoneg() {
+    local auto="$1"
+    if [[ "$auto" =~ ^(yes|no)$ ]]; then return 0; fi
+    json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
+    return 1
+}
+
 get_proxy_json() {
     local file="$1"
     if [ -f "$file" ]; then
@@ -518,4 +604,38 @@ get_proxy_json() {
     else
         echo "null"
     fi
+}
+
+# --- WRITE HELPERS ---
+
+secure_write() {
+    local dest="$1"
+    local content="$2"
+    local perms="${3:-644}"
+    
+    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${STATE_DIR}/"* ]] && \
+       [[ "$dest" != "${CONF_DIR}/"* ]] && \
+       [[ "$dest" != "${RUN_DIR}/"* ]]; then
+         log_error "Illegal file write attempted: $dest"
+         return 1
+    fi
+    
+    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
+    
+    # Phase 2 Refactor: Use Native Agent if available (Atomic/Idempotent)
+    if [ -x "${RXNM_AGENT_BIN}" ]; then
+        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" "$perms" 2>/dev/null; then
+            return 0
+        fi
+        # Fallback if agent write fails
+    fi
+    
+    local tmp
+    tmp=$(mktemp "${dest}.XXXXXX") || return 1
+    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod "$perms" "$tmp"
+    sync
+    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }

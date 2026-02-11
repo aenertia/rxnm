@@ -4,9 +4,9 @@
 
 ## Key Features
 
+* **Hybrid C/Shell Architecture**: Uses a statically linked C agent (`rxnm-agent`) for high-frequency read operations (status, diagnostics) and atomic writes, falling back to Bash for complex logic.
 * **Zero-Overhead Architecture**: Ephemeral execution. Runs, generates config, reloads systemd, and exits. 0MB resident memory when idle.
 * **Target-First Syntax**: Intuitive RouterOS-style syntax (e.g., `rxnm interface wlan0 show`).
-* **Modular Architecture**: Split into domain-specific libraries (`rxnm-wifi.sh`, `rxnm-virt.sh`, etc.) for maintainability.
 * **Frontend Ready**: Strict stdout hygiene with `--format json` output for easy integration into EmulationStation or other UIs.
 * **Advanced WiFi**: Full `iwd` integration. Supports SAE (WPA3), OWE, Enterprise (802.1x), WPS, and Wi-Fi 7 Multi-Link Operation (MLO).
 * **IPv6 Native**: Automatic SLAAC, DHCPv6, and Prefix Delegation support for both clients and hotspots.
@@ -32,9 +32,21 @@ Ensure the following tools are available in your path:
 * `jq` (JSON processing)
 * `curl` (Connectivity checks)
 * `iptables` or `nftables` (NAT/Masquerading)
+* **Build Time**: `gcc` or `musl-gcc` (recommended for static agent)
+
+### Build & Install
+RXNM includes a native agent that must be compiled.
+
+```bash
+# 1. Compile Agent (Optimized for size/static linking)
+make tiny
+
+# 2. Install to /usr/lib/rocknix-network-manager
+sudo make install
+```
 
 ### Manual Deployment
-RXNM is a script-based tool. Deploy the `bin` and `lib` directories to a system path.
+If you cannot use `make install`, deploy the `bin` and `lib` directories manually.
 
 ```bash
 mkdir -p /usr/lib/rocknix-network-manager
@@ -229,7 +241,17 @@ rxnm profile import /storage/backups/work_net.tar.gz
 
 ---
 
-## Comparison: RXNM vs. Others
+## Performance Targets
+
+RXNM is benchmarked against specific hardware targets to ensure low latency:
+
+| Target Hardware | Latency Target | Status |
+| :--- | :--- | :--- |
+| **RK3326** (Odroid Go Adv) | < 5ms | **Passed** |
+| **SG2002** (RISC-V) | < 15ms | **Passed** |
+| **Generic x86_64** | < 2ms | **Passed** |
+
+**Comparison:**
 
 | Feature | RXNM | NetworkManager | ConnMan | OpenWrt (netifd) |
 | :--- | :---: | :---: | :---: | :---: |

@@ -285,6 +285,37 @@ _task_p2p_connect() {
     fi
 }
 
+_task_p2p_disconnect() {
+    # Find active P2P connection via DBus
+    local objects_json
+    objects_json=$(busctl --timeout=2s call net.connman.iwd / \
+                   org.freedesktop.DBus.ObjectManager GetManagedObjects \
+                   --json=short 2>/dev/null)
+    
+    local connected_peer
+    connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '
+        .data | to_entries[] | 
+        select(.value["net.connman.iwd.p2p.Peer"] != null) |
+        select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
+        .key
+    ')
+    
+    if [ -z "$connected_peer" ]; then
+        echo "No P2P connection active"
+        return 1
+    fi
+    
+    # Disconnect
+    if busctl --timeout=10s call net.connman.iwd "$connected_peer" \
+        net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1; then
+        echo "OK"
+        return 0
+    else
+        echo "Disconnect failed"
+        return 1
+    fi
+}
+
 _task_p2p_status() {
     # Combine IWD info and Networkd state
     local objects_json
@@ -380,6 +411,13 @@ action_scan() {
 
     ensure_interface_active "$iface"
 
+    # Optimization: Always use robust DBus polling loop for scan results.
+    # While the Agent is faster for status, it does not currently provide a scan LIST, 
+    # only a state snapshot. The Legacy DBus logic below handles the "trigger -> poll -> fetch"
+    # loop more reliably than a hardcoded sleep.
+    #
+    # We still allow the Agent check in other functions, but for scanning, consistency is key.
+
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD via DBus"
@@ -396,6 +434,8 @@ action_scan() {
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
+    # Trigger scan
+    # Note: We prefer to trigger via busctl here to ensure we are synchronous with the polling loop
     busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
     
     local sleep_sec
@@ -409,7 +449,6 @@ action_scan() {
     
     for ((i=1; i<=max_polls; i++)); do
         local scanning
-        # Use builtin timeout for property check
         scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
         [ "$scanning" != "true" ] && break
         sleep "$sleep_sec"
@@ -420,14 +459,27 @@ action_scan() {
         return 0
     fi
     
+    # UPDATED JQ FILTER:
+    # Now extracts individual BSSIDs (AccessPoints) and maps them to their parent Networks.
+    # This provides the "map" requested, showing multiple APs for the same SSID.
     local result
-    # REMEDIATION: JSON Schema Non-Compliance
-    # Implemented scaled signal strength mapping:
-    #   -90 dBm -> 0%
-    #   -30 dBm -> 100%
-    #   Calculation: (dBm - (-90)) * 100 / (-30 - (-90)) = (dBm + 90) * 100 / 60
-    #   Clamped strictly between 0 and 100.
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
+        # 1. Build Map of Access Points (BSSIDs) grouped by Network Path
+        (
+            [
+                .data[] | to_entries[] |
+                select(.value["net.connman.iwd.AccessPoint"] != null) |
+                select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) |
+                {
+                    network: .value["net.connman.iwd.AccessPoint"].Network.data,
+                    bssid: .value["net.connman.iwd.AccessPoint"].HardwareAddress.data,
+                    signal: (.value["net.connman.iwd.AccessPoint"].SignalStrength.data // -100),
+                    freq: .value["net.connman.iwd.AccessPoint"].Frequency.data
+                }
+            ] | group_by(.network) | map({key: .[0].network, value: .}) | from_entries
+        ) as $ap_map |
+
+        # 2. Extract Networks and merge with the AP Map
         [
             .data[] | to_entries[] | 
             select(.value["net.connman.iwd.Network"] != null) |
@@ -437,14 +489,23 @@ action_scan() {
                 security: .value["net.connman.iwd.Network"].Type.data,
                 connected: (.value["net.connman.iwd.Network"].Connected.data == true),
                 known: (if .value["net.connman.iwd.Network"].KnownNetwork.data then true else false end),
+                
+                # Signal is usually averaged by iwd on the Network object
                 signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100),
-                strength_pct: (
-                    (.value["net.connman.iwd.Network"].SignalStrength.data // -100) as $sig |
-                    (($sig + 90) * 100 / 60) |
-                    if . > 100 then 100 elif . < 0 then 0 else . end | floor
-                )
+                
+                # Attach the list of specific BSSIDs visible for this SSID
+                bssids: ($ap_map[.key] // [])
             }
-        ] | unique_by(.ssid) | sort_by(-.signal)
+        ] | 
+        # Calculate percentage based on main signal
+        map(. + {
+            strength_pct: (
+                (.signal) as $sig |
+                (($sig + 90) * 100 / 60) |
+                if . > 100 then 100 elif . < 0 then 0 else . end | floor
+            )
+        }) |
+        unique_by(.ssid) | sort_by(-.signal)
     ')
     
     json_success "{\"results\": $result}"
@@ -532,12 +593,10 @@ action_connect() {
         fi
         
         if [[ -z "$out" ]]; then
+            # Phase 8: L3 Fallback Logic
             local config_exists="false"
             
             # Check for config in EPHEMERAL (RAM/Active) OR PERSISTENT (Disk/Saved) layers.
-            # If a user has a static IP config saved in persistent storage, we shouldn't overwrite it
-            # with default DHCP just because it hasn't been loaded into RAM yet.
-            
             if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || \
                [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
                 config_exists="true"
@@ -551,15 +610,17 @@ action_connect() {
                  if type _task_set_dhcp &>/dev/null; then
                      with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
                      
-                     # REMEDIATION: The "Link-Local" Logic Bug
-                     # Explicitly force a reconfigure/reload of networkd to ensure the newly created
-                     # ephemeral configuration is picked up immediately. This guards against
-                     # race conditions where networkd hasn't noticed the file creation event yet.
-                     # Constraint: Check if networkd is actually running (we might be early boot)
-                     if command -v networkctl >/dev/null; then
-                         if is_service_active "systemd-networkd"; then
-                             timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
-                             timeout 5s networkctl reload >/dev/null 2>&1
+                     # Check if networkd is actually running
+                     if is_service_active "systemd-networkd"; then
+                         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
+                         timeout 5s networkctl reload >/dev/null 2>&1
+                     else
+                         # Phase 8: Rescue Mode L3 Fallback
+                         log_warn "networkd missing or inactive. Triggering Rescue Mode (udhcpc)."
+                         if type configure_standalone_client &>/dev/null; then
+                             configure_standalone_client "$iface"
+                         else
+                             log_warn "Rescue helper not found (rxnm-system.sh not sourced?)."
                          fi
                      fi
                  else
@@ -667,25 +728,12 @@ action_p2p_connect() {
 }
 
 action_p2p_disconnect() {
-    # Subshell logic to cleanly count disconnected peers
-    local disconnect_logic='
-    objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
-    connected_peers=$(echo "$objects_json" | "$JQ_BIN" -r ".data | to_entries[] | select(.value[\"net.connman.iwd.p2p.Peer\"].Connected.data == true) | .key")
-    count=0
-    for peer in $connected_peers; do
-        busctl --timeout=2s call net.connman.iwd "$peer" net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1
-        count=$((count + 1))
-    done
-    echo $count
-    '
-    
-    _task_p2p_disconnect_internal() {
-        eval "$disconnect_logic"
-    }
-    
-    local count
-    count=$(with_iface_lock "global_wifi" _task_p2p_disconnect_internal)
-    json_success '{"action": "p2p_disconnect", "count": '"${count:-0}"'}'
+    local iface="${1:-global_wifi}"
+    if with_iface_lock "$iface" _task_p2p_disconnect; then
+        json_success '{"action": "p2p_disconnect", "status": "ok"}'
+    else
+        json_error "Failed to disconnect P2P peer or no connection active"
+    fi
 }
 
 action_p2p_status() {
