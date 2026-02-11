@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
  *
- * Phase 6 Remediation:
- * - Implemented Targeted Station Dumps: Iterates WiFi interfaces to request 
- * station info per-interface (fixes empty BSSID in containers/strict kernels).
- * - Added add_nl_attr helper for constructing Netlink requests.
- * - Maintained all previous fixups (constants, string handling, etc).
+ * Phase 7 Remediation:
+ * - Parity Fix: Routes now omit /32 (IPv4) and /128 (IPv6) CIDR suffixes to
+ * match standard IP tool output and legacy script behavior.
+ * - Parity Fix: IPv6 addresses now respect RT_SCOPE_HOST filtering to hide
+ * loopback (::1) addresses, matching legacy script filtering.
  */
 
 #define _GNU_SOURCE
@@ -441,11 +441,14 @@ void process_addr_msg(struct nlmsghdr *nh) {
                 }
             }
         } else if (ifa->ifa_family == AF_INET6) {
-            char ipv6_buf[INET6_ADDRSTRLEN];
-            if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
-                if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
-                    snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
-                    entry->ipv6_count++;
+            // Updated Scope Check to match Legacy Script behavior
+            if (ifa->ifa_scope < RT_SCOPE_HOST) {
+                char ipv6_buf[INET6_ADDRSTRLEN];
+                if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
+                    if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
+                        snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
+                        entry->ipv6_count++;
+                    }
                 }
             }
         }
@@ -480,10 +483,17 @@ void process_route_msg(struct nlmsghdr *nh) {
     } else if (tb[RTA_DST]) {
         void *dst_ptr = RTA_DATA(tb[RTA_DST]);
         char tmp_buf[INET6_ADDRSTRLEN];
+        // Updated Route Formatting to omit implicit CIDR /32 or /128
         if (rt->rtm_family == AF_INET) {
-            if (inet_ntop(AF_INET, dst_ptr, tmp_buf, sizeof(tmp_buf))) snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            if (inet_ntop(AF_INET, dst_ptr, tmp_buf, sizeof(tmp_buf))) {
+                if (rt->rtm_dst_len == 32) snprintf(route->dst, sizeof(route->dst), "%s", tmp_buf);
+                else snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            }
         } else if (rt->rtm_family == AF_INET6) {
-            if (inet_ntop(AF_INET6, dst_ptr, tmp_buf, sizeof(tmp_buf))) snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            if (inet_ntop(AF_INET6, dst_ptr, tmp_buf, sizeof(tmp_buf))) {
+                if (rt->rtm_dst_len == 128) snprintf(route->dst, sizeof(route->dst), "%s", tmp_buf);
+                else snprintf(route->dst, sizeof(route->dst), "%s/%d", tmp_buf, rt->rtm_dst_len);
+            }
         }
     }
     entry->route_count++;

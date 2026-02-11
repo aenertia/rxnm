@@ -225,8 +225,7 @@ action_status_legacy() {
         (if ($sysd_net | length) > 0 then $sysd_net else 
             ($ip | map({
                 Name: .ifname,
-                # Hybrid Type Detection: Trust name convention (wl*) even if link_type is ether
-                Type: (if .link_type=="wlan" or (.ifname | startswith("wl")) or (.ifname | startswith("mlan")) then "wlan" elif .link_type=="ether" then "ethernet" else .link_type end),
+                Type: .link_type,
                 Addresses: (.addr_info | map({
                     Family: (if .family=="inet" then 2 else 10 end),
                     Address: ((.local // .address) + "/" + (.prefixlen|tostring)),
@@ -247,10 +246,19 @@ action_status_legacy() {
                 ($route_map[.Name] // []) as $iface_routes |
                 ($iface_routes | map(select(.dst == "default")) | .[0]) as $def_route |
                 ($ip_stats[.Name] // {}) as $my_stats |
+                
+                # Normalize Type here (Applies to both systemd-networkd and IP data)
+                (
+                    if .Type=="wlan" or (.Name | startswith("wl")) or (.Name | startswith("mlan")) then "wifi" 
+                    elif .Type=="ether" then "ethernet" 
+                    elif .Type=="none" then "unknown"
+                    else .Type end
+                ) as $normalized_type |
+
                 {
                     (.Name): {
                         name: .Name,
-                        type: .Type,
+                        type: $normalized_type,
                         state: .OperationalState,
                         ip: (if .Addresses then (.Addresses | map(select(.Family==2 and .Scope!="host")) | .[0].Address) else null end),
                         ipv6: (if .Addresses then (.Addresses | map(select(.Family==10 and .Scope!="host")) | map(.Address)) else [] end),
@@ -259,7 +267,8 @@ action_status_legacy() {
                         connected: (.OperationalState == "routable" or .OperationalState == "enslaved" or .OperationalState == "online" or .OperationalState == "up"),
                         
                         # Use the merged WiFi object (DBus + Legacy)
-                        wifi: (if .Type == "wlan" then ($full_wifi[.Name] // null) else null end),
+                        # Ensure we check against normalized type
+                        wifi: (if $normalized_type == "wifi" then ($full_wifi[.Name] // null) else null end),
                         
                         gateway: (.Gateway // $def_route.gateway // null),
                         metric: ($def_route.metric // null),
