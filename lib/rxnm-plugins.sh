@@ -46,7 +46,8 @@ exec_plugin() {
     
     # Issue 6.3: Use already-set constant version
     export RXNM_LIB_DIR="${LIB_DIR}"
-    export RXNM_VERSION="${RXNM_VERSION:-1.0}"
+    # Consistency Fix: Default to 1.0.0 to match rxnm-constants.sh
+    export RXNM_VERSION="${RXNM_VERSION:-1.0.0}"
     
     export RXNM_FORMAT="${RXNM_FORMAT:-human}"
     export RXNM_DEBUG="${RXNM_DEBUG:-}"

@@ -46,13 +46,18 @@ _get_wifi_fallback_json() {
                 # BSSID is typically on the first line: "Connected to xx:xx... (on wlan0)"
                 local bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
                 
+                # Logic Fix: Handle JSON null literal vs quoted string
+                local bssid_val="null"
+                if [ -n "$bssid" ]; then bssid_val="\"$bssid\""; fi
+                
                 if [ -n "$ssid" ]; then
                     # Sanitize JSON string (escape quotes and backslashes)
                     ssid="${ssid//\\/\\\\}"
                     ssid="${ssid//\"/\\\"}"
                     [ -n "$json_items" ] && json_items="$json_items,"
                     # Construct JSON object fragment
-                    json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": \"${bssid:-null}\", \"state\": \"connected\" }"
+                    # Uses bssid_val (literal null or quoted string) instead of hardcoded quotes
+                    json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": $bssid_val, \"state\": \"connected\" }"
                 fi
             fi
         done
@@ -225,7 +230,15 @@ action_status_legacy() {
         (if ($sysd_net | length) > 0 then $sysd_net else 
             ($ip | map({
                 Name: .ifname,
-                Type: .link_type,
+                # Hybrid Type Detection: Trust name convention (wl*) even if link_type is ether
+                # Standardize "wlan" -> "wifi" to match Agent/Schema
+                # Standardize "none" -> "unknown" to match Agent/Schema
+                Type: (
+                    if .link_type=="wlan" or (.ifname | startswith("wl")) or (.ifname | startswith("mlan")) then "wifi" 
+                    elif .link_type=="ether" then "ethernet" 
+                    elif .link_type=="none" then "unknown"
+                    else .link_type end
+                ),
                 Addresses: (.addr_info | map({
                     Family: (if .family=="inet" then 2 else 10 end),
                     Address: ((.local // .address) + "/" + (.prefixlen|tostring)),
@@ -344,7 +357,10 @@ action_check_internet_legacy() {
 action_status() {
     local filter_iface="${1:-}"
 
-    if [ -f "$CACHE_FILE" ]; then
+    # Logic Fix: Only read cache if no filter is active.
+    # Reading partial cache for a full status call or full cache for partial is tricky,
+    # but simplest safety is to only trust cache for full dumps.
+    if [ -z "$filter_iface" ] && [ -f "$CACHE_FILE" ]; then
         local now file_time age
         now=$(date +%s)
         file_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
@@ -372,8 +388,11 @@ action_status() {
         json_output=$(action_status_legacy "$filter_iface")
     fi
 
-    [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
-    echo "$json_output" > "$CACHE_FILE"
+    # Logic Fix: Only cache full dumps (no filter) to avoid poisoning cache with partial data
+    if [ -z "$filter_iface" ]; then
+        [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
+        echo "$json_output" > "$CACHE_FILE"
+    fi
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
         echo "$json_output"
