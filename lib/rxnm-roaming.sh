@@ -63,12 +63,14 @@ _task_update_map() {
     local scan_json
     scan_json=$(rxnm wifi scan --interface "$iface" --format json 2>/dev/null || echo "{}")
     
+    # Phase 2.2 Fix: Remove stdin pipe usage which caused deadlocks in some shells.
+    # Pass scan_json directly via --argjson.
     if [[ "$scan_json" == *"results"* ]]; then
         local now; now=$(date +%s)
         local current_map="{}"
         [ -f "$ROAM_MAP_FILE" ] && current_map=$(cat "$ROAM_MAP_FILE")
         
-        echo "$scan_json" | "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$(cat)" --arg now "$now" '
+        "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$scan_json" --arg now "$now" '
             ($scan.results | map(
                 (.bssids // []) | map({
                     key: .bssid, 
@@ -279,7 +281,15 @@ run_active_monitor() {
 
 # One-shot trigger for opportunistic profile switching
 action_wifi_roaming_trigger() {
-    local iface="${1:-wlan0}"
+    local iface="$1"
+    
+    # Phase 4.1: Dynamic Auto-Detection
+    if [ -z "$iface" ]; then
+        iface=$(get_wifi_iface 2>/dev/null)
+    fi
+    # Hard fallback if detection fails completely
+    : "${iface:=wlan0}"
+
     load_roaming_config
     
     log_roam "Opportunistic Trigger: Checking location context for $iface..."
@@ -291,7 +301,15 @@ action_wifi_roaming_trigger() {
 }
 
 action_wifi_roaming_monitor() {
-    local iface="${1:-wlan0}"
+    local iface="$1"
+    
+    # Phase 4.1: Dynamic Auto-Detection
+    if [ -z "$iface" ]; then
+        iface=$(get_wifi_iface 2>/dev/null)
+    fi
+    # Hard fallback if detection fails completely
+    : "${iface:=wlan0}"
+
     : "${STORAGE_PROFILES_DIR:=${CONF_DIR}/network/profiles}"
     load_roaming_config
     

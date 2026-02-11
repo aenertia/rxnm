@@ -183,38 +183,6 @@ reconfigure_iface() {
     [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
-secure_write() {
-    local dest="$1"
-    local content="$2"
-    local perms="${3:-644}"
-    
-    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${STATE_DIR}/"* ]] && \
-       [[ "$dest" != "${CONF_DIR}/"* ]] && \
-       [[ "$dest" != "${RUN_DIR}/"* ]]; then
-         log_error "Illegal file write attempted: $dest"
-         return 1
-    fi
-    
-    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
-    
-    # Phase 2 Refactor: Use Native Agent if available (Atomic/Idempotent)
-    if [ -x "${RXNM_AGENT_BIN}" ]; then
-        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" "$perms" 2>/dev/null; then
-            return 0
-        fi
-        # Fallback if agent write fails
-    fi
-    
-    local tmp
-    tmp=$(mktemp "${dest}.XXXXXX") || return 1
-    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod "$perms" "$tmp"
-    sync
-    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
-}
-
 tune_network_stack() {
     local profile="$1"
     

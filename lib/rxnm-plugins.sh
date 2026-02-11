@@ -46,8 +46,8 @@ exec_plugin() {
     
     # Issue 6.3: Use already-set constant version
     export RXNM_LIB_DIR="${LIB_DIR}"
-    # Consistency Fix: Default to 1.0.0 to match rxnm-constants.sh
-    export RXNM_VERSION="${RXNM_VERSION:-1.0.0}"
+    # Phase 3.3 Fix: Remove hardcoded fallback, rely on SSoT from rxnm-constants.sh
+    export RXNM_VERSION="${RXNM_VERSION}"
     
     export RXNM_FORMAT="${RXNM_FORMAT:-human}"
     export RXNM_DEBUG="${RXNM_DEBUG:-}"

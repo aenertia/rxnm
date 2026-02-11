@@ -92,10 +92,14 @@ echo "" >> "$HEADER_FILE"
 echo "// --- API Schema Keys (from api-schema.json) ---" >> "$HEADER_FILE"
 
 if [ -f "$SCHEMA_JSON" ] && command -v jq >/dev/null; then
-    # '|| true' ensures script doesn't die if jq fails
-    jq -r '
-        .properties | keys[] as $k | "#define KEY_" + ($k | ascii_upcase) + " \"" + $k + "\""
-    ' "$SCHEMA_JSON" >> "$HEADER_FILE" || echo "// Error running jq" >> "$HEADER_FILE"
+    # Phase 4.3 Fix: Add error checking after JQ operations
+    if jq -r '.properties | keys[] as $k | "#define KEY_" + ($k | ascii_upcase) + " \"" + $k + "\""' "$SCHEMA_JSON" >> "$HEADER_FILE"; then
+        echo "// Schema keys generated successfully" >> "$HEADER_FILE"
+    else
+        echo "Error: Failed to parse schema JSON" >&2
+        rm -f "$HEADER_FILE"
+        exit 1
+    fi
 else
     echo "// Warning: api-schema.json not found or jq missing. Skipping schema keys." >> "$HEADER_FILE"
     echo "#define KEY_SUCCESS \"success\"" >> "$HEADER_FILE"

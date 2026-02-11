@@ -56,8 +56,12 @@ else
             IS_LOW_POWER=true
         fi
     fi
+    
     # Store in cache if RUN_DIR is writable
-    [ -d "$RUN_DIR" ] && echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || true
+    # Phase 4 Polish: Strict check for directory writable status before redirecting to avoid error noise
+    if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
+         echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || true
+    fi
 fi
 
 # Optimization: Cache Firewall Tool Detection

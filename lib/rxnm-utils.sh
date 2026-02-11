@@ -400,15 +400,6 @@ json_escape() {
     s="${s//$'\b'/\\b}"
     s="${s//$'\f'/\\f}"
     
-    # Note: For very complex UTF-8/Control character handling, this simple
-    # replacement might be insufficient. If strict correctness is required
-    # over raw speed for arbitrary inputs, uncomment the JQ fallback:
-    
-    # if [[ "$s" =~ [^[:print:]] ]]; then
-    #    printf '%s' "$s" | "$JQ_BIN" -R . | sed 's/^"//;s/"$//'
-    #    return
-    # fi
-    
     printf '%s' "$s"
 }
 
@@ -626,7 +617,7 @@ secure_write() {
     
     # Phase 2 Refactor: Use Native Agent if available (Atomic/Idempotent)
     if [ -x "${RXNM_AGENT_BIN}" ]; then
-        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" "$perms" 2>/dev/null; then
+        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
             return 0
         fi
         # Fallback if agent write fails

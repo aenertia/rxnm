@@ -58,7 +58,7 @@ source "${LIB_DIR}/rxnm-plugins.sh"
 
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
-FORCE_ACTION="false"
+export FORCE_ACTION="false"
 CATEGORY=""
 ACTION=""
 

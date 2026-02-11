@@ -27,7 +27,8 @@ _task_connect_wireguard() {
     network_content+="AllowedIPs=${ips}\nPersistentKeepalive=25\n"
 
     secure_write "$netdev_file" "$netdev_content" "600"
-    secure_write "$network_file" "$network_content" "644"
+    # Phase 3.2 Fix: Harden WireGuard network config permissions (contains peer keys/endpoints)
+    secure_write "$network_file" "$network_content" "600"
     
     reload_networkd
 }

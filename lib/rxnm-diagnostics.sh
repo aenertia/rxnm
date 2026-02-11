@@ -175,6 +175,7 @@ action_status_legacy() {
     [ -z "$global_proxy_json" ] && global_proxy_json="null"
 
     local json_output
+    # Phase 3.4: Deduplicated Type Normalization Logic with heuristics for Legacy Parity
     json_output=$("$JQ_BIN" -n \
         --arg hn "$hostname" \
         --arg filter "$filter_iface" \
@@ -186,6 +187,19 @@ action_status_legacy() {
         --argjson ip "$ip_json" \
         --argjson speeds "$speed_json" \
         '
+        def normalize_type($name; $raw_type):
+            if $raw_type == "wlan" or ($name | startswith("wl")) or ($name | startswith("mlan")) then "wifi"
+            elif $raw_type == "wireguard" or ($name | startswith("wg")) then "wireguard"
+            elif $raw_type == "bridge" or ($name | startswith("br")) or ($name | startswith("docker")) or ($name | startswith("podman")) then "bridge"
+            elif $raw_type == "bond" or ($name | startswith("bond")) then "bond"
+            elif $raw_type == "veth" or ($name | startswith("veth")) then "veth"
+            elif $raw_type == "tun" or ($name | startswith("tun")) then "tun"
+            elif $raw_type == "tap" or ($name | startswith("tap")) then "tap"
+            elif $raw_type == "loopback" or ($name == "lo") then "loopback"
+            elif $raw_type == "ether" or $raw_type == "ethernet" then "ethernet"
+            elif $raw_type == "none" then "unknown"
+            else $raw_type end;
+
         ($iwd | if . == {} or . == null then {} else . end) as $safe_iwd |
         ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Device"]?)) |
          map({key: .key, value: .value["net.connman.iwd.Device"].Name.data}) | from_entries) as $dev_paths |
@@ -230,18 +244,7 @@ action_status_legacy() {
         (if ($sysd_net | length) > 0 then $sysd_net else 
             ($ip | map({
                 Name: .ifname,
-                # Hybrid Type Detection: Trust name convention (wl*) even if link_type is ether
-                # Standardize "wlan" -> "wifi" to match Agent/Schema
-                # Standardize "none" -> "unknown" to match Agent/Schema
-                Type: (
-                    if .link_type=="wlan" or ((.ifname // "") | startswith("wl")) or ((.ifname // "") | startswith("mlan")) then "wifi" 
-                    elif .link_type=="ether" then "ethernet" 
-                    elif .link_type=="wireguard" or ((.ifname // "") | startswith("wg")) then "wireguard"
-                    elif .link_type=="tun" or ((.ifname // "") | startswith("tun")) then "tun"
-                    elif .link_type=="tap" or ((.ifname // "") | startswith("tap")) then "tap"
-                    elif .link_type=="none" then "unknown"
-                    else .link_type end
-                ),
+                Type: normalize_type((.ifname // ""); .link_type),
                 Addresses: (.addr_info | map({
                     Family: (if .family=="inet" then 2 else 10 end),
                     Address: ((.local // .address) + "/" + (.prefixlen|tostring)),
@@ -263,17 +266,8 @@ action_status_legacy() {
                 ($iface_routes | map(select(.dst == "default")) | .[0]) as $def_route |
                 ($ip_stats[.Name] // {}) as $my_stats |
                 
-                # Normalize Type here (Applies to both systemd-networkd and IP data)
-                # Fix: Guard .Name with empty string default to prevent startswith errors on null inputs
-                (
-                    if .Type=="wlan" or ((.Name // "") | startswith("wl")) or ((.Name // "") | startswith("mlan")) then "wifi" 
-                    elif .Type=="ether" then "ethernet" 
-                    elif .Type=="wireguard" or ((.Name // "") | startswith("wg")) then "wireguard"
-                    elif .Type=="tun" or ((.Name // "") | startswith("tun")) then "tun"
-                    elif .Type=="tap" or ((.Name // "") | startswith("tap")) then "tap"
-                    elif .Type=="none" then "unknown"
-                    else .Type end
-                ) as $normalized_type |
+                # Apply normalization function
+                normalize_type((.Name // ""); .Type) as $normalized_type |
 
                 {
                     (.Name): {

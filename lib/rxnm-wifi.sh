@@ -327,7 +327,8 @@ _task_p2p_status() {
     fi
     
     # Merge logic
-    echo "$objects_json" | "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$(cat)" '
+    # Phase 4.2 Fix: Use --argjson for objects_json to avoid stdin complexity
+    "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$objects_json" '
         # Find Connected P2P Peers
         ($iwd.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) | 
          select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
@@ -412,12 +413,6 @@ action_scan() {
     ensure_interface_active "$iface"
 
     # Optimization: Always use robust DBus polling loop for scan results.
-    # While the Agent is faster for status, it does not currently provide a scan LIST, 
-    # only a state snapshot. The Legacy DBus logic below handles the "trigger -> poll -> fetch"
-    # loop more reliably than a hardcoded sleep.
-    #
-    # We still allow the Agent check in other functions, but for scanning, consistency is key.
-
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD via DBus"
@@ -430,12 +425,12 @@ action_scan() {
     fi
 
     local device_path
-    device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data[] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
+    # Phase 2.1 Fix: Corrected JQ filter for object parsing (.data | to_entries[])
+    device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
     # Trigger scan
-    # Note: We prefer to trigger via busctl here to ensure we are synchronous with the polling loop
     busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
     
     local sleep_sec
@@ -459,15 +454,13 @@ action_scan() {
         return 0
     fi
     
-    # UPDATED JQ FILTER:
-    # Now extracts individual BSSIDs (AccessPoints) and maps them to their parent Networks.
-    # This provides the "map" requested, showing multiple APs for the same SSID.
+    # Phase 2.1 Fix: Corrected JQ filter here too
     local result
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         # 1. Build Map of Access Points (BSSIDs) grouped by Network Path
         (
             [
-                .data[] | to_entries[] |
+                .data | to_entries[] |
                 select(.value["net.connman.iwd.AccessPoint"] != null) |
                 select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) |
                 {
@@ -481,7 +474,7 @@ action_scan() {
 
         # 2. Extract Networks and merge with the AP Map
         [
-            .data[] | to_entries[] | 
+            .data | to_entries[] | 
             select(.value["net.connman.iwd.Network"] != null) |
             select(.value["net.connman.iwd.Network"].Device.data == $dev) |
             {
@@ -529,10 +522,11 @@ action_list_known_networks() {
          return 0
     fi
 
+    # Phase 2.1 Fix: Corrected .data access
     local networks
     networks=$(echo "$objects_json" | "$JQ_BIN" -r '
         [
-            .data[] | to_entries[] |
+            .data | to_entries[] |
             select(.value["net.connman.iwd.KnownNetwork"] != null) |
             {
                 ssid: .value["net.connman.iwd.KnownNetwork"].Name.data,

@@ -9,9 +9,13 @@
  * - Parity Fix: IPv6 addresses now respect RT_SCOPE_HOST filtering to hide
  * loopback (::1) addresses, matching legacy script filtering.
  *
+ * Phase 2 Refactor (Quality Gate):
+ * - Added JSON string escaping to prevent parse errors with special chars.
+ *
  * Phase 1 Refactor (Hybrid Fastpath):
  * - Added atomic_write capability to reduce shell fork overhead during config gen.
  * - Added native sysctl tuning to remove sysctl binary dependencies.
+ * - Added robust interface type detection via sysfs/capabilities.
  */
 
 #define _GNU_SOURCE
@@ -130,6 +134,8 @@ typedef struct {
     char bus_info[32];
     uint16_t hw_type;
     bool is_wifi;
+    bool is_bridge;
+    bool is_bond;
     char ssid[33];
     char bssid[18];
     int signal_dbm;
@@ -171,13 +177,41 @@ iface_entry_t* get_iface(int index) {
     return NULL;
 }
 
+// Check sysfs for specific capabilities to identify interface type
+// This provides robustness for renamed interfaces (e.g. wifi0, mlan0)
+bool sysfs_has_subdir(const char *ifname, const char *subdir) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/%s", ifname, subdir);
+    struct stat st;
+    return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
+}
+
 const char* detect_iface_type(iface_entry_t *entry) {
-    if (entry->hw_type == ARPHRD_ETHER && !entry->is_wifi) return "ethernet";
+    // 1. Check Hardware Type Flags (Netlink)
+    if (entry->hw_type == ARPHRD_ETHER && !entry->is_wifi && !entry->is_bridge && !entry->is_bond) {
+         // Double check: might be a generic ethernet device that is actually wifi
+         if (sysfs_has_subdir(entry->name, "wireless") || sysfs_has_subdir(entry->name, "phy80211")) {
+             entry->is_wifi = true;
+         }
+         // Double check: bridge
+         else if (sysfs_has_subdir(entry->name, "bridge")) {
+             entry->is_bridge = true;
+         }
+         // Double check: bonding
+         else if (sysfs_has_subdir(entry->name, "bonding")) {
+             entry->is_bond = true;
+         }
+    }
+
     if (entry->hw_type == ARPHRD_LOOPBACK) return "loopback";
     if (entry->hw_type == ARPHRD_TUNNEL || entry->hw_type == ARPHRD_TUNNEL6) return "tun";
-    if (entry->hw_type == ARPHRD_IEEE80211) return "wifi";
+    if (entry->hw_type == ARPHRD_IEEE80211 || entry->is_wifi) return "wifi";
     
-    if (entry->is_wifi) return "wifi";
+    // 2. Check detected flags
+    if (entry->is_bridge) return "bridge";
+    if (entry->is_bond) return "bond";
+
+    // 3. Name-based Fallbacks (Legacy Parity)
     const char *name = entry->name;
     if (strncmp(name, "wl", 2) == 0) return "wifi";
     if (strncmp(name, "et", 2) == 0) return "ethernet";
@@ -190,6 +224,10 @@ const char* detect_iface_type(iface_entry_t *entry) {
     if (strncmp(name, "tun", 3) == 0) return "tun";
     if (strncmp(name, "tap", 3) == 0) return "tap";
     if (strncmp(name, "wg", 2) == 0) return "wireguard";
+    
+    // Default to ethernet if it looks like one
+    if (entry->hw_type == ARPHRD_ETHER) return "ethernet";
+    
     return "unknown";
 }
 
@@ -786,6 +824,23 @@ void get_proxy_config(char* http, char* https, char* no_proxy) {
     fclose(f);
 }
 
+// Phase 2 Fix: Helper for printing escaped JSON strings
+void json_print_string(const char *key, const char *val, bool comma) {
+    if (key) printf("    \"%s\": \"", key);
+    else printf("\""); // Value only (for arrays)
+    
+    for (const char *p = val; *p; p++) {
+        if (*p == '"') printf("\\\"");
+        else if (*p == '\\') printf("\\\\");
+        else if (*p == '\n') printf("\\n");
+        else if (*p == '\r') printf("\\r");
+        else if (*p == '\t') printf("\\t");
+        else if (*p < 32) printf("\\u%04x", *p);
+        else putchar(*p);
+    }
+    printf("\"%s\n", comma ? "," : "");
+}
+
 void print_json_status() {
     printf("{\n  \"%s\": true,\n  \"agent_version\": \"%s\",\n", KEY_SUCCESS, g_agent_version);
     char hostname[256] = DEFAULT_HOSTNAME;
@@ -797,20 +852,21 @@ void print_json_status() {
     char p_http[256] = "", p_https[256] = "", p_no[256] = "";
     get_proxy_config(p_http, p_https, p_no);
     bool first_proxy = true; printf("  \"global_proxy\": {\n");
-    if (strlen(p_http) > 0)  { printf("%s    \"http\": \"%s\"",  first_proxy ? "" : ",\n", p_http);  first_proxy = false; }
-    if (strlen(p_https) > 0) { printf("%s    \"https\": \"%s\"", first_proxy ? "" : ",\n", p_https); first_proxy = false; }
-    if (strlen(p_no) > 0)    { printf("%s    \"noproxy\": \"%s\"",first_proxy ? "" : ",\n", p_no);   first_proxy = false; }
-    if (first_proxy) printf("    \"status\": \"none\"\n"); else printf("\n");
+    if (strlen(p_http) > 0)  { json_print_string("http", p_http, false); printf(","); first_proxy = false; }
+    if (strlen(p_https) > 0) { if(!first_proxy) printf("\n"); json_print_string("https", p_https, false); printf(","); first_proxy = false; }
+    if (strlen(p_no) > 0)    { if(!first_proxy) printf("\n"); json_print_string("noproxy", p_no, false); printf(","); first_proxy = false; }
+    if (first_proxy) printf("    \"status\": \"none\"\n"); else printf("    \"status\": \"active\"\n");
     printf("  },\n  \"interfaces\": {\n");
     bool first_iface = true;
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists || ifaces[i].name[0] == '\0') continue;
         if (!first_iface) printf(",\n");
+        // Phase 2: Use json_print_string to prevent malformed output from untrusted inputs
         printf("    \"%s\": {\n      \"name\": \"%s\",\n      \"state\": \"%s\",\n      \"mtu\": %d,\n      \"type\": \"%s\",\n", ifaces[i].name, ifaces[i].name, ifaces[i].state, ifaces[i].mtu, detect_iface_type(&ifaces[i]));
         if (ifaces[i].mac[0]) printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
-        if (ifaces[i].vendor[0]) printf("      \"vendor\": \"%s\",\n", ifaces[i].vendor);
-        if (ifaces[i].driver[0]) printf("      \"driver\": \"%s\",\n", ifaces[i].driver);
-        if (ifaces[i].bus_info[0]) printf("      \"bus_info\": \"%s\",\n", ifaces[i].bus_info);
+        if (ifaces[i].vendor[0]) json_print_string("vendor", ifaces[i].vendor, true);
+        if (ifaces[i].driver[0]) json_print_string("driver", ifaces[i].driver, true);
+        if (ifaces[i].bus_info[0]) json_print_string("bus_info", ifaces[i].bus_info, true);
         if (ifaces[i].ipv4[0]) printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
         if (ifaces[i].gateway[0]) printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
         if (ifaces[i].metric > 0) printf("      \"metric\": %u,\n", ifaces[i].metric);
@@ -829,7 +885,8 @@ void print_json_status() {
         if (f_speed) { if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1; fclose(f_speed); }
         if (speed_mbps > 0) printf("      \"speed\": %d,\n", speed_mbps);
         if (ifaces[i].is_wifi) {
-            printf("      \"wifi\": {\n        \"ssid\": \"%s\",\n", ifaces[i].ssid);
+            printf("      \"wifi\": {\n");
+            json_print_string("ssid", ifaces[i].ssid, true);
             if (ifaces[i].bssid[0]) printf("        \"bssid\": \"%s\",\n", ifaces[i].bssid); else printf("        \"bssid\": null,\n");
             printf("        \"rssi\": %d,\n        \"frequency\": %u\n      },\n", ifaces[i].signal_dbm, ifaces[i].frequency);
         }
@@ -943,8 +1000,10 @@ void cmd_atomic_write(char *path, char *perm_str) {
     }
     
     // Permissions
-    int mode = strtol(perm_str, NULL, 8);
-    fchmod(fd, mode);
+    if (perm_str) {
+        int mode = strtol(perm_str, NULL, 8);
+        fchmod(fd, mode);
+    }
     
     fsync(fd);
     close(fd);
@@ -966,6 +1025,10 @@ void cmd_is_low_power() {
     printf("%s\n", is_lp ? "true" : "false");
 }
 
+// Global flag variables for argument parsing
+char *g_atomic_path = NULL;
+char *g_perm_str = NULL;
+
 int main(int argc, char *argv[]) {
     load_runtime_config();
     static struct option long_options[] = { 
@@ -979,14 +1042,15 @@ int main(int argc, char *argv[]) {
         {"reload",  no_argument, 0, 'r'}, 
         {"get",     required_argument, 0, 'g'}, 
         {"atomic-write", required_argument, 0, 'W'}, // Phase 1
+        {"perm",    required_argument, 0, 'P'},      // Phase 1
         {"tune", required_argument, 0, 'T'},         // Phase 1
         {0, 0, 0, 0} 
     };
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:T:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:P:T:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--atomic-write <path>  Write stdin to path (requires 2nd arg for perms, parsed manually)\n--tune <profile>  Optimize sysctl\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -995,18 +1059,18 @@ int main(int argc, char *argv[]) {
             case 'r': return dbus_trigger_reload();
             case 'g': cmd_get_value(optarg); return 0;
             case 'T': cmd_tune(optarg); return 0;
-            case 'W': 
-                // Hacky argument parsing for --atomic-write <path> <perms>
-                if (optind < argc) {
-                    cmd_atomic_write(optarg, argv[optind]);
-                    return 0;
-                } else {
-                    fprintf(stderr, "Usage: --atomic-write <path> <perms>\n");
-                    return 1;
-                }
+            case 'W': g_atomic_path = optarg; break;
+            case 'P': g_perm_str = optarg; break;
             default: return 1;
         }
     }
+    
+    // Post-loop handling for atomic write
+    if (g_atomic_path) {
+        cmd_atomic_write(g_atomic_path, g_perm_str);
+        return 0;
+    }
+
     if (optind == 1) { collect_network_state(); print_json_status(); return 0; }
     return 1;
 }
