@@ -248,10 +248,14 @@ run_passive_monitor() {
 
     evaluate_roaming_state "$iface" "false"
 
-    busctl monitor net.connman.iwd --match "member='PropertiesChanged'" | \
-    grep --line-buffered -E "SignalStrength|ConnectedNetwork" | \
+    # Phase 3 Refactor: Direct pipe consumption without grep for lower latency/overhead
+    # Matches specifically on net.connman.iwd.Station to avoid noise
+    busctl monitor net.connman.iwd --match "member='PropertiesChanged',interface='net.connman.iwd.Station'" | \
     while read -r line; do
-        evaluate_roaming_state "$iface" "false"
+        # Lightweight substring check in bash (faster than forking grep)
+        if [[ "$line" == *"SignalStrength"* ]] || [[ "$line" == *"ConnectedNetwork"* ]]; then
+            evaluate_roaming_state "$iface" "false"
+        fi
     done
 }
 

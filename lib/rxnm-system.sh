@@ -7,7 +7,8 @@ cache_service_states() {
     local now
     now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
     
-    local services=("iwd" "systemd-networkd" "avahi-daemon")
+    # Phase 3 Refactor: Added systemd-resolved to batch check
+    local services=("iwd" "systemd-networkd" "systemd-resolved" "avahi-daemon")
     local states
     states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null || echo "inactive")
     
@@ -21,6 +22,7 @@ cache_service_states() {
     
     [ "${SERVICE_STATE_CACHE["iwd"]}" == "active" ] && IWD_ACTIVE=true || IWD_ACTIVE=false
     [ "${SERVICE_STATE_CACHE["systemd-networkd"]}" == "active" ] && NETWORKD_ACTIVE=true || NETWORKD_ACTIVE=false
+    [ "${SERVICE_STATE_CACHE["systemd-resolved"]}" == "active" ] && RESOLVED_ACTIVE=true || RESOLVED_ACTIVE=false
     [ "${SERVICE_STATE_CACHE["avahi-daemon"]}" == "active" ] && AVAHI_ACTIVE=true || AVAHI_ACTIVE=false
 }
 

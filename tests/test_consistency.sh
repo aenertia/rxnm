@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# RXNM PHASE 5 CONSISTENCY VALIDATION (EXPANDED)
+# RXNM PHASE 4.1 CONSISTENCY VALIDATION (STRICT)
 # Compares Agent Output vs Legacy Shell Output
-# Covers: Interfaces, IPs, Gateways, Routes, MTU, MAC, IPv6, WiFi
+# Checks: Interfaces, IPs, Gateways, Routes (strict CIDR), Types (strict none/unknown)
 # ==============================================================================
 
 # Setup Environment
@@ -103,21 +103,31 @@ for iface in $ifaces_agent; do
         log_warn "MTU Divergence: Legacy='$mtu_legacy', Agent='$mtu_agent'"
     fi
 
-    # 5. Interface Type
+    # 5. Interface Type (Strict check for unknown/none)
     type_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].type // \"unknown\"")
     type_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].type // \"unknown\"")
     
+    # Normalization: Map 'none' (legacy networkctl quirk) to 'unknown' (schema standard)
+    [ "$type_legacy" == "none" ] && type_legacy="unknown"
+    [ "$type_agent" == "none" ] && type_agent="unknown"
+
     if [ "$type_legacy" == "$type_agent" ]; then
         log_pass "Type Match: $type_agent"
     else
         log_warn "Type Divergence: Legacy='$type_legacy', Agent='$type_agent'"
     fi
 
-    # 6. Routes (Dest@Gateway)
+    # 6. Routes (Dest@Gateway) - Strict CIDR Check
     # Extract, sort, and normalize for comparison
     routes_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].routes[]? | \"\(.dst)@\(.gw // \"none\")\"" | sort | tr '\n' ',' | sed 's/,$//')
     routes_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].routes[]? | \"\(.dst)@\(.gw // \"none\")\"" | sort | tr '\n' ',' | sed 's/,$//')
     
+    # Phase 7 Verification: Check for unexpected /32 or /128 suffixes
+    if [[ "$routes_agent" == *"/32@"* ]] || [[ "$routes_agent" == *"/128@"* ]]; then
+        log_fail "Route CIDR Violation: Agent output contains implicit host mask (/32 or /128)"
+        echo "Agent Routes: $routes_agent"
+    fi
+
     if [ "$routes_legacy" == "$routes_agent" ]; then
         log_pass "Routes Match"
     else
