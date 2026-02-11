@@ -1,6 +1,6 @@
 [Unit]
 Description=RXNM WiFi Roaming Monitor & Steering Agent
-Documentation=https://github.com/rocknix/rocknix-network-manager
+Documentation=https://codeberg.org/aenertia/rxnm
 After=network-online.target iwd.service
 Wants=network-online.target
 

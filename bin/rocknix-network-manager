@@ -1,29 +1,49 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+
+# -----------------------------------------------------------------------------
+# FILE: rocknix-network-manager
+# PURPOSE: Central Command Dispatcher (CLI Entry Point)
+# ARCHITECTURE: Core / Dispatcher
 #
-# ROCKNIX Network Manager (Modular)
+# This script serves as the primary entry point for the RXNM system. It:
+# 1. Bootstraps the environment (paths, library sourcing).
+# 2. Normalizes user input (aliases, global flags).
+# 3. Dispatches commands to specific logic modules or external plugins.
+#
+# DESIGN NOTE: To minimize startup latency on low-power devices (RK3326),
+# this script employs "Lazy Loading". It only sources the heavy logic libraries
+# (wifi, bluetooth, virt) required for the specific command being executed.
+# -----------------------------------------------------------------------------
 
 # CRITICAL: Verify we are running under Bash, not BusyBox Ash
+# Many string manipulation features used (arrays, regex) are Bash-specific.
 if [ -z "$BASH_VERSION" ]; then
     echo "Error: This script requires bash (busybox ash not supported)" >&2
     exit 1
 fi
 
-# Debug trigger
+# Debug trigger: Allows tracing execution via environment variable
 if [ -n "${RXNM_DEBUG:-}" ]; then
     set -x
 fi
 
 # Ensure no ANSI color codes in output from tools like iwctl
+# We parse these outputs, so escape codes break the regex.
 export TERM=dumb
 
-# Safety options
+# Safety options:
+# -u: Error on unset variables
+# -o pipefail: Pipeline fails if any command fails
+# nullglob: Arrays don't contain literal string if glob fails
 set -euo pipefail
 IFS=$'\n\t'
 shopt -s nullglob
 
 # --- BOOTSTRAP ---
+# Logic: Resolve the physical location of the script to find libraries relative to it.
+# This allows running from a git checkout or a system install transparently.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
   DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
@@ -37,19 +57,20 @@ LIB_DIR="${SCRIPT_DIR}/../lib"
 export LIB_DIR
 export RXNM_LIB_DIR="${LIB_DIR}"
 
+# Fallback: If running from /usr/bin without relative libs, check system path
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
-    # Fallback to system install path if relative path fails
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
     export LIB_DIR
     export RXNM_LIB_DIR="${LIB_DIR}"
 fi
 
+# Sanity Check: Cannot proceed without constants
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
     echo "ERROR: Could not locate library directory." >&2
     exit 1
 fi
 
-# Source Core
+# Source Core: Only the absolute minimum required to parse args and find plugins
 source "${LIB_DIR}/rxnm-constants.sh"
 source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
@@ -63,6 +84,16 @@ CATEGORY=""
 ACTION=""
 
 # --- ARGUMENT PARSING HELPER ---
+
+# Function: expand_alias
+# Description: Matches a partial string input against a list of valid options.
+#              Used to support shortened commands (e.g., 'stat' -> 'status').
+# Arguments:
+#   $1 - The input string to match.
+#   $2... - A list of valid options to match against.
+# Globals: None.
+# Returns:
+#   Strings: The full option name if a unique match is found, otherwise the original input.
 expand_alias() {
     local input="$1"
     local options=("${@:2}")
@@ -74,7 +105,7 @@ expand_alias() {
             return 0
         fi
         if [[ "$opt" == "$input"* ]]; then
-            if [ -n "$match" ]; then return 1; fi # Ambiguous
+            if [ -n "$match" ]; then return 1; fi # Ambiguous match
             match="$opt"
         fi
     done
@@ -82,6 +113,14 @@ expand_alias() {
     [ -n "$match" ] && echo "$match" || echo "$input"
 }
 
+# --- HELP TEXT GENERATORS ---
+
+# Function: print_main_help
+# Description: Outputs the top-level help text, including available categories and global options.
+#              Dynamically lists available plugins.
+# Arguments: None.
+# Globals: None.
+# Returns: stdout (Help text).
 print_main_help() {
     local plugins
     plugins=$(list_plugins)
@@ -126,10 +165,17 @@ Use 'rxnm <category> --help' for specific commands.
 EOF
 }
 
+# Function: print_category_help
+# Description: Outputs detailed help text for a specific command category.
+#              Checks if the category is a plugin and delegates help if so.
+# Arguments:
+#   $1 - The category name (e.g., 'wifi', 'interface').
+# Globals: None.
+# Returns: stdout (Category help text).
 print_category_help() {
     local category="$1"
     
-    # Check if this category is handled by a plugin
+    # Check if this category is handled by a plugin (Extension)
     local plugin_path
     plugin_path=$(find_plugin "$category")
     if [ -n "$plugin_path" ]; then
@@ -307,7 +353,7 @@ EOF
 }
 
 # --- GLOBAL OPTIONS PARSING ---
-# Parse flags that appear before subcommands or anywhere
+# Parse flags that appear before subcommands or anywhere in the chain.
 ARGS=()
 SHOW_HELP="false"
 
@@ -321,6 +367,7 @@ while [[ $# -gt 0 ]]; do
         *) ARGS+=("$1"); shift ;;
     esac
 done
+# Reset positional arguments to the non-flag arguments
 set -- "${ARGS[@]}"
 
 # If help requested at root
@@ -331,10 +378,10 @@ fi
 
 # --- HIERARCHY DISPATCHER ---
 
-# Built-in Categories
+# List of Built-in Categories
 CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
 
-# Determine Category
+# Determine Category from first argument
 RAW_CMD="${1:-status}"
 CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
@@ -377,7 +424,9 @@ else
     shift
 fi
 
-# Load dependencies
+# Load Dependencies (Lazy Loading)
+# Logic: We only source the bash libraries required for the requested category
+# to reduce startup time.
 case "$CATEGORY" in
     wifi) 
         source "${LIB_DIR}/rxnm-wifi.sh" 
@@ -402,7 +451,7 @@ case "$CATEGORY" in
         ;;
 esac
 
-# Check for category help
+# Check for category-specific help
 if [ "$SHOW_HELP" == "true" ]; then
     print_category_help "$CATEGORY"
     exit 0
@@ -416,6 +465,7 @@ case "$CATEGORY" in
         
         ARG_IFACE=""
         ARGS=("$@")
+        # Extract --interface if provided
         for ((i=0; i<${#ARGS[@]}; i++)); do
             if [[ "${ARGS[$i]}" == "--interface" ]]; then
                 ARG_IFACE="${ARGS[$((i+1))]}"

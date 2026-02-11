@@ -1,6 +1,14 @@
-# RXNM (ROCKNIX Network Manager) Bash Completion
-# Supports hierarchical commands, dynamic interface detection, and profile listing
-# Now with Live State Querying via RXNM JSON API
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+
+# -----------------------------------------------------------------------------
+# FILE: rxnm (bash-completion)
+# PURPOSE: Dynamic Tab-Completion for RXNM
+# ARCHITECTURE: Integration / Shell
+#
+# Supports hierarchical commands, dynamic interface detection (via sysfs/cache),
+# profile listing, and live P2P/SSID scanning where appropriate.
+# -----------------------------------------------------------------------------
 
 _rxnm_completion() {
     local cur prev words cword
@@ -86,9 +94,7 @@ _rxnm_completion() {
     # Helper: Get Bluetooth Devices (From DBus/Tool)
     _rxnm_live_bt_devices() {
         # This is speculative/interactive. We try to read recent scan results if available, 
-        # but don't block.
-        # RXNM doesn't cache BT scan results to disk by default, so we rely on BlueZ cache?
-        # For now, return nothing to avoid blocking.
+        # but don't block. For now, return nothing to avoid blocking.
         return
     }
 

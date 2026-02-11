@@ -1,5 +1,14 @@
-# RXNM Hybrid Architecture Makefile
-# Automates SSoT generation and Agent compilation
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+
+# -----------------------------------------------------------------------------
+# FILE: Makefile
+# PURPOSE: Build System for RXNM Agent
+# ARCHITECTURE: Integration / Build
+#
+# Handles compilation of the C Agent (standard and tiny profiles), constant
+# synchronization (SSoT), installation, and test suite execution.
+# -----------------------------------------------------------------------------
 
 CC ?= gcc
 # Standard CFLAGS for development (Debug symbols, safe optimization)

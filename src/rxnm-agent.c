@@ -1,21 +1,23 @@
 /*
- * RXNM Agent - Native Fastpath Component
  * SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+ */
+
+/**
+ * @file rxnm-agent.c
+ * @brief High-Performance Network State Aggregator & Accelerator
+ * @architecture Accelerator / Core
  *
- * Phase 7 Remediation:
- * - Parity Fix: Routes now omit /32 (IPv4) and /128 (IPv6) CIDR suffixes to
- * match standard IP tool output and legacy script behavior.
- * - Parity Fix: IPv6 addresses now respect RT_SCOPE_HOST filtering to hide
- * loopback (::1) addresses, matching legacy script filtering.
+ * RESPONSIBILITIES:
+ * 1. Read-Only State: Queries Kernel Netlink (RTM/Genl) for interface stats.
+ * 2. Atomic Writes: Implements safe config writing (write-tmp-and-rename).
+ * 3. IPC: Talks directly to systemd-networkd via DBus socket to trigger reloads.
+ * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
  *
- * Phase 2 Refactor (Quality Gate):
- * - Added JSON string escaping to prevent parse errors with special chars.
- *
- * Phase 1 Refactor (Hybrid Fastpath):
- * - Added atomic_write capability to reduce shell fork overhead during config gen.
- * - Added native sysctl tuning to remove sysctl binary dependencies.
- * - Added robust interface type detection via sysfs/capabilities.
+ * DESIGN PHILOSOPHY:
+ * - No external dependencies (glibc/musl only).
+ * - Static linking preferred for portability across distros.
+ * - Configuration logic is derived strictly from rxnm_generated.h (SSoT).
  */
 
 #define _GNU_SOURCE
@@ -33,26 +35,23 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-
-/* CRITICAL: Include glibc network headers BEFORE linux kernel headers */
 #include <net/if.h>
 #include <arpa/inet.h>
-
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/genetlink.h>
 #include <linux/if_link.h>
 #include <linux/if_arp.h>
 #include <linux/wireless.h>
-
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
 
+/* Generated SSoT Constants */
 #include "rxnm_generated.h"
 #include "rxnm_dbus_lite.h"
 
-// Fallbacks
+/* --- Fallback Defaults (if generation fails) --- */
 #ifndef RXNM_VERSION
 #define RXNM_VERSION "0.0.0-dev"
 #endif
@@ -72,22 +71,22 @@
 #define RXNM_PROBE_TARGETS_V6 "[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443"
 #endif
 
-// --- GLOBALS & CONFIG ---
+/* Runtime Globals (Populated from Constants/Env) */
 char g_conf_dir[PATH_MAX] = CONF_DIR;
 char g_run_dir[PATH_MAX] = RUN_DIR;
 char g_agent_version[64] = RXNM_VERSION;
 char g_conn_targets_v4[256] = RXNM_PROBE_TARGETS_V4;
 char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
 
+/* --- Internal Limits --- */
 #define BUF_SIZE 32768
 #define MAX_IFACES 64
 #define MAX_IPV6_PER_IFACE 8
 #define MAX_ROUTES_PER_IFACE 32
-
 #define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
 #define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
 
-// NL80211 Constants (Verified Kernel ABI)
+/* --- Netlink/WiFi Constants --- */
 #define NL80211_GENL_NAME           "nl80211"
 #define NL80211_CMD_GET_INTERFACE   5
 #define NL80211_CMD_GET_STATION     17
@@ -101,7 +100,7 @@ char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
 #define NL80211_ATTR_PARSE_MAX      400
 #define NL80211_STA_INFO_SIGNAL     7
 
-// --- DATA STRUCTURES ---
+/* --- Structures --- */
 
 typedef struct {
     char dst[IPV6_CIDR_LEN];
@@ -128,11 +127,13 @@ typedef struct {
     uint64_t rx_bytes;
     uint64_t tx_bytes;
     int speed_mbps;
+    /* Hardware Info (Udev) */
     char vendor[64];
     char model[64];
     char driver[32];
     char bus_info[32];
     uint16_t hw_type;
+    /* Wireless Specifics */
     bool is_wifi;
     bool is_bridge;
     bool is_bond;
@@ -143,10 +144,15 @@ typedef struct {
     bool wifi_connected;
 } iface_entry_t;
 
+/* Global Interface Cache */
 iface_entry_t ifaces[MAX_IFACES];
 
-// --- UTILS ---
+/* --- Utilities --- */
 
+/**
+ * @brief Checks if a file contains a specific string substring.
+ * Used for CPU detection (/proc/cpuinfo).
+ */
 bool file_contains(const char *path, const char *search_term) {
     FILE *f = fopen(path, "r");
     if (!f) return false;
@@ -159,10 +165,15 @@ bool file_contains(const char *path, const char *search_term) {
     return found;
 }
 
+/**
+ * @brief Retrieve or initialize an interface entry by kernel index.
+ */
 iface_entry_t* get_iface(int index) {
+    /* 1. Search existing */
     for (int i = 0; i < MAX_IFACES; i++) {
         if (ifaces[i].exists && ifaces[i].index == index) return &ifaces[i];
     }
+    /* 2. Allocate new */
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists) {
             memset(&ifaces[i], 0, sizeof(iface_entry_t));
@@ -174,11 +185,9 @@ iface_entry_t* get_iface(int index) {
             return &ifaces[i];
         }
     }
-    return NULL;
+    return NULL; // Full
 }
 
-// Check sysfs for specific capabilities to identify interface type
-// This provides robustness for renamed interfaces (e.g. wifi0, mlan0)
 bool sysfs_has_subdir(const char *ifname, const char *subdir) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/sys/class/net/%s/%s", ifname, subdir);
@@ -186,32 +195,28 @@ bool sysfs_has_subdir(const char *ifname, const char *subdir) {
     return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
+/**
+ * @brief Heuristics to determine simplified interface type (wifi, ethernet, bridge).
+ */
 const char* detect_iface_type(iface_entry_t *entry) {
-    // 1. Check Hardware Type Flags (Netlink)
     if (entry->hw_type == ARPHRD_ETHER && !entry->is_wifi && !entry->is_bridge && !entry->is_bond) {
-         // Double check: might be a generic ethernet device that is actually wifi
          if (sysfs_has_subdir(entry->name, "wireless") || sysfs_has_subdir(entry->name, "phy80211")) {
              entry->is_wifi = true;
          }
-         // Double check: bridge
          else if (sysfs_has_subdir(entry->name, "bridge")) {
              entry->is_bridge = true;
          }
-         // Double check: bonding
          else if (sysfs_has_subdir(entry->name, "bonding")) {
              entry->is_bond = true;
          }
     }
-
     if (entry->hw_type == ARPHRD_LOOPBACK) return "loopback";
     if (entry->hw_type == ARPHRD_TUNNEL || entry->hw_type == ARPHRD_TUNNEL6) return "tun";
     if (entry->hw_type == ARPHRD_IEEE80211 || entry->is_wifi) return "wifi";
-    
-    // 2. Check detected flags
     if (entry->is_bridge) return "bridge";
     if (entry->is_bond) return "bond";
-
-    // 3. Name-based Fallbacks (Legacy Parity)
+    
+    // Naming convention fallbacks
     const char *name = entry->name;
     if (strncmp(name, "wl", 2) == 0) return "wifi";
     if (strncmp(name, "et", 2) == 0) return "ethernet";
@@ -224,15 +229,15 @@ const char* detect_iface_type(iface_entry_t *entry) {
     if (strncmp(name, "tun", 3) == 0) return "tun";
     if (strncmp(name, "tap", 3) == 0) return "tap";
     if (strncmp(name, "wg", 2) == 0) return "wireguard";
-    
-    // Default to ethernet if it looks like one
     if (entry->hw_type == ARPHRD_ETHER) return "ethernet";
-    
     return "unknown";
 }
 
+/* --- Configuration Loading --- */
+
 void extract_bash_var(const char *line, const char *key, char *dest, size_t dest_size) {
     char search_pattern[128];
+    // Pattern 1: : "${KEY:=Val}"
     snprintf(search_pattern, sizeof(search_pattern), "${%s:=", key);
     char *p = strstr(line, search_pattern);
     if (p) {
@@ -244,6 +249,7 @@ void extract_bash_var(const char *line, const char *key, char *dest, size_t dest
             if (len < dest_size) { strncpy(dest, p, len); dest[len] = '\0'; return; }
         }
     }
+    // Pattern 2: export KEY=Val
     snprintf(search_pattern, sizeof(search_pattern), "export %s=", key);
     p = strstr(line, search_pattern);
     if (p) {
@@ -258,22 +264,25 @@ void extract_bash_var(const char *line, const char *key, char *dest, size_t dest
     }
 }
 
+/**
+ * @brief Reads runtime config logic from Bash script if headers are stale.
+ * Acts as a runtime fallback for compiled-in constants.
+ */
 void load_runtime_config() {
     char self_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
     if (len == -1) return;
     self_path[len] = '\0';
     
+    // Resolve ../lib/rxnm-constants.sh
     char *last_slash = strrchr(self_path, '/');
     if (!last_slash) return;
     *last_slash = '\0';
-    
     char *bin_parent = strdup(self_path);
     if (!bin_parent) return;
-
     last_slash = strrchr(bin_parent, '/');
     if (last_slash) *last_slash = '\0';
-
+    
     char script_path[PATH_MAX];
     snprintf(script_path, sizeof(script_path), "%s/lib/rxnm-constants.sh", bin_parent);
     
@@ -299,6 +308,8 @@ void load_runtime_config() {
     free(bin_parent);
 }
 
+/* --- Udev Enrichment --- */
+
 static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src) {
     if (!src || !dest) return;
     size_t len = strlen(src);
@@ -310,14 +321,13 @@ static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src)
 
 void udev_enrich(iface_entry_t *entry) {
     char path[PATH_MAX];
+    // Check udev database in /run/udev/data
     snprintf(path, sizeof(path), "/run/udev/data/n%d", entry->index);
-    
     FILE *f = fopen(path, "r");
     if (!f) {
         snprintf(path, sizeof(path), "/run/udev/data/+net:%s", entry->name);
         f = fopen(path, "r");
     }
-    
     if (!f) return;
     
     char line[512];
@@ -335,7 +345,8 @@ void udev_enrich(iface_entry_t *entry) {
     fclose(f);
 }
 
-// Helper: Append DBus string to buffer
+/* --- DBus Implementation (Systemd Reload) --- */
+
 void append_string(uint8_t **ptr, const char *str) {
     uint32_t len = strlen(str);
     *((uint32_t *)*ptr) = len;
@@ -344,6 +355,10 @@ void append_string(uint8_t **ptr, const char *str) {
     *ptr += len + 1;
 }
 
+/**
+ * @brief Triggers 'Reload' on org.freedesktop.network1 via DBus socket.
+ * This is 10x faster than calling 'networkctl reload' (forking).
+ */
 int dbus_trigger_reload() {
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) return -1;
@@ -358,17 +373,18 @@ int dbus_trigger_reload() {
         return -2;
     }
     
+    /* SASL Auth Phase */
     char uid_str[16];
     snprintf(uid_str, sizeof(uid_str), "%u", getuid());
     char auth_buf[128];
     char uid_hex[33];
     for (int i=0; uid_str[i]; i++) snprintf(uid_hex+(i*2), 3, "%02x", uid_str[i]);
-    
     auth_buf[0] = 0;
+    
     int len = snprintf(auth_buf + 1, sizeof(auth_buf) - 1, "%s%s\r\n", SASL_AUTH_EXTERNAL, uid_hex);
     if (len < 0) { close(sock); return -4; }
-
-    send(sock, auth_buf, len + 1, 0);
+    
+    send(sock, auth_buf, len + 1, 0); // Include leading zero for auth start
     
     char resp[512];
     int n = recv(sock, resp, sizeof(resp)-1, 0);
@@ -376,6 +392,7 @@ int dbus_trigger_reload() {
     
     send(sock, SASL_BEGIN, strlen(SASL_BEGIN), 0);
     
+    /* Construct Method Call */
     uint8_t msg[1024];
     memset(msg, 0, sizeof(msg));
     
@@ -387,10 +404,12 @@ int dbus_trigger_reload() {
     hdr->serial = 1;
     
     uint8_t *ptr = msg + sizeof(dbus_header_t);
+    
+    /* Append Fields */
     *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
     append_string(&ptr, "/org/freedesktop/network1");
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
-
+    
     *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
     append_string(&ptr, "org.freedesktop.network1");
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
@@ -403,8 +422,9 @@ int dbus_trigger_reload() {
     append_string(&ptr, "Reload");
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
+    /* Finalize Header */
     hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0;
+    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0; // Padding to 8-byte boundary for body
     hdr->body_len = 0;
     
     send(sock, msg, (ptr - msg), 0);
@@ -412,14 +432,19 @@ int dbus_trigger_reload() {
     return 0;
 }
 
+/* --- Netlink Implementation --- */
+
 int open_netlink_rt() {
     int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
     if (sock < 0) return -1;
+    
     struct sockaddr_nl addr;
     memset(&addr, 0, sizeof(addr));
     addr.nl_family = AF_NETLINK;
+    
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(sock); return -1; }
     return sock;
 }
@@ -432,51 +457,59 @@ void parse_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len) {
     }
 }
 
+/* RTM_NEWLINK Parser */
 void process_link_msg(struct nlmsghdr *nh) {
     struct ifinfomsg *ifi = NLMSG_DATA(nh);
     struct rtattr *tb[IFLA_MAX + 1];
     parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifi)));
+    
     iface_entry_t *entry = get_iface(ifi->ifi_index);
     if (!entry) return;
-
+    
     entry->hw_type = ifi->ifi_type;
     if (tb[IFLA_IFNAME]) strncpy(entry->name, (char *)RTA_DATA(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
+    
     if (tb[IFLA_ADDRESS]) {
         unsigned char *mac = (unsigned char *)RTA_DATA(tb[IFLA_ADDRESS]);
-        snprintf(entry->mac, sizeof(entry->mac), "%02x:%02x:%02x:%02x:%02x:%02x", 
+        snprintf(entry->mac, sizeof(entry->mac), "%02x:%02x:%02x:%02x:%02x:%02x",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
+    
     if (tb[IFLA_MTU]) entry->mtu = *(unsigned int *)RTA_DATA(tb[IFLA_MTU]);
     if (tb[IFLA_MASTER]) entry->master_index = *(int *)RTA_DATA(tb[IFLA_MASTER]);
     
     if (ifi->ifi_type == ARPHRD_IEEE80211 || ifi->ifi_type == ARPHRD_IEEE80211_RADIOTAP ||
         strncmp(entry->name, "wl", 2) == 0) entry->is_wifi = true;
-
+        
     if (tb[IFLA_STATS64]) {
         struct rtnl_link_stats64 *stats = (struct rtnl_link_stats64 *)RTA_DATA(tb[IFLA_STATS64]);
         entry->rx_bytes = stats->rx_bytes;
         entry->tx_bytes = stats->tx_bytes;
     }
-
+    
+    /* Operational State Translation */
     if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
     else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
     else strcpy(entry->state, "off");
-
+    
     if (tb[IFLA_MASTER]) strcpy(entry->state, "enslaved");
-
+    
     udev_enrich(entry);
 }
 
+/* RTM_NEWADDR Parser */
 void process_addr_msg(struct nlmsghdr *nh) {
     struct ifaddrmsg *ifa = NLMSG_DATA(nh);
     struct rtattr *tb[IFA_MAX + 1];
     parse_rtattr(tb, IFA_MAX, IFA_RTA(ifa), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
+    
     iface_entry_t *entry = get_iface(ifa->ifa_index);
     if (!entry) return;
-
+    
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         if (ifa->ifa_family == AF_INET) {
+            /* Prefer global scope addresses */
             if (entry->ipv4[0] == '\0' && ifa->ifa_scope < RT_SCOPE_HOST) {
                 char ipv4_buf[INET_ADDRSTRLEN];
                 if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
@@ -484,8 +517,7 @@ void process_addr_msg(struct nlmsghdr *nh) {
                 }
             }
         } else if (ifa->ifa_family == AF_INET6) {
-            // Updated Scope Check to match Legacy Script behavior
-            if (ifa->ifa_scope < RT_SCOPE_HOST) {
+            if (ifa->ifa_scope < RT_SCOPE_HOST) { // Ignore link-local for brevity in summary
                 char ipv6_buf[INET6_ADDRSTRLEN];
                 if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
                     if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
@@ -498,24 +530,36 @@ void process_addr_msg(struct nlmsghdr *nh) {
     }
 }
 
+/* RTM_NEWROUTE Parser */
 void process_route_msg(struct nlmsghdr *nh) {
     struct rtmsg *rt = NLMSG_DATA(nh);
     struct rtattr *tb[RTA_MAX + 1];
+    
+    /* Only care about main table */
     if (rt->rtm_table != RT_TABLE_MAIN) return;
+    
     parse_rtattr(tb, RTA_MAX, RTM_RTA(rt), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*rt)));
+    
     if (!tb[RTA_OIF]) return;
     int oif = *(int *)RTA_DATA(tb[RTA_OIF]);
+    
     iface_entry_t *entry = get_iface(oif);
     if (!entry) return;
+    
     if (entry->route_count >= MAX_ROUTES_PER_IFACE) return;
+    
     route_entry_t *route = &entry->routes[entry->route_count];
     memset(route, 0, sizeof(route_entry_t));
+    
     if (tb[RTA_PRIORITY]) route->metric = *(uint32_t *)RTA_DATA(tb[RTA_PRIORITY]);
+    
     if (tb[RTA_GATEWAY]) {
         void *gw_ptr = RTA_DATA(tb[RTA_GATEWAY]);
         if (rt->rtm_family == AF_INET) inet_ntop(AF_INET, gw_ptr, route->gw, INET_ADDRSTRLEN);
         else if (rt->rtm_family == AF_INET6) inet_ntop(AF_INET6, gw_ptr, route->gw, INET6_ADDRSTRLEN);
     }
+    
+    /* Default Gateway Check */
     if (rt->rtm_dst_len == 0) {
         strcpy(route->dst, "default");
         route->is_default = true;
@@ -526,7 +570,6 @@ void process_route_msg(struct nlmsghdr *nh) {
     } else if (tb[RTA_DST]) {
         void *dst_ptr = RTA_DATA(tb[RTA_DST]);
         char tmp_buf[INET6_ADDRSTRLEN];
-        // Updated Route Formatting to omit implicit CIDR /32 or /128
         if (rt->rtm_family == AF_INET) {
             if (inet_ntop(AF_INET, dst_ptr, tmp_buf, sizeof(tmp_buf))) {
                 if (rt->rtm_dst_len == 32) snprintf(route->dst, sizeof(route->dst), "%s", tmp_buf);
@@ -549,7 +592,7 @@ void send_dump_request(int sock, int type) {
     req.nlh.nlmsg_type = type;
     req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
     req.nlh.nlmsg_seq = time(NULL);
-    req.rtg.rtgen_family = AF_UNSPEC; 
+    req.rtg.rtgen_family = AF_UNSPEC;
     send(sock, &req, req.nlh.nlmsg_len, 0);
 }
 
@@ -567,6 +610,8 @@ void read_rtnetlink_response(int sock) {
         }
     }
 }
+
+/* --- Generic Netlink (nl80211) Implementation --- */
 
 int open_netlink_genl() {
     int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
@@ -590,10 +635,11 @@ int get_genl_family_id(int sock, const char *family_name) {
     strcpy(RTA_DATA(rta), family_name);
     req.n.nlmsg_len += rta->rta_len;
     send(sock, &req, req.n.nlmsg_len, 0);
-
+    
     char buf[BUF_SIZE];
     int len = recv(sock, buf, sizeof(buf), 0);
     if (len < 0) return -1;
+    
     struct nlmsghdr *nh = (struct nlmsghdr *)buf;
     if (NLMSG_OK(nh, len) && nh->nlmsg_type != NLMSG_ERROR) {
         struct genlmsghdr *gh = NLMSG_DATA(nh);
@@ -604,7 +650,6 @@ int get_genl_family_id(int sock, const char *family_name) {
     return -1;
 }
 
-// Helper to add Netlink attribute
 void add_nl_attr(struct nlmsghdr *n, int type, const void *data, int len) {
     int alen = RTA_LENGTH(len);
     struct rtattr *rta = (struct rtattr *)((char *)n + n->nlmsg_len);
@@ -618,13 +663,14 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     struct genlmsghdr *gh = NLMSG_DATA(nh);
     struct rtattr *tb[NL80211_ATTR_PARSE_MAX + 1];
     parse_rtattr(tb, NL80211_ATTR_PARSE_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
-
+    
     if (!tb[NL80211_ATTR_IFINDEX]) return;
     int ifindex = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
+    
     iface_entry_t *entry = get_iface(ifindex);
     if (!entry) return;
     entry->is_wifi = true;
-
+    
     if (cmd == NL80211_CMD_GET_INTERFACE) {
         if (tb[NL80211_ATTR_SSID]) {
             char *ssid_data = (char *)RTA_DATA(tb[NL80211_ATTR_SSID]);
@@ -636,7 +682,6 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
         }
         if (tb[NL80211_ATTR_WIPHY_FREQ]) entry->frequency = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY_FREQ]);
     } else if (cmd == NL80211_CMD_GET_STATION) {
-        // Correctly capture BSSID from Station info (Peer MAC)
         if (tb[NL80211_ATTR_MAC]) {
             unsigned char *bssid_bytes = (unsigned char *)RTA_DATA(tb[NL80211_ATTR_MAC]);
             snprintf(entry->bssid, sizeof(entry->bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -657,12 +702,16 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
 
 void sysfs_collect_bssid_fallback(iface_entry_t *entry) {
     if (!entry->is_wifi || entry->name[0] == '\0') return;
+    /* Only if we haven't got it via netlink */
     if (entry->bssid[0] != '\0' && strcmp(entry->bssid, "00:00:00:00:00:00") != 0) return;
+    
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) return;
+    
     struct iwreq iwr;
     memset(&iwr, 0, sizeof(iwr));
     snprintf(iwr.ifr_name, sizeof(iwr.ifr_name), "%s", entry->name);
+    
     if (ioctl(sock, SIOCGIWAP, &iwr) == 0) {
         struct sockaddr *sa = &iwr.u.ap_addr;
         if (sa->sa_family == ARPHRD_ETHER) {
@@ -676,17 +725,18 @@ void sysfs_collect_bssid_fallback(iface_entry_t *entry) {
 void collect_wifi_state() {
     int sock = open_netlink_genl();
     if (sock < 0) return;
+    
     int fid = get_genl_family_id(sock, NL80211_GENL_NAME);
     if (fid <= 0) { close(sock); return; }
-
-    // Step 1: Dump all interfaces to find WiFi ones
+    
+    /* Request Interface Info */
     struct { struct nlmsghdr n; struct genlmsghdr g; char buf[4]; } req = {
         .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid, .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP,
         .g.cmd = NL80211_CMD_GET_INTERFACE, .g.version = 1
     };
     send(sock, &req, req.n.nlmsg_len, 0);
     
-    char buf[BUF_SIZE]; 
+    char buf[BUF_SIZE];
     int len;
     while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
         struct nlmsghdr *nh = (struct nlmsghdr *)buf;
@@ -695,25 +745,20 @@ void collect_wifi_state() {
             else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto step2;
         }
     }
-
+    
 step2:
-    // Step 2: Iterate WiFi interfaces and dump stations PER INTERFACE
-    // Targeted dumps are required by many drivers/kernels to return station data
+    /* Request Station Info for each WiFi Interface */
     for (int i = 0; i < MAX_IFACES; i++) {
         if (ifaces[i].exists && ifaces[i].is_wifi) {
-            // Reconstruct request for GET_STATION with specific IFINDEX
             struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req = {
-                .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid, 
+                .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid,
                 .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .n.nlmsg_seq = time(NULL) + i,
                 .g.cmd = NL80211_CMD_GET_STATION, .g.version = 1
             };
-            
-            // Append NL80211_ATTR_IFINDEX
             uint32_t idx = ifaces[i].index;
             add_nl_attr(&sta_req.n, NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
             
             send(sock, &sta_req, sta_req.n.nlmsg_len, 0);
-            
             while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
                 struct nlmsghdr *nh = (struct nlmsghdr *)buf;
                 for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
@@ -724,8 +769,9 @@ step2:
             next_iface:;
         }
     }
-
     close(sock);
+    
+    /* Fallback for drivers that don't support NL80211 station dump (e.g., some realtek) */
     for (int i = 0; i < MAX_IFACES; i++) if (ifaces[i].exists && ifaces[i].is_wifi) sysfs_collect_bssid_fallback(&ifaces[i]);
 }
 
@@ -740,11 +786,15 @@ void collect_network_state() {
     collect_wifi_state();
 }
 
+/* --- Connectivity Check --- */
+
 bool tcp_probe(const char *ip_str, int port, int family) {
     int sock = socket(family, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (sock < 0) return false;
+    
     struct timeval timeout = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    
     int res = -1;
     if (family == AF_INET) {
         struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
@@ -757,6 +807,7 @@ bool tcp_probe(const char *ip_str, int port, int family) {
         inet_pton(AF_INET6, ip_str, &addr.sin6_addr);
         res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     }
+    
     bool success = false;
     if (res == 0) success = true;
     else if (errno == EINPROGRESS) {
@@ -776,8 +827,8 @@ void parse_target(char *token, char *ip, size_t ip_size, int *port) {
         *colon = '\0';
         *port = atoi(colon + 1);
         if (token[0] == '[' && token[strlen(token)-1] == ']') {
-            token[strlen(token)-1] = '\0'; 
-            strncpy(ip, token + 1, ip_size - 1); 
+            token[strlen(token)-1] = '\0';
+            strncpy(ip, token + 1, ip_size - 1);
         } else {
             strncpy(ip, token, ip_size - 1);
         }
@@ -787,6 +838,8 @@ void parse_target(char *token, char *ip, size_t ip_size, int *port) {
 
 void cmd_check_internet() {
     bool v4 = false, v6 = false;
+    
+    /* Check IPv4 */
     char list_v4[256]; strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4) - 1); list_v4[sizeof(list_v4)-1] = '\0';
     char *token_v4, *saveptr_v4; token_v4 = strtok_r(list_v4, " ", &saveptr_v4);
     while (token_v4 != NULL) {
@@ -795,6 +848,8 @@ void cmd_check_internet() {
         if (tcp_probe(ip, port, AF_INET)) { v4 = true; break; }
         token_v4 = strtok_r(NULL, " ", &saveptr_v4);
     }
+    
+    /* Check IPv6 */
     char list_v6[512]; strncpy(list_v6, g_conn_targets_v6, sizeof(list_v6) - 1); list_v6[sizeof(list_v6)-1] = '\0';
     char *token_v6, *saveptr_v6; token_v6 = strtok_r(list_v6, " ", &saveptr_v6);
     while (token_v6 != NULL) {
@@ -803,11 +858,14 @@ void cmd_check_internet() {
         if (tcp_probe(ip, port, AF_INET6)) { v6 = true; break; }
         token_v6 = strtok_r(NULL, " ", &saveptr_v6);
     }
+    
     printf("{\n  \"%s\": true,\n  \"connected\": %s,\n  \"ipv4\": %s,\n  \"ipv6\": %s\n}\n", KEY_SUCCESS, (v4 || v6) ? "true" : "false", v4 ? "true" : "false", v6 ? "true" : "false");
 }
 
+/* --- JSON Formatting --- */
+
 void get_proxy_config(char* http, char* https, char* no_proxy) {
-    char path[PATH_MAX + 128]; // Larger buffer to prevent format-truncation warning
+    char path[PATH_MAX + 128];
     snprintf(path, sizeof(path), "%s/proxy.conf", g_conf_dir);
     FILE *f = fopen(path, "r"); if (!f) return;
     char line[1024];
@@ -817,6 +875,7 @@ void get_proxy_config(char* http, char* https, char* no_proxy) {
         if (val_start[0] == '"' || val_start[0] == '\'') val_start++;
         char *val_end = val_start + strlen(val_start) - 1;
         if (*val_end == '"' || *val_end == '\'') *val_end = 0;
+        
         if (strncmp(line, "http_proxy", 10) == 0 || strncmp(line, "HTTP_PROXY", 10) == 0) { strncpy(http, val_start, 255); http[255] = '\0'; }
         else if (strncmp(line, "https_proxy", 11) == 0 || strncmp(line, "HTTPS_PROXY", 11) == 0) { strncpy(https, val_start, 255); https[255] = '\0'; }
         else if (strncmp(line, "no_proxy", 8) == 0 || strncmp(line, "NO_PROXY", 8) == 0) { strncpy(no_proxy, val_start, 255); no_proxy[255] = '\0'; }
@@ -824,11 +883,9 @@ void get_proxy_config(char* http, char* https, char* no_proxy) {
     fclose(f);
 }
 
-// Phase 2 Fix: Helper for printing escaped JSON strings
 void json_print_string(const char *key, const char *val, bool comma) {
     if (key) printf("    \"%s\": \"", key);
-    else printf("\""); // Value only (for arrays)
-    
+    else printf("\"");
     for (const char *p = val; *p; p++) {
         if (*p == '"') printf("\\\"");
         else if (*p == '\\') printf("\\\\");
@@ -843,12 +900,14 @@ void json_print_string(const char *key, const char *val, bool comma) {
 
 void print_json_status() {
     printf("{\n  \"%s\": true,\n  \"agent_version\": \"%s\",\n", KEY_SUCCESS, g_agent_version);
+    
     char hostname[256] = DEFAULT_HOSTNAME;
     if (gethostname(hostname, sizeof(hostname)) != 0) {
         FILE *f = fopen("/etc/hostname", "r");
         if (f) { if (fgets(hostname, sizeof(hostname), f)) hostname[strcspn(hostname, "\n")] = 0; fclose(f); }
     }
     printf("  \"hostname\": \"%s\",\n", hostname);
+    
     char p_http[256] = "", p_https[256] = "", p_no[256] = "";
     get_proxy_config(p_http, p_https, p_no);
     bool first_proxy = true; printf("  \"global_proxy\": {\n");
@@ -857,19 +916,24 @@ void print_json_status() {
     if (strlen(p_no) > 0)    { if(!first_proxy) printf("\n"); json_print_string("noproxy", p_no, false); printf(","); first_proxy = false; }
     if (first_proxy) printf("    \"status\": \"none\"\n"); else printf("    \"status\": \"active\"\n");
     printf("  },\n  \"interfaces\": {\n");
+    
     bool first_iface = true;
     for (int i = 0; i < MAX_IFACES; i++) {
         if (!ifaces[i].exists || ifaces[i].name[0] == '\0') continue;
         if (!first_iface) printf(",\n");
-        // Phase 2: Use json_print_string to prevent malformed output from untrusted inputs
-        printf("    \"%s\": {\n      \"name\": \"%s\",\n      \"state\": \"%s\",\n      \"mtu\": %d,\n      \"type\": \"%s\",\n", ifaces[i].name, ifaces[i].name, ifaces[i].state, ifaces[i].mtu, detect_iface_type(&ifaces[i]));
+        
+        printf("    \"%s\": {\n      \"name\": \"%s\",\n      \"state\": \"%s\",\n      \"mtu\": %d,\n      \"type\": \"%s\",\n", 
+               ifaces[i].name, ifaces[i].name, ifaces[i].state, ifaces[i].mtu, detect_iface_type(&ifaces[i]));
+        
         if (ifaces[i].mac[0]) printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
         if (ifaces[i].vendor[0]) json_print_string("vendor", ifaces[i].vendor, true);
         if (ifaces[i].driver[0]) json_print_string("driver", ifaces[i].driver, true);
         if (ifaces[i].bus_info[0]) json_print_string("bus_info", ifaces[i].bus_info, true);
+        
         if (ifaces[i].ipv4[0]) printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
         if (ifaces[i].gateway[0]) printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
         if (ifaces[i].metric > 0) printf("      \"metric\": %u,\n", ifaces[i].metric);
+        
         printf("      \"ipv6\": [");
         for(int j=0; j<ifaces[i].ipv6_count; j++) printf("\"%s\"%s", ifaces[i].ipv6[j], (j < ifaces[i].ipv6_count - 1) ? ", " : "");
         printf("],\n      \"routes\": [");
@@ -880,16 +944,19 @@ void print_json_status() {
             printf(" }%s", (k < ifaces[i].route_count - 1) ? "," : "");
         }
         printf("%s],\n      \"stats\": {\n        \"rx_bytes\": %llu,\n        \"tx_bytes\": %llu\n      },\n", ifaces[i].route_count > 0 ? "\n      " : "", (unsigned long long)ifaces[i].rx_bytes, (unsigned long long)ifaces[i].tx_bytes);
+        
         int speed_mbps = -1; char speed_path[256]; snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", ifaces[i].name);
         FILE *f_speed = fopen(speed_path, "r");
         if (f_speed) { if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1; fclose(f_speed); }
         if (speed_mbps > 0) printf("      \"speed\": %d,\n", speed_mbps);
+        
         if (ifaces[i].is_wifi) {
             printf("      \"wifi\": {\n");
             json_print_string("ssid", ifaces[i].ssid, true);
             if (ifaces[i].bssid[0]) printf("        \"bssid\": \"%s\",\n", ifaces[i].bssid); else printf("        \"bssid\": null,\n");
             printf("        \"rssi\": %d,\n        \"frequency\": %u\n      },\n", ifaces[i].signal_dbm, ifaces[i].frequency);
         }
+        
         bool is_connected = (strcmp(ifaces[i].state, "routable") == 0 || strcmp(ifaces[i].state, "enslaved") == 0 || strcmp(ifaces[i].state, "online") == 0 || strcmp(ifaces[i].state, "up") == 0);
         printf("      \"connected\": %s\n    }", is_connected ? "true" : "false");
         first_iface = false;
@@ -900,13 +967,18 @@ void print_json_status() {
 void cmd_get_value(char *key) {
     collect_network_state();
     char *segment = strtok(key, ".");
+    
     if (segment && strcmp(segment, "hostname") == 0) { char hostname[256] = DEFAULT_HOSTNAME; gethostname(hostname, sizeof(hostname)); printf("%s\n", hostname); return; }
+    
     if (!segment || strcmp(segment, "interfaces") != 0) return;
     char *ifname = strtok(NULL, "."); if (!ifname) return;
+    
     iface_entry_t *iface = NULL;
     for (int i = 0; i < MAX_IFACES; i++) { if (ifaces[i].exists && strcmp(ifaces[i].name, ifname) == 0) { iface = &ifaces[i]; break; } }
     if (!iface) return;
+    
     char *field = strtok(NULL, "."); if (!field) return;
+    
     if (strcmp(field, "ip") == 0) printf("%s\n", iface->ipv4);
     else if (strcmp(field, "mac") == 0) printf("%s\n", iface->mac);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
@@ -924,8 +996,6 @@ void cmd_get_value(char *key) {
     }
 }
 
-// --- PHASE 1 ADDITIONS: Native Sysctl & Atomic Write ---
-
 void write_sysctl(const char *path, const char *value) {
     FILE *f = fopen(path, "w");
     if (f) {
@@ -938,35 +1008,36 @@ void cmd_tune(char *profile) {
     write_sysctl("/proc/sys/net/netfilter/nf_conntrack_max", "16384");
     write_sysctl("/proc/sys/net/ipv4/tcp_fastopen", "3");
     write_sysctl("/proc/sys/net/ipv4/tcp_keepalive_time", "300");
-
+    
     if (access("/proc/sys/net/bridge", F_OK) == 0) {
         write_sysctl("/proc/sys/net/bridge/bridge-nf-call-iptables", "0");
         write_sysctl("/proc/sys/net/bridge/bridge-nf-call-ip6tables", "0");
         write_sysctl("/proc/sys/net/bridge/bridge-nf-call-arptables", "0");
     }
-
+    
     if (profile && strcmp(profile, "host") == 0) {
         write_sysctl("/proc/sys/net/ipv4/ip_forward", "1");
         write_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", "1");
         write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1");
         write_sysctl("/proc/sys/net/ipv4/ip_local_port_range", "1024 65535");
     } else {
-        // Default client tuning for forwarding
         write_sysctl("/proc/sys/net/ipv4/ip_forward", "1");
         write_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", "1");
         write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "1");
     }
+    
     printf("{\"success\": true, \"action\": \"tune\", \"profile\": \"%s\"}\n", profile ? profile : "client");
 }
 
-// Atomic Write
-// Reads from stdin
+/**
+ * @brief Atomically writes stdin to a file.
+ * Implementation: Writes to ${path}.tmp.${pid}, then fsyncs and renames.
+ */
 void cmd_atomic_write(char *path, char *perm_str) {
-    // Read stdin
-    char buf[65536]; // 64KB limit for config files
+    char buf[65536];
     size_t len = fread(buf, 1, sizeof(buf), stdin);
     
-    // Check existing
+    /* Optimization: Don't write if content is identical (reduce flash wear) */
     bool changed = true;
     FILE *f = fopen(path, "r");
     if (f) {
@@ -979,8 +1050,7 @@ void cmd_atomic_write(char *path, char *perm_str) {
     }
     
     if (!changed) {
-        // Idempotency: no change
-        return; 
+        return;
     }
     
     char tmp_path[PATH_MAX];
@@ -999,7 +1069,6 @@ void cmd_atomic_write(char *path, char *perm_str) {
         exit(1);
     }
     
-    // Permissions
     if (perm_str) {
         int mode = strtol(perm_str, NULL, 8);
         fchmod(fd, mode);
@@ -1020,32 +1089,43 @@ void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
 
 void cmd_is_low_power() {
-    const char *socs[] = LOW_POWER_SOCS; bool is_lp = false;
-    for (int i = 0; socs[i] != NULL; i++) if (file_contains("/proc/cpuinfo", socs[i])) { is_lp = true; break; }
+    const char *socs[] = LOW_POWER_SOCS; // Defined in generated header
+    bool is_lp = false;
+    
+    // Check if LOW_POWER_SOCS is defined/valid
+    if (socs[0] != NULL) {
+        for (int i = 0; socs[i] != NULL; i++) {
+            if (file_contains("/proc/cpuinfo", socs[i])) { 
+                is_lp = true; 
+                break; 
+            }
+        }
+    }
     printf("%s\n", is_lp ? "true" : "false");
 }
 
-// Global flag variables for argument parsing
 char *g_atomic_path = NULL;
 char *g_perm_str = NULL;
 
 int main(int argc, char *argv[]) {
     load_runtime_config();
-    static struct option long_options[] = { 
-        {"version", no_argument, 0, 'v'}, 
-        {"help", no_argument, 0, 'h'}, 
-        {"health",  no_argument, 0, 'H'}, 
-        {"time",    no_argument, 0, 't'}, 
-        {"is-low-power", no_argument, 0, 'L'}, 
-        {"dump",    no_argument, 0, 'd'}, 
-        {"check-internet", no_argument, 0, 'c'}, 
-        {"reload",  no_argument, 0, 'r'}, 
-        {"get",     required_argument, 0, 'g'}, 
-        {"atomic-write", required_argument, 0, 'W'}, // Phase 1
-        {"perm",    required_argument, 0, 'P'},      // Phase 1
-        {"tune", required_argument, 0, 'T'},         // Phase 1
-        {0, 0, 0, 0} 
+    
+    static struct option long_options[] = {
+        {"version", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},
+        {"health",  no_argument, 0, 'H'},
+        {"time",    no_argument, 0, 't'},
+        {"is-low-power", no_argument, 0, 'L'},
+        {"dump",    no_argument, 0, 'd'},
+        {"check-internet", no_argument, 0, 'c'},
+        {"reload",  no_argument, 0, 'r'},
+        {"get",     required_argument, 0, 'g'},
+        {"atomic-write", required_argument, 0, 'W'},
+        {"perm",    required_argument, 0, 'P'},
+        {"tune", required_argument, 0, 'T'},
+        {0, 0, 0, 0}
     };
+    
     int opt, option_index = 0;
     while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:P:T:", long_options, &option_index)) != -1) {
         switch (opt) {
@@ -1065,12 +1145,14 @@ int main(int argc, char *argv[]) {
         }
     }
     
-    // Post-loop handling for atomic write
+    /* Handle atomic write logic (piped input) */
     if (g_atomic_path) {
         cmd_atomic_write(g_atomic_path, g_perm_str);
         return 0;
     }
-
+    
+    /* Default Action: Dump status if run with args but none matched */
     if (optind == 1) { collect_network_state(); print_json_status(); return 0; }
+    
     return 1;
 }

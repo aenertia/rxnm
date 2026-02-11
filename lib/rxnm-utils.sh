@@ -1,33 +1,38 @@
-# ==============================================================================
-# VALIDATION & HELPER FUNCTIONS
-# ==============================================================================
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
-# --- CACHING & OPTIMIZATION HELPERS ---
+# -----------------------------------------------------------------------------
+# FILE: rxnm-utils.sh
+# PURPOSE: Standard Library for RXNM
+# ARCHITECTURE: Foundation / Utility
+#
+# Contains reusable functions for I/O, locking, validation, and JSON formatting.
+# -----------------------------------------------------------------------------
+
+# --- System Utils ---
+
+# Description: Caches sysfs reads to reduce I/O overhead in tight loops.
+# Arguments: $1 = Interface Name
+# Returns: String containing operstate:address:mtu
 declare -A _sysfs_cache
-
-# Optimization: Batch read sysfs attributes to reduce forks/IO overhead
-# Returns: operstate:address:mtu
 get_iface_sysfs() {
     local iface=$1
     [ -n "${_sysfs_cache[$iface]}" ] && echo "${_sysfs_cache[$iface]}" && return
-    
     local data=""
     if [ -d "/sys/class/net/$iface" ]; then
-        # Read multiple attributes in one fork using paste
         data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
     fi
     _sysfs_cache[$iface]="$data"
     echo "$data"
 }
 
+# Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
-    # Remove temporary files safely
     local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
     if [ ${#temp_files[@]} -gt 0 ]; then
         rm -f "${temp_files[@]}" 2>/dev/null
     fi
-    
-    # Remove PID file if we own the global lock
+    # Release global lock if owned by this process
     if [ -f "$GLOBAL_PID_FILE" ]; then
         local pid
         pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
@@ -35,16 +40,13 @@ cleanup() {
             rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
         fi
     fi
-
-    # Clean any interface locks owned by this PID
+    # Attempt to clean up stale sub-locks in RUN_DIR
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
-        # Check if fuser is available, otherwise just try to clean known locks
         if command -v fuser >/dev/null; then
             find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while read -r lock; do
                 if [ -f "$lock" ]; then
                     local lock_pid
                     lock_pid=$(fuser "$lock" 2>/dev/null | awk '{print $1}')
-                    # If no process holds it, or we hold it, remove it
                     if [ -z "$lock_pid" ] || [ "$lock_pid" == "$$" ]; then
                         rm -f "$lock" 2>/dev/null
                     fi
@@ -52,22 +54,23 @@ cleanup() {
             done
         fi
     fi
-    
     if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
         rm -rf "$TMPDIR" 2>/dev/null
     fi
 }
 
-# --- LOCKING MECHANISM ---
+# --- Locking Mechanisms ---
 
+# Description: Acquires the global singleton lock for the RXNM process.
+# Arguments: $1 = Timeout (seconds)
+# Returns: 0 on success, 1 on failure.
 acquire_global_lock() {
     local timeout="${1:-5}"
-    
-    # Ensure RUN_DIR exists before locking
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
-
     exec 200>"$GLOBAL_LOCK_FILE"
+    
     if ! flock -n 200; then
+        # Lock exists, check if stale
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
             old_pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
@@ -88,62 +91,62 @@ acquire_global_lock() {
             return 1
         fi
     fi
-    
     echo $$ > "$GLOBAL_PID_FILE"
     trap cleanup EXIT INT TERM
     return 0
 }
 
-# Fixed: Local scoping of lock_fd to prevent leaks
+# Description: Acquires a fine-grained lock for a specific interface.
+# Arguments: $1 = Interface Name, $2... = Command to execute
+# Returns: Exit code of the executed command.
 with_iface_lock() {
     local iface="$1"; shift
     local timeout="${TIMEOUT:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
     local lock_fd
     
-    # Ensure RUN_DIR exists before locking
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
-
-    # Open FD in local scope
+    
+    # Open lock file descriptor
     exec {lock_fd}>"$lock_file" || {
         log_error "Failed to open lock file for $iface"
         return 1
     }
     
+    # Attempt to acquire lock with timeout
     if ! flock -w "$timeout" "$lock_fd"; then
         log_error "Failed to acquire lock for $iface after ${timeout}s"
         exec {lock_fd}>&-
         return 1
     fi
     
-    # Execute command
+    # Execute the protected command
     local ret=0
     "$@" || ret=$?
     
-    # Release and Close FD
+    # Release and close
     flock -u "$lock_fd"
     exec {lock_fd}>&-
     return $ret
 }
 
-# --- LOGGING & OUTPUT ---
+# --- Logging ---
 
 log_debug() {
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
 }
-
 log_info() {
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
 }
-
 log_warn() {
     [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
 }
-
 log_error() {
     echo "[ERROR] $*" >&2
 }
 
+# Description: Exits the script with an error message formatted correctly for the requested output mode.
+# Arguments: $1 = Message
 cli_error() {
     local msg="$1"
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
@@ -160,12 +163,13 @@ audit_log() {
     logger -t rocknix-network-audit -p auth.notice "$event: $details"
 }
 
-# --- OUTPUT FORMATTING ---
+# --- Output Formatting (JSON/Table) ---
 
+# Description: Prints a TSV-based table from JSON input using awk/column.
+# Arguments: $1 = JSON Input, $2 = Column Definition (key:HEADER,key:HEADER)
 print_table() {
     local json_input="$1"
-    local columns="$2" # "KEY:Header,KEY2:Header2"
-    
+    local columns="$2"
     local jq_query="["
     local header_row=""
     
@@ -178,18 +182,18 @@ print_table() {
     done
     jq_query="${jq_query%,}] | @tsv"
     
-    # Generate Tab-Separated Values
     local tsv_data
     tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
+    
+    # Fallback if first query empty
     if [ -z "$tsv_data" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
-        # Handle single object case if array filter failed
         tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r "$jq_query" 2>/dev/null)
     fi
-
-    # Formatting: Use column if available, else awk for embedded fallback
+    
     if command -v column >/dev/null; then
         echo "$tsv_data" | column -t -s $'\t'
     else
+        # BusyBox awk fallback for alignment
         echo "$tsv_data" | awk -F'\t' '{
             for(i=1;i<=NF;i++) {
                 if(length($i) > max[i]) max[i] = length($i)
@@ -208,18 +212,18 @@ print_table() {
     fi
 }
 
+# Description: Outputs success data in the requested format (JSON, Table, or Human).
+# Arguments: $1 = JSON payload (string)
 json_success() {
     local data
-    # Check if data is piped or passed as argument
     if [ -p /dev/stdin ]; then
         data=$(cat)
     else
         data="${1:-}"
     fi
-    
     if [ -z "$data" ]; then data="{}"; fi
     
-    # If data is already a JSON object string, merge directly
+    # Ensure success=true is present
     local full_json
     full_json=$("$JQ_BIN" -n --argjson data "$data" '{success:true} + $data')
     
@@ -228,16 +232,16 @@ json_success() {
             echo "$full_json"
             ;;
         table)
-            # OPTIMIZATION: Determine content type in one pass to avoid multiple JQ forks
+            # Detect data type to format table correctly
             local type_detect
             type_detect=$(echo "$full_json" | "$JQ_BIN" -r '
-                if .results then "results" 
-                elif .networks then "networks" 
-                elif .interfaces then "interfaces" 
-                elif .profiles then "profiles" 
-                elif .devices then "devices" 
+                if .results then "results"
+                elif .networks then "networks"
+                elif .interfaces then "interfaces"
+                elif .profiles then "profiles"
+                elif .devices then "devices"
                 else "unknown" end')
-
+            
             case "$type_detect" in
                 results)
                     print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
@@ -251,7 +255,6 @@ json_success() {
                     print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
                     ;;
                 profiles)
-                    # Check profile structure (array of strings or objects)
                     if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
                          echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
                     else
@@ -262,14 +265,12 @@ json_success() {
                     print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
                     ;;
                 *)
-                    # Fallback to Key-Value
                     echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
                     ;;
             esac
             ;;
         *)
-            # Human readable pretty print (Default)
-            # OPTIMIZATION: Check for keys in one pass to reduce JQ calls
+            # Human readable output logic
             local key_detect
             key_detect=$(echo "$full_json" | "$JQ_BIN" -r '
                 if .message then "message"
@@ -312,6 +313,8 @@ json_success() {
     esac
 }
 
+# Description: Outputs error data in the requested format.
+# Arguments: $1 = Message, $2 = Exit Code (optional), $3 = Hint (optional)
 json_error() {
     local msg="$1"
     local code="${2:-1}"
@@ -327,14 +330,14 @@ json_error() {
     return 0
 }
 
-# --- INTERACTIVE HELPERS ---
-
+# Description: Prompts user for confirmation unless forced.
+# Arguments: $1 = Message, $2 = Force Flag (true/false)
 confirm_action() {
     local msg="$1"
     local force="${2:-false}"
     
     if [ "$force" == "true" ]; then return 0; fi
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi 
+    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi # Implicit yes in JSON mode
     
     if [ ! -t 0 ]; then
         log_error "Destructive action requires confirmation or --yes flag."
@@ -350,11 +353,12 @@ confirm_action() {
     return 0
 }
 
+# --- Utilities ---
+
 auto_select_interface() {
-    local type="$1" # wifi, ethernet, etc
+    local type="$1"
     local count=0
     local candidate=""
-    
     local ifaces=(/sys/class/net/*)
     for iface_path in "${ifaces[@]}"; do
         local ifname=$(basename "$iface_path")
@@ -365,15 +369,12 @@ auto_select_interface() {
             fi
         fi
     done
-    
     if [ $count -eq 1 ]; then
         echo "$candidate"
         return 0
     fi
     return 1
 }
-
-# --- VALIDATION ---
 
 sanitize_ssid() {
     local ssid="$1"
@@ -387,21 +388,77 @@ sanitize_ssid() {
     echo "$safe"
 }
 
-# OPTIMIZED: Pure Bash implementation avoids JQ fork overhead
 json_escape() {
     local s="$1"
-    # Escape backslashes and quotes
     s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
-    # Escape control characters
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
     s="${s//$'\b'/\\b}"
     s="${s//$'\f'/\\f}"
-    
     printf '%s' "$s"
 }
+
+get_proxy_json() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        local http="" https="" noproxy=""
+        while IFS='=' read -r key value; do
+            value="${value//\"/}"
+            value="${value//\'/}"
+            case "$key" in
+                http_proxy|export\ http_proxy) http="$value" ;;
+                https_proxy|export\ https_proxy) https="$value" ;;
+                no_proxy|export\ no_proxy) noproxy="$value" ;;
+            esac
+        done < "$file"
+        [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
+        [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
+        "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
+            '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
+    else
+        echo "null"
+    fi
+}
+
+# Description: Writes content to a file safely and atomically.
+# Uses the C agent if available, otherwise falls back to mktemp/mv.
+# Arguments: $1 = Destination, $2 = Content, $3 = Octal Permissions
+secure_write() {
+    local dest="$1"
+    local content="$2"
+    local perms="${3:-644}"
+    
+    # Security: Prevent writing outside allowed RXNM directories
+    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
+       [[ "$dest" != "${STATE_DIR}/"* ]] && \
+       [[ "$dest" != "${CONF_DIR}/"* ]] && \
+       [[ "$dest" != "${RUN_DIR}/"* ]]; then
+         log_error "Illegal file write attempted: $dest"
+         return 1
+    fi
+    
+    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
+    
+    # Accelerator Path: Use Native Agent if available (Atomic/Idempotent)
+    if [ -x "${RXNM_AGENT_BIN}" ]; then
+        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    # Fallback Path: Shell implementation
+    local tmp
+    tmp=$(mktemp "${dest}.XXXXXX") || return 1
+    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod "$perms" "$tmp"
+    sync
+    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+}
+
+# --- Validation Functions ---
 
 validate_ssid() {
     local ssid="$1"
@@ -430,7 +487,7 @@ validate_passphrase() {
     local pass="$1"
     local len=${#pass}
     [ "$len" -eq 0 ] && return 0
-    if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then 
+    if [ "$len" -lt 8 ] || [ "$len" -gt 63 ]; then
         json_error "Invalid passphrase length ($len)" "1" "WPA2 requires 8-63 characters"
         return 1
     fi
@@ -485,15 +542,11 @@ validate_routes() {
     local routes="$1"
     IFS=',' read -ra RTS <<< "$routes"
     for r in "${RTS[@]}"; do
-        # Supports: dest  OR  dest@gateway  OR  dest@gateway@metric
-        # Use @ separator to be IPv6 safe
         local dest=""
         local rgw=""
         local rmet=""
-        
         # Split by @
         IFS='@' read -r dest rgw rmet <<< "$r"
-        
         if [ -z "$dest" ]; then return 1; fi
         if ! validate_ip "$dest"; then return 1; fi
         if [ -n "$rgw" ]; then
@@ -532,7 +585,7 @@ validate_proxy_url() {
 
 validate_country() {
     local code="$1"
-    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then 
+    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then
         json_error "Invalid country code: $code" "1" "Use ISO 3166-1 alpha-2 format (e.g., US, JP, DE)"
         return 1
     fi
@@ -555,7 +608,6 @@ validate_mtu() {
 
 validate_link_speed() {
     local spd="$1"
-    # Accept integers (Mbps) like 10, 100, 1000, 2500, 10000
     if [[ "$spd" =~ ^[0-9]+$ ]] && [ "$spd" -ge 10 ]; then return 0; fi
     json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
     return 1
@@ -573,60 +625,4 @@ validate_autoneg() {
     if [[ "$auto" =~ ^(yes|no)$ ]]; then return 0; fi
     json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
     return 1
-}
-
-get_proxy_json() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        local http="" https="" noproxy=""
-        while IFS='=' read -r key value; do
-            value="${value//\"/}"
-            value="${value//\'/}"
-            case "$key" in
-                http_proxy|export\ http_proxy) http="$value" ;;
-                https_proxy|export\ https_proxy) https="$value" ;;
-                no_proxy|export\ no_proxy) noproxy="$value" ;;
-            esac
-        done < "$file"
-        [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
-        [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
-        "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
-            '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
-    else
-        echo "null"
-    fi
-}
-
-# --- WRITE HELPERS ---
-
-secure_write() {
-    local dest="$1"
-    local content="$2"
-    local perms="${3:-644}"
-    
-    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${STATE_DIR}/"* ]] && \
-       [[ "$dest" != "${CONF_DIR}/"* ]] && \
-       [[ "$dest" != "${RUN_DIR}/"* ]]; then
-         log_error "Illegal file write attempted: $dest"
-         return 1
-    fi
-    
-    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
-    
-    # Phase 2 Refactor: Use Native Agent if available (Atomic/Idempotent)
-    if [ -x "${RXNM_AGENT_BIN}" ]; then
-        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
-            return 0
-        fi
-        # Fallback if agent write fails
-    fi
-    
-    local tmp
-    tmp=$(mktemp "${dest}.XXXXXX") || return 1
-    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod "$perms" "$tmp"
-    sync
-    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }

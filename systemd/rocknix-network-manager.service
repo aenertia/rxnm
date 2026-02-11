@@ -1,6 +1,6 @@
 [Unit]
 Description=ROCKNIX Network Manager (RXNM)
-Documentation=https://github.com/rocknix/rocknix-network-manager
+Documentation=https://codeberg.org/aenertia/rxnm
 
 # Requirement: Filesystem must be online. 
 # We explicitly check for /storage as that is the default location for persistence.

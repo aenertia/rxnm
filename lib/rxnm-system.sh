@@ -1,14 +1,25 @@
-# ==============================================================================
-# SYSTEM OPERATIONS & FIREWALL
-# ==============================================================================
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
-# --- SERVICE STATE MANAGEMENT ---
+# -----------------------------------------------------------------------------
+# FILE: rxnm-system.sh
+# PURPOSE: System-Level Operations & Service Management
+# ARCHITECTURE: Logic / System
+#
+# Handles initialization, service state caching (to reduce systemctl calls),
+# firewall/NAT abstraction, and kernel network stack tuning.
+# -----------------------------------------------------------------------------
+
+# --- Service State Caching ---
+# Optimization: Calling 'systemctl is-active' is slow (fork + IPC).
+# We cache the state for 2 seconds to speed up bulk operations.
+
 cache_service_states() {
     local now
     now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
-    
-    # Phase 3 Refactor: Added systemd-resolved to batch check
     local services=("iwd" "systemd-networkd" "systemd-resolved" "avahi-daemon")
+    
+    # Bulk query to minimize fork overhead
     local states
     states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null || echo "inactive")
     
@@ -20,16 +31,20 @@ cache_service_states() {
         ((++i))
     done <<< "$states"
     
+    # Export specific flags for easy logic checks
     [ "${SERVICE_STATE_CACHE["iwd"]}" == "active" ] && IWD_ACTIVE=true || IWD_ACTIVE=false
     [ "${SERVICE_STATE_CACHE["systemd-networkd"]}" == "active" ] && NETWORKD_ACTIVE=true || NETWORKD_ACTIVE=false
     [ "${SERVICE_STATE_CACHE["systemd-resolved"]}" == "active" ] && RESOLVED_ACTIVE=true || RESOLVED_ACTIVE=false
     [ "${SERVICE_STATE_CACHE["avahi-daemon"]}" == "active" ] && AVAHI_ACTIVE=true || AVAHI_ACTIVE=false
 }
 
+# Description: Checks if a service is active, using cache if fresh (<2s).
+# Arguments: $1 = Service Name
 is_service_active() {
     local svc="$1"
     local now
     now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+    
     local last_check="${SERVICE_STATE_TS["$svc"]:-0}"
     local age=$((now - last_check))
     
@@ -39,7 +54,6 @@ is_service_active() {
         SERVICE_STATE_CACHE["$svc"]="$state"
         SERVICE_STATE_TS["$svc"]=$now
     fi
-    
     [[ "${SERVICE_STATE_CACHE["$svc"]}" == "active" ]]
 }
 
@@ -47,12 +61,14 @@ is_avahi_running() {
     is_service_active "avahi-daemon"
 }
 
-# --- RESCUE MODE HELPERS (Phase 8) ---
+# --- Rescue Mode Utilities ---
+# Used when systemd-networkd fails or is missing.
 
 configure_standalone_client() {
     local iface="$1"
     log_warn "Entering Rescue Mode: Configuring $iface as standalone client"
     ip link set "$iface" up
+    # Kill any existing udhcpc for this interface to avoid conflict
     pkill -f "udhcpc -i $iface" 2>/dev/null
     udhcpc -i "$iface" -b -s /usr/share/udhcpc/default.script
 }
@@ -64,6 +80,7 @@ configure_standalone_gadget() {
     ip link set "$iface" up
     ip addr add "${ip}/24" dev "$iface" 2>/dev/null
     
+    # Generate temporary busybox dhcpd config
     local conf="/tmp/udhcpd.${iface}.conf"
     cat <<EOF > "$conf"
 start 169.254.10.10
@@ -77,34 +94,41 @@ EOF
     udhcpd "$conf"
 }
 
-# --- LIFECYCLE ACTIONS ---
+# --- Lifecycle Actions ---
+
 action_setup() {
     log_info "Initializing Network Manager..."
     ensure_dirs
     check_paths
-    
     cache_service_states
     
+    # Ensure systemd-networkd has access to runtime configs
     [ -d /run/systemd/netif ] && chown -R systemd-network:systemd-network /run/systemd/netif 2>/dev/null
-
+    
+    # Boot Profile Logic
+    # 1. Load profiles if available
+    # 2. Sync persistent config to runtime
     if type action_profile &>/dev/null; then
         action_profile "boot"
     else
+        # If sourcing order failed, try to source profiles manually
         if [ -n "${RXNM_LIB_DIR:-}" ] && [ -f "${RXNM_LIB_DIR}/rxnm-profiles.sh" ]; then
              source "${RXNM_LIB_DIR}/rxnm-profiles.sh"
              action_profile "boot"
         fi
     fi
-
+    
+    # Apply Hosts file overrides
     if [ -f "${CONF_DIR}/hosts.conf" ]; then
         cp "${CONF_DIR}/hosts.conf" "${RUN_DIR}/hosts"
     else
         rm -f "${RUN_DIR}/hosts"
     fi
-
+    
     fix_permissions
     tune_network_stack "client"
     
+    # RFKill Unblock Logic
     local needs_unblock=0
     for rdir in /sys/class/rfkill/rfkill*; do
         [ -e "$rdir/soft" ] && { read -r s < "$rdir/soft"; [ "$s" -eq 1 ] && needs_unblock=1 && break; }
@@ -124,11 +148,13 @@ action_reload() {
 }
 
 action_stop() {
+    # Stop wireless daemon to save power/interfere less
     timeout 5s systemctl stop iwd 2>/dev/null || true
     log_info "Wireless services stopped."
 }
 
-# --- FILE OPERATIONS ---
+# --- File Management Helpers ---
+
 ensure_dirs() {
     [ -d "$EPHEMERAL_NET_DIR" ] || mkdir -p "$EPHEMERAL_NET_DIR"
     [ -d "$PERSISTENT_NET_DIR" ] || mkdir -p "$PERSISTENT_NET_DIR"
@@ -139,34 +165,41 @@ ensure_dirs() {
 }
 
 check_paths() {
+    # Warn if /etc/systemd/network is not a symlink to our run/ target (Common misconfig)
     if [ ! -L "$ETC_NET_DIR" ] && [ "$ETC_NET_DIR" != "$EPHEMERAL_NET_DIR" ]; then
-        log_warn "$ETC_NET_DIR is not pointing to $EPHEMERAL_NET_DIR."
+        log_warn "$ETC_NET_DIR is not pointing to $EPHEMERAL_NET_DIR. Configuration may be ignored."
     fi
 }
 
 fix_permissions() {
+    # Networkd is picky about permissions
     if [ -d "$EPHEMERAL_NET_DIR" ]; then
         find "$EPHEMERAL_NET_DIR" -type f \( -name '*.netdev' -o -name '*.network' -o -name '*.link' \) -exec chmod 644 {} + 2>/dev/null
     fi
+    # IWD secrets must be 600
     if [ -d "${STATE_DIR}/iwd" ]; then
         find "${STATE_DIR}/iwd" -type f \( -name '*.psk' -o -name '*.8021x' \) -exec chmod 600 {} + 2>/dev/null
     fi
 }
 
+# Description: Triggers a reload of systemd-networkd.
+# Note: Prioritizes Agent (DBus direct) over networkctl (CLI) for speed.
 reload_networkd() {
     fix_permissions
     
+    # Accelerator Path
     if [ -x "$RXNM_AGENT_BIN" ]; then
         if "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1; then
+            # Clear status cache on reload
             [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
             return 0
         fi
     fi
     
+    # Legacy Path
     if is_service_active "systemd-networkd"; then
         timeout 5s networkctl reload 2>/dev/null || log_warn "networkctl reload timed out"
     fi
-    
     [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
@@ -183,28 +216,35 @@ reconfigure_iface() {
     [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
+# --- Kernel Tuning ---
+
 tune_network_stack() {
-    local profile="$1"
+    local profile="$1" # 'host' or 'client'
     
-    # Phase 1 Refactor: Use native agent for sysctl tuning if available
+    # Accelerator Path
     if [ -x "${RXNM_AGENT_BIN}" ]; then
         if "${RXNM_AGENT_BIN}" --tune "$profile" >/dev/null 2>&1; then
             return 0
         fi
     fi
     
-    # Legacy Fallback
+    # Legacy Path: Manual sysctl
+    # Increase connection tracking for NAT stability
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
+    # TCP Fast Open for faster web loading
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
+    # Lower keepalive for faster dead peer detection
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
-
+    
+    # Disable bridge filtering (performance optimization for containers)
     if [ -d /proc/sys/net/bridge ]; then
         sysctl -w net.bridge.bridge-nf-call-iptables=0 \
                   net.bridge.bridge-nf-call-ip6tables=0 \
                   net.bridge.bridge-nf-call-arptables=0 >/dev/null 2>&1 || true
     fi
-
+    
     if [ "$profile" == "host" ]; then
+        # Enable forwarding for AP/Tethering
         sysctl -w net.ipv4.ip_forward=1 \
                   net.ipv4.conf.all.rp_filter=1 \
                   net.ipv6.conf.all.forwarding=1 \
@@ -216,7 +256,7 @@ tune_network_stack() {
     fi
 }
 
-# --- FIREWALL MANAGEMENT ---
+# --- Firewall Abstraction (NAT) ---
 
 detect_firewall_tool() {
     echo "$FW_TOOL"
@@ -225,7 +265,7 @@ detect_firewall_tool() {
 enable_nat_masquerade() {
     local lan_iface="$1"
     [ -z "$lan_iface" ] && return 1
-
+    
     local fw_tool
     fw_tool=$(detect_firewall_tool)
     
@@ -234,28 +274,35 @@ enable_nat_masquerade() {
         return 0
     fi
     
+    # Auto-detect WAN interface (Default Route)
     local wan_iface
     wan_iface=$(ip -4 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
     [ -z "$wan_iface" ] && wan_iface=$(ip -6 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
-
+    
     if [ -z "$wan_iface" ] || [ "$lan_iface" == "$wan_iface" ]; then return 0; fi
     
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
     local T="timeout 2s"
-
+    
     if [ "$fw_tool" == "iptables" ]; then
+        # 1. Masquerade Outbound
         $T iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
         $T iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
         
+        # 2. Forwarding LAN -> WAN
         $T iptables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
         $T iptables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
         
+        # 3. Forwarding WAN -> LAN (Established)
         $T iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
         $T iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
-
+        
+        # 4. MSS Clamping (Crucial for MTU mismatches on LTE/PPPoE)
         $T iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
         $T iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
+        
     elif [ "$fw_tool" == "nft" ]; then
+        # NFTables boilerplate
         $T nft add table ip rocknix_nat 2>/dev/null
         $T nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
         $T nft flush chain ip rocknix_nat postrouting
@@ -272,17 +319,22 @@ enable_nat_masquerade() {
 disable_nat_masquerade() {
     local fw_tool; fw_tool=$(detect_firewall_tool)
     local T="timeout 2s"
+    
     if [ "$fw_tool" == "iptables" ]; then
+        # Clean up rules marked with our comment
         for table in nat filter mangle; do
             local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
                 read -r _ chain rest <<< "$line"
+                # Strip the -A command to get the rule definition
                 local rule="${line#-A $chain }"
+                # Delete it
                 $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
             done <<< "$rules"
         done
     elif [ "$fw_tool" == "nft" ]; then
+        # Simply delete our tables
         $T nft delete table ip rocknix_nat 2>/dev/null
         $T nft delete table ip rocknix_filter 2>/dev/null
     fi
