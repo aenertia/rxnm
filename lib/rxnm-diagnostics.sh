@@ -36,10 +36,13 @@ _get_wifi_fallback_json() {
                 # Skip if not connected or command failed
                 if [[ -z "$link_out" ]] || [[ "$link_out" == *"Not connected"* ]]; then continue; fi
                 
-                # Robust parsing using sed (most reliable for preserving spaces)
+                # Robust parsing
+                # SSID: Use sed to preserve spaces correctly
                 local ssid=$(echo "$link_out" | sed -n 's/^[[:space:]]*SSID: //p')
-                local freq=$(echo "$link_out" | sed -n 's/^[[:space:]]*freq: //p')
-                local rssi=$(echo "$link_out" | sed -n 's/^[[:space:]]*signal: //p' | awk '{print $1}')
+                # Freq: Use awk to cast to int (removes .0 divergence)
+                local freq=$(echo "$link_out" | awk '/freq:/ {print int($2)}')
+                # RSSI: Extract just the number
+                local rssi=$(echo "$link_out" | awk '/signal:/ {print $2}')
                 # BSSID is typically on the first line: "Connected to xx:xx... (on wlan0)"
                 local bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
                 

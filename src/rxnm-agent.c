@@ -3,13 +3,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
  *
- * Phase 4 & 5 Hardening (Final Correction):
- * - Restored missing route_entry_t struct definition
- * - Fixed implicit declaration of append_string (moved definition up)
- * - Ensured all NL80211 constants are defined correctly
- * - Resolved -Wstringop-truncation by replacing strncpy with snprintf for ifr_name
- * - Resolved -Wformat-truncation by increasing path buffer capacity
- * - Validated JSON structure (removed potential trailing commas)
+ * Phase 6 Remediation:
+ * - Implemented Targeted Station Dumps: Iterates WiFi interfaces to request 
+ * station info per-interface (fixes empty BSSID in containers/strict kernels).
+ * - Added add_nl_attr helper for constructing Netlink requests.
+ * - Maintained all previous fixups (constants, string handling, etc).
  */
 
 #define _GNU_SOURCE
@@ -553,6 +551,16 @@ int get_genl_family_id(int sock, const char *family_name) {
     return -1;
 }
 
+// Helper to add Netlink attribute
+void add_nl_attr(struct nlmsghdr *n, int type, const void *data, int len) {
+    int alen = RTA_LENGTH(len);
+    struct rtattr *rta = (struct rtattr *)((char *)n + n->nlmsg_len);
+    rta->rta_type = type;
+    rta->rta_len = alen;
+    memcpy(RTA_DATA(rta), data, len);
+    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len + alen);
+}
+
 void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     struct genlmsghdr *gh = NLMSG_DATA(nh);
     struct rtattr *tb[NL80211_ATTR_PARSE_MAX + 1];
@@ -574,13 +582,14 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
             entry->wifi_connected = true;
         }
         if (tb[NL80211_ATTR_WIPHY_FREQ]) entry->frequency = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY_FREQ]);
+    } else if (cmd == NL80211_CMD_GET_STATION) {
+        // Correctly capture BSSID from Station info (Peer MAC)
         if (tb[NL80211_ATTR_MAC]) {
             unsigned char *bssid_bytes = (unsigned char *)RTA_DATA(tb[NL80211_ATTR_MAC]);
             snprintf(entry->bssid, sizeof(entry->bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
                      bssid_bytes[0], bssid_bytes[1], bssid_bytes[2],
                      bssid_bytes[3], bssid_bytes[4], bssid_bytes[5]);
         }
-    } else if (cmd == NL80211_CMD_GET_STATION) {
         if (tb[NL80211_ATTR_STATION_INFO]) {
             struct rtattr *si = tb[NL80211_ATTR_STATION_INFO];
             struct rtattr *nested = RTA_DATA(si);
@@ -617,12 +626,15 @@ void collect_wifi_state() {
     int fid = get_genl_family_id(sock, NL80211_GENL_NAME);
     if (fid <= 0) { close(sock); return; }
 
+    // Step 1: Dump all interfaces to find WiFi ones
     struct { struct nlmsghdr n; struct genlmsghdr g; char buf[4]; } req = {
         .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid, .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP,
         .g.cmd = NL80211_CMD_GET_INTERFACE, .g.version = 1
     };
     send(sock, &req, req.n.nlmsg_len, 0);
-    char buf[BUF_SIZE]; int len;
+    
+    char buf[BUF_SIZE]; 
+    int len;
     while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
         struct nlmsghdr *nh = (struct nlmsghdr *)buf;
         for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
@@ -630,17 +642,36 @@ void collect_wifi_state() {
             else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto step2;
         }
     }
+
 step2:
-    req.g.cmd = NL80211_CMD_GET_STATION; req.n.nlmsg_seq++;
-    send(sock, &req, req.n.nlmsg_len, 0);
-    while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
-        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
-        for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
-            if (nh->nlmsg_type == fid) process_nl80211_msg(nh, NL80211_CMD_GET_STATION);
-            else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto done;
+    // Step 2: Iterate WiFi interfaces and dump stations PER INTERFACE
+    // Targeted dumps are required by many drivers/kernels to return station data
+    for (int i = 0; i < MAX_IFACES; i++) {
+        if (ifaces[i].exists && ifaces[i].is_wifi) {
+            // Reconstruct request for GET_STATION with specific IFINDEX
+            struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req = {
+                .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid, 
+                .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .n.nlmsg_seq = time(NULL) + i,
+                .g.cmd = NL80211_CMD_GET_STATION, .g.version = 1
+            };
+            
+            // Append NL80211_ATTR_IFINDEX
+            uint32_t idx = ifaces[i].index;
+            add_nl_attr(&sta_req.n, NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
+            
+            send(sock, &sta_req, sta_req.n.nlmsg_len, 0);
+            
+            while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
+                struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+                for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+                    if (nh->nlmsg_type == fid) process_nl80211_msg(nh, NL80211_CMD_GET_STATION);
+                    else if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto next_iface;
+                }
+            }
+            next_iface:;
         }
     }
-done:
+
     close(sock);
     for (int i = 0; i < MAX_IFACES; i++) if (ifaces[i].exists && ifaces[i].is_wifi) sysfs_collect_bssid_fallback(&ifaces[i]);
 }
