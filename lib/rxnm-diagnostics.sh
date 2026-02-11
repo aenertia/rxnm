@@ -8,6 +8,55 @@ CACHE_TTL=5
 # Issue 3.4: Consolidate Agent Bin
 AGENT_BIN="${RXNM_AGENT_BIN}"
 
+# Helper: Extract WiFi State directly from Kernel (Robust Fallback)
+# Used as the final fallback if IWD, NM, and WPA all fail.
+_get_wifi_fallback_json() {
+    local json_items=""
+    # Check if 'iw' tool is available
+    if type -P iw >/dev/null 2>&1; then
+        for iface_path in /sys/class/net/*; do
+            [ -e "$iface_path" ] || continue
+            local ifname=$(basename "$iface_path")
+            local is_wifi=false
+            
+            # Check sysfs indicators (Standard Linux)
+            if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
+                is_wifi=true
+            # Fallback: Check naming convention (Container/Agent Parity)
+            # This catches cases where sysfs wireless attributes aren't passed through
+            elif [[ "$ifname" == wl* ]]; then
+                is_wifi=true
+            fi
+            
+            if [ "$is_wifi" == "true" ]; then
+                # Parse link status from kernel (Force C locale)
+                local link_out
+                link_out=$(LC_ALL=C iw dev "$ifname" link 2>/dev/null)
+                
+                # Skip if not connected or command failed
+                if [[ -z "$link_out" ]] || [[ "$link_out" == *"Not connected"* ]]; then continue; fi
+                
+                # Robust parsing using sed (most reliable for preserving spaces)
+                local ssid=$(echo "$link_out" | sed -n 's/^[[:space:]]*SSID: //p')
+                local freq=$(echo "$link_out" | sed -n 's/^[[:space:]]*freq: //p')
+                local rssi=$(echo "$link_out" | sed -n 's/^[[:space:]]*signal: //p' | awk '{print $1}')
+                # BSSID is typically on the first line: "Connected to xx:xx... (on wlan0)"
+                local bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
+                
+                if [ -n "$ssid" ]; then
+                    # Sanitize JSON string (escape quotes and backslashes)
+                    ssid="${ssid//\\/\\\\}"
+                    ssid="${ssid//\"/\\\"}"
+                    [ -n "$json_items" ] && json_items="$json_items,"
+                    # Construct JSON object fragment
+                    json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": \"${bssid:-null}\", \"state\": \"connected\" }"
+                fi
+            fi
+        done
+    fi
+    echo "{ $json_items }"
+}
+
 action_status_legacy() {
     local filter_iface="${1:-}"
 
@@ -15,33 +64,41 @@ action_status_legacy() {
     [ -f /etc/hostname ] && read -r hostname < /etc/hostname
 
     local net_json="[]"
-    if command -v networkctl >/dev/null; then
+    # Use type -P to avoid noisy aliases in some distros
+    if type -P networkctl >/dev/null 2>&1; then
         net_json=$(timeout 3s networkctl status --all --json=short 2>/dev/null || timeout 3s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
 
+    # 1. Primary WiFi Source: DBus (IWD)
     local iwd_json="{}"
     if is_service_active "iwd"; then
         # Issue 3.1: Fix JQ path for busctl output
         iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data // {}' || echo "{}")
     fi
 
-    # Standalone WiFi Fallback (Multi-stack: NM, WPA-Supplicant, IW)
-    # Used when iwd is missing (e.g. general Linux distros, containers)
-    local sw="{}"
+    # 2. Standalone WiFi Fallback (Multi-stack: NM -> WPA -> IW)
+    # Essential for containers (Distrobox) or non-IWD systems.
+    local legacy_wifi_json="{}"
+    
+    # Only probe fallbacks if IWD returned nothing useful
     if [[ "$iwd_json" == "{}" ]]; then
-        # 1. Probe NetworkManager (nmcli)
-        if command -v nmcli >/dev/null; then
-            local nm_out; nm_out=$(nmcli -t -f active,device,ssid,bssid,freq,signal dev wifi list | grep "^yes" | head -n1 || true)
+        
+        # A. Probe NetworkManager (nmcli)
+        if type -P nmcli >/dev/null 2>&1; then
+            local nm_out; nm_out=$(nmcli -t -f active,device,ssid,bssid,freq,signal dev wifi list 2>/dev/null | grep "^yes" | head -n1 || true)
             if [[ -n "$nm_out" ]]; then
                 IFS=':' read -r _ dev ssid bssid freq sig <<< "$nm_out"
                 # Map score (0-100) to approximate dBm (-100 to -50)
-                sw=$(echo "$sw" | "$JQ_BIN" --arg dev "$dev" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
-                    '. + {($dev): {ssid: $ssid, bssid: $bssid, frequency: ($freq | split(" ") | .[0] | tonumber // 0), rssi: (($sig | tonumber / 2) - 100)}}')
+                local updated_json
+                updated_json=$(echo "$legacy_wifi_json" | "$JQ_BIN" --arg dev "$dev" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
+                    '. + {($dev): {ssid: $ssid, bssid: $bssid, frequency: ($freq | split(" ") | .[0] | tonumber // 0), rssi: (($sig | tonumber / 2) - 100)}}' 2>/dev/null)
+                # Atomic update: Only replace if jq succeeded
+                if [ -n "$updated_json" ]; then legacy_wifi_json="$updated_json"; fi
             fi
         fi
 
-        # 2. Probe wpa_supplicant (wpa_cli) - if NM found nothing
-        if [[ "$sw" == "{}" ]] && command -v wpa_cli >/dev/null; then
+        # B. Probe wpa_supplicant (wpa_cli) - if NM found nothing
+        if [[ "$legacy_wifi_json" == "{}" ]] && type -P wpa_cli >/dev/null 2>&1; then
              for iface_path in /sys/class/net/*; do
                  [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || continue
                  local ifname=$(basename "$iface_path")
@@ -55,37 +112,18 @@ action_status_legacy() {
                      sig=$(echo "$sig_poll" | sed -n 's/^RSSI=\(.*\)/\1/p')
                      [ -z "$sig" ] && sig="-100"
                      
-                     sw=$(echo "$sw" | "$JQ_BIN" --arg ifname "$ifname" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
-                        '. + {($ifname): {ssid: $ssid, bssid: $bssid, frequency: ($freq | tonumber // 0), rssi: ($sig | tonumber // -100)}}')
+                     local updated_json
+                     updated_json=$(echo "$legacy_wifi_json" | "$JQ_BIN" --arg ifname "$ifname" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
+                        '. + {($ifname): {ssid: $ssid, bssid: $bssid, frequency: ($freq | tonumber // 0), rssi: ($sig | tonumber // -100)}}' 2>/dev/null)
+                     if [ -n "$updated_json" ]; then legacy_wifi_json="$updated_json"; fi
                      break # Stop after first connected iface found
                  fi
              done
         fi
 
-        # 3. Fallback to generic iw tools
-        if [[ "$sw" == "{}" ]]; then
-            for iface_path in /sys/class/net/*; do
-                [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || continue
-                local ifname=$(basename "$iface_path")
-                local ssid="" bssid="" freq="" sig="-100"
-                if command -v iw >/dev/null; then
-                    local iw_out; iw_out=$(iw dev "$ifname" link 2>/dev/null || true)
-                    if [[ -n "$iw_out" ]]; then
-                        bssid=$(echo "$iw_out" | awk '/Connected to/ {print $3}')
-                        ssid=$(echo "$iw_out" | sed -n 's/.*SSID: \(.*\)/\1/p')
-                        freq=$(echo "$iw_out" | sed -n 's/.*freq: \(.*\)/\1/p')
-                    fi
-                fi
-                if [ -f /proc/net/wireless ]; then
-                    # Extract link quality/level from procfs
-                    sig=$(grep "$ifname" /proc/net/wireless | awk '{print $4}' | tr -d '.')
-                    [ -z "$sig" ] && sig="-100"
-                fi
-                if [[ -n "$ssid" ]]; then
-                    sw=$(echo "$sw" | "$JQ_BIN" --arg ifname "$ifname" --arg ssid "$ssid" --arg bssid "$bssid" --arg freq "$freq" --arg sig "$sig" \
-                        '. + {($ifname): {ssid: $ssid, bssid: $bssid, frequency: ($freq | tonumber // 0), rssi: ($sig | tonumber // -100)}}')
-                fi
-            done
+        # C. Fallback to generic kernel tools (iw) - if NM/WPA found nothing
+        if [[ "$legacy_wifi_json" == "{}" ]]; then
+            legacy_wifi_json=$(_get_wifi_fallback_json)
         fi
     fi
 
@@ -98,7 +136,7 @@ action_status_legacy() {
     fi
 
     local ip_json="[]"
-    if command -v ip >/dev/null; then
+    if type -P ip >/dev/null 2>&1; then
         ip_json=$(ip -j -s addr show 2>/dev/null || echo "[]")
     fi
     
@@ -119,6 +157,15 @@ action_status_legacy() {
     done
     speed_json="{ $speed_data }"
 
+    # SAFEGUARDS: Ensure no empty strings passed to --argjson
+    [ -z "$net_json" ] && net_json="[]"
+    [ -z "$iwd_json" ] && iwd_json="{}"
+    [ -z "$legacy_wifi_json" ] && legacy_wifi_json="{}"
+    [ -z "$routes_json" ] && routes_json="[]"
+    [ -z "$ip_json" ] && ip_json="[]"
+    [ -z "$speed_json" ] && speed_json="{}"
+    [ -z "$global_proxy_json" ] && global_proxy_json="null"
+
     local json_output
     json_output=$("$JQ_BIN" -n \
         --arg hn "$hostname" \
@@ -126,7 +173,7 @@ action_status_legacy() {
         --argjson gp "$global_proxy_json" \
         --argjson net "$net_json" \
         --argjson iwd "$iwd_json" \
-        --argjson sw "$sw" \
+        --argjson legacy_wifi "$legacy_wifi_json" \
         --argjson routes "$routes_json" \
         --argjson ip "$ip_json" \
         --argjson speeds "$speed_json" \
@@ -163,9 +210,10 @@ action_status_legacy() {
          map({(.iface): {ssid: .ssid}}) | add
         ) as $wifi_network_info |
         
-        (($wifi_network_info // {}) * ($wifi_station_info // {})) as $managed_wifi |
-        # Ensure full fallback check correctly identifies empty/null states
-        ($managed_wifi | if . == {} or . == null then $sw else . end) as $full_wifi |
+        # Merge DBus info with Legacy Fallback (NM/WPA/IW)
+        # Fallback takes precedence only if DBus returned nothing for that interface
+        (($wifi_network_info // {}) * ($wifi_station_info // {})) as $dbus_wifi |
+        ($legacy_wifi + ($dbus_wifi // {})) as $full_wifi |
         
         (($routes // []) | group_by(.dev) | map({key: .[0].dev, value: .}) | from_entries) as $route_map |
         (($net | objects | .Interfaces) // ($net | arrays) // []) as $sysd_net |
@@ -174,7 +222,8 @@ action_status_legacy() {
         (if ($sysd_net | length) > 0 then $sysd_net else 
             ($ip | map({
                 Name: .ifname,
-                Type: (if .link_type=="wlan" then "wlan" elif .link_type=="ether" then "ethernet" else .link_type end),
+                # Hybrid Type Detection: Trust name convention (wl*) even if link_type is ether
+                Type: (if .link_type=="wlan" or (.ifname | startswith("wl")) or (.ifname | startswith("mlan")) then "wlan" elif .link_type=="ether" then "ethernet" else .link_type end),
                 Addresses: (.addr_info | map({
                     Family: (if .family=="inet" then 2 else 10 end),
                     Address: ((.local // .address) + "/" + (.prefixlen|tostring)),
@@ -205,6 +254,8 @@ action_status_legacy() {
                         mac: (.HardwareAddress),
                         mtu: (.MTU),
                         connected: (.OperationalState == "routable" or .OperationalState == "enslaved" or .OperationalState == "online" or .OperationalState == "up"),
+                        
+                        # Use the merged WiFi object (DBus + Legacy)
                         wifi: (if .Type == "wlan" then ($full_wifi[.Name] // null) else null end),
                         
                         gateway: (.Gateway // $def_route.gateway // null),
@@ -230,7 +281,7 @@ action_status_legacy() {
 }
 
 action_check_internet_legacy() {
-    if command -v networkctl >/dev/null; then
+    if type -P networkctl >/dev/null 2>&1; then
          local operstate
          operstate=$(timeout 2s networkctl status 2>/dev/null | grep "Overall State" | awk '{print $3}')
          case "$operstate" in
