@@ -21,11 +21,20 @@ LIB_DIR = lib
 SRC_DIR = src
 SCRIPTS_DIR = scripts
 
+# Installation Paths
+PREFIX ?= /usr
+LIBEXEC_DIR ?= $(PREFIX)/lib/rocknix-network-manager
+BIN_SYMLINK ?= $(PREFIX)/bin/rxnm
+SHARE_DIR ?= $(PREFIX)/share
+BASH_COMP_DIR ?= $(SHARE_DIR)/bash-completion/completions
+SYSTEMD_NET_DIR ?= $(PREFIX)/lib/systemd/network
+SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
+
 # Targets
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check dirs constants tiny test-all
+.PHONY: all clean check dirs constants tiny test-all install
 
 all: dirs constants $(TARGET)
 
@@ -61,6 +70,36 @@ tiny: dirs constants
 		 echo "       [HINT] Debian/Ubuntu: sudo apt install libc6-dev" && exit 1); \
 	fi
 	@ls -lh $(TARGET)
+
+# Step 4: Installation
+install: all
+	@echo "[INSTALL] Deploying to $(LIBEXEC_DIR)..."
+	@mkdir -p $(LIBEXEC_DIR)/bin
+	@mkdir -p $(LIBEXEC_DIR)/lib
+	@mkdir -p $(LIBEXEC_DIR)/plugins
+	@cp -f $(BIN_DIR)/* $(LIBEXEC_DIR)/bin/
+	@cp -f $(LIB_DIR)/* $(LIBEXEC_DIR)/lib/
+	@chmod 755 $(LIBEXEC_DIR)/bin/*
+	@chmod 644 $(LIBEXEC_DIR)/lib/*
+	@echo "[LINK]    Creating symlink $(BIN_SYMLINK)..."
+	@ln -sf $(LIBEXEC_DIR)/bin/rocknix-network-manager $(BIN_SYMLINK)
+	
+	@echo "[INSTALL] Bash completion..."
+	@mkdir -p $(BASH_COMP_DIR)
+	@cp -f usr/share/bash-completion/completions/rxnm $(BASH_COMP_DIR)/
+	@chmod 644 $(BASH_COMP_DIR)/rxnm
+
+	@echo "[INSTALL] Systemd network templates..."
+	@mkdir -p $(SYSTEMD_NET_DIR)
+	@cp -f usr/lib/systemd/network/* $(SYSTEMD_NET_DIR)/
+	@chmod 644 $(SYSTEMD_NET_DIR)/*.network $(SYSTEMD_NET_DIR)/*.netdev
+
+	@echo "[INSTALL] System sleep hooks..."
+	@mkdir -p $(SYSTEMD_SLEEP_DIR)
+	@cp -f usr/lib/systemd/system-sleep/rxnm-resume $(SYSTEMD_SLEEP_DIR)/
+	@chmod 755 $(SYSTEMD_SLEEP_DIR)/rxnm-resume
+
+	@echo "✓ Installation complete."
 
 clean:
 	@echo "[CLEAN]"
