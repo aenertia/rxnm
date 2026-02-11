@@ -377,15 +377,7 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    local ssid="$1"
-    if [ ${#ssid} -gt 32 ]; then
-        log_error "SSID too long (max 32 bytes)"
-        return 1
-    fi
-    local safe
-    safe=$(printf '%s' "$ssid" | tr -cd '[:alnum:]_-')
-    [ -z "$safe" ] && safe="_unnamed_"
-    echo "$safe"
+    printf '%s' "$1" | od -A n -t x1 | tr -d ' \n'
 }
 
 json_escape() {

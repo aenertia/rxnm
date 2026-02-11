@@ -15,7 +15,7 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.0.0}"
+: "${RXNM_VERSION:=1.0.0-rc1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
 # Connectivity Probes (Used for Internet Checks)

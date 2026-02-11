@@ -581,20 +581,12 @@ action_connect() {
     local max_attempts=3
     local retry_delay=2
     local out=""
-    local pass_file=""
-    
-    # Write temp pass file for stdin piping (prevents cli arg leaking)
-    if [ -n "$pass" ]; then
-        pass_file=$(mktemp)
-        chmod 600 "$pass_file"
-        printf "%s" "$pass" > "$pass_file"
-    fi
     
     log_info "Connecting to $ssid on $iface..."
     
     while [ $attempts -lt $max_attempts ]; do
         if [ "${EPHEMERAL_CREDS:-false}" == "true" ] && [ -n "${pass:-}" ]; then
-             out=$(cat "$pass_file" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
+             out=$(printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
         else
              out=$(timeout 15s iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi
@@ -635,17 +627,14 @@ action_connect() {
             
             audit_log "WIFI_CONNECT" "Connected to $ssid"
             json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'"}'
-            [ -n "$pass_file" ] && rm -f "$pass_file"
             return 0
         fi
         
         # Handle IWD error messages
         if echo "$out" | grep -qi "passphrase\|password\|not correct"; then
-             [ -n "$pass_file" ] && rm -f "$pass_file"
              json_error "Authentication failed - check password"
              return 0
         elif echo "$out" | grep -qi "not found\|no network"; then
-             [ -n "$pass_file" ] && rm -f "$pass_file"
              json_error "Network '$ssid' not found"
              return 0
         elif echo "$out" | grep -qi "already in progress"; then
@@ -658,7 +647,6 @@ action_connect() {
         attempts=$((attempts+1))
     done
     
-    [ -n "$pass_file" ] && rm -f "$pass_file"
     json_error "Failed to connect: $out"
     return 0
 }

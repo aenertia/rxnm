@@ -194,6 +194,7 @@ reload_networkd() {
             [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
             return 0
         fi
+        log_warn "Agent DBus reload failed, falling back to system tools."
     fi
     
     # Legacy Path

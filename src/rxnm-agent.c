@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/netlink.h>
@@ -441,6 +442,7 @@ int open_netlink_rt() {
     struct sockaddr_nl addr;
     memset(&addr, 0, sizeof(addr));
     addr.nl_family = AF_NETLINK;
+    addr.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
     
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -1084,6 +1086,87 @@ void cmd_atomic_write(char *path, char *perm_str) {
     }
 }
 
+/**
+ * @brief Appends a line to a file safely (with flock).
+ */
+void cmd_append_config(char *path, char *line) {
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "Error opening config file\n");
+        exit(1);
+    }
+    
+    if (flock(fd, LOCK_EX) != 0) {
+        fprintf(stderr, "Failed to lock file\n");
+        close(fd);
+        exit(1);
+    }
+    
+    // Check if line already exists
+    char file_buf[32768];
+    ssize_t read_len = 0;
+    bool found = false;
+    
+    while ((read_len = read(fd, file_buf, sizeof(file_buf)-1)) > 0) {
+        file_buf[read_len] = '\0';
+        if (strstr(file_buf, line)) {
+            found = true;
+            break;
+        }
+    }
+    
+    if (!found) {
+        lseek(fd, 0, SEEK_END);
+        write(fd, line, strlen(line));
+        write(fd, "\n", 1);
+        fsync(fd);
+    }
+    
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+/**
+ * @brief Efficient roaming monitor loop using Netlink events.
+ * Triggers external shell script when events occur.
+ */
+void cmd_monitor_roam(char *iface, char *threshold_str) {
+    (void)threshold_str; // Silence unused parameter warning
+    int sock = open_netlink_rt();
+    if (sock < 0) exit(1);
+    
+    char trigger_cmd[256];
+    snprintf(trigger_cmd, sizeof(trigger_cmd), "rxnm wifi roaming trigger %s", iface);
+    
+    // Initial check
+    system(trigger_cmd);
+    
+    while (1) {
+        char buf[4096];
+        int len = recv(sock, buf, sizeof(buf), 0);
+        if (len > 0) {
+            struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+            for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+                if (nh->nlmsg_type == RTM_NEWLINK) {
+                    struct ifinfomsg *ifi = NLMSG_DATA(nh);
+                    struct rtattr *tb[IFLA_MAX + 1];
+                    parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifi)));
+                    
+                    if (tb[IFLA_IFNAME]) {
+                        char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
+                        if (strcmp(name, iface) == 0) {
+                            // Link state changed, trigger check
+                            system(trigger_cmd);
+                        }
+                    }
+                }
+            }
+        }
+        sleep(2); // Simple pacing to avoid storming
+    }
+    close(sock);
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -1106,6 +1189,10 @@ void cmd_is_low_power() {
 
 char *g_atomic_path = NULL;
 char *g_perm_str = NULL;
+char *g_append_path = NULL;
+char *g_append_line = NULL;
+char *g_monitor_iface = NULL;
+char *g_monitor_thresh = NULL;
 
 int main(int argc, char *argv[]) {
     load_runtime_config();
@@ -1123,11 +1210,15 @@ int main(int argc, char *argv[]) {
         {"atomic-write", required_argument, 0, 'W'},
         {"perm",    required_argument, 0, 'P'},
         {"tune", required_argument, 0, 'T'},
+        {"append-config", required_argument, 0, 'A'},
+        {"line", required_argument, 0, 'l'},
+        {"monitor-roam", required_argument, 0, 'M'},
+        {"threshold", required_argument, 0, 'S'},
         {0, 0, 0, 0}
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:P:T:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:P:T:A:l:M:S:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
@@ -1141,6 +1232,10 @@ int main(int argc, char *argv[]) {
             case 'T': cmd_tune(optarg); return 0;
             case 'W': g_atomic_path = optarg; break;
             case 'P': g_perm_str = optarg; break;
+            case 'A': g_append_path = optarg; break;
+            case 'l': g_append_line = optarg; break;
+            case 'M': g_monitor_iface = optarg; break;
+            case 'S': g_monitor_thresh = optarg; break;
             default: return 1;
         }
     }
@@ -1148,6 +1243,16 @@ int main(int argc, char *argv[]) {
     /* Handle atomic write logic (piped input) */
     if (g_atomic_path) {
         cmd_atomic_write(g_atomic_path, g_perm_str);
+        return 0;
+    }
+    
+    if (g_append_path && g_append_line) {
+        cmd_append_config(g_append_path, g_append_line);
+        return 0;
+    }
+    
+    if (g_monitor_iface) {
+        cmd_monitor_roam(g_monitor_iface, g_monitor_thresh);
         return 0;
     }
     

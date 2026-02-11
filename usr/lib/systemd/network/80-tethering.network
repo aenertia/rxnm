@@ -1,6 +1,7 @@
 # 80-tethering.network
 [Match]
 Name=usb* rndis*
+Type=gadget
 # the USB controller operates in Host mode, making this a standard network device.
 
 [Network]

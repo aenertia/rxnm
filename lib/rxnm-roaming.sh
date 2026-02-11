@@ -259,6 +259,12 @@ run_passive_monitor() {
     local iface="$1"
     log_roam "Mode: Passive (Event Driven)"
     
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        # Use native C agent for monitoring
+        exec "$RXNM_AGENT_BIN" --monitor-roam "$iface" "${ROAM_THRESHOLD_KICK:--75}"
+        return
+    fi
+    
     if ! command -v busctl >/dev/null; then run_active_monitor "$iface"; return; fi
     
     # Initial check

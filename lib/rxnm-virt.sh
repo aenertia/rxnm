@@ -55,23 +55,16 @@ _task_create_macvlan() {
     
     # Update parent to acknowledge child (Critical for networkd)
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
-    local lock_file="${RUN_DIR}/${parent}.cfg.lock"
-    local lock_fd
-    
-    # Lock parent config to avoid race conditions
-    exec {lock_fd}>"$lock_file" || { log_error "Cannot open lock file"; return 1; }
-    if ! flock -w 5 "$lock_fd"; then log_error "Timeout waiting for config lock"; exec {lock_fd}>&-; return 1; fi
     
     if [ -f "$parent_cfg" ]; then
-        if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-            local current_content
-            current_content=$(cat "$parent_cfg")
-            if [[ "$current_content" == *"[Network]"* ]]; then
-                 local new_content
-                 new_content=$(echo "$current_content" | sed "/\[Network\]/a MACVLAN=${name}")
-                 secure_write "$parent_cfg" "$new_content" "644"
-            else
-                 printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "MACVLAN=${name}"
+        else
+            if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
+                # Fallback to appending if section structure allows or manual fix needed
+                # Relying on systemd-networkd's ability to parse keys in applicable sections
+                # Ideally, this should append to [Network] section
+                printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
         fi
     else
@@ -82,8 +75,6 @@ _task_create_macvlan() {
         secure_write "$parent_cfg" "$content" "644"
     fi
     
-    flock -u "$lock_fd"
-    exec {lock_fd}>&-
     reload_networkd
 }
 
@@ -99,20 +90,12 @@ _task_create_ipvlan() {
     
     # Update parent logic (similar to MacVLAN)
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
-    local lock_file="${RUN_DIR}/${parent}.cfg.lock"
-    local lock_fd
-    exec {lock_fd}>"$lock_file" || { log_error "Cannot open lock file"; return 1; }
-    if ! flock -w 5 "$lock_fd"; then log_error "Timeout waiting for config lock"; exec {lock_fd}>&-; return 1; fi
     
     if [ -f "$parent_cfg" ]; then
-        if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
-            local current_content
-            current_content=$(cat "$parent_cfg")
-            if [[ "$current_content" == *"[Network]"* ]]; then
-                 local new_content
-                 new_content=$(echo "$current_content" | sed "/\[Network\]/a IPVLAN=${name}")
-                 secure_write "$parent_cfg" "$new_content" "644"
-            else
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "IPVLAN=${name}"
+        else
+            if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
                  printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
         fi
@@ -122,8 +105,7 @@ _task_create_ipvlan() {
         content="${content/\[Network\]/[Network]\nIPVLAN=${name}}"
         secure_write "$parent_cfg" "$content" "644"
     fi
-    flock -u "$lock_fd"
-    exec {lock_fd}>&-
+    
     reload_networkd
 }
 
@@ -190,14 +172,10 @@ _task_create_vlan() {
     # Update parent to acknowledge VLAN
     local parent_cfg="${STORAGE_NET_DIR}/75-config-${parent}.network"
     if [ -f "$parent_cfg" ]; then
-        if ! grep -q "VLAN=${name}" "$parent_cfg"; then
-            local current_content
-            current_content=$(cat "$parent_cfg")
-             if [[ "$current_content" == *"[Network]"* ]]; then
-                 local new_content
-                 new_content=$(echo "$current_content" | sed "/\[Network\]/a VLAN=${name}")
-                 secure_write "$parent_cfg" "$new_content" "644"
-            else
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "VLAN=${name}"
+        else
+            if ! grep -q "VLAN=${name}" "$parent_cfg"; then
                 printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
             fi
         fi

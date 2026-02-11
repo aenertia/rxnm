@@ -11,7 +11,7 @@
 # This ensures the C Agent and Bash Scripts always share the same configuration.
 # -----------------------------------------------------------------------------
 
-set -u
+set -euo pipefail
 
 # Paths
 CONSTANTS_SH="lib/rxnm-constants.sh"
@@ -91,7 +91,7 @@ echo "" >> "$HEADER_FILE"
 echo "// --- API Schema Keys ---" >> "$HEADER_FILE"
 if [ -f "$SCHEMA_JSON" ] && command -v jq >/dev/null; then
     # Extracts top-level properties as keys (KEY_SUCCESS="success", etc)
-    if jq -r '.properties | keys[] as $k | "#define KEY_" + ($k | ascii_upcase) + " \"" + $k + "\""' "$SCHEMA_JSON" >> "$HEADER_FILE"; then
+    if jq -r '.properties | keys[] as $k | "#define KEY_" + ($k | ascii_upcase) + " \"" + $k + "\""' "$SCHEMA_JSON" >> "$HEADER_FILE" 2>/dev/null; then
         echo "// Schema keys generated successfully" >> "$HEADER_FILE"
     else
         echo "Error: Failed to parse schema JSON" >&2

@@ -16,7 +16,7 @@ case "$1/$2" in
             # If connected, save the SSID
             if command -v iwctl >/dev/null; then
                 if iwctl station "$iface_name" show 2>/dev/null | grep -q "Connected network"; then
-                    ssid=$(iwctl station "$iface_name" show 2>/dev/null | awk '/Connected network/{print $3}')
+                    ssid=$(iwctl station "$iface_name" show 2>/dev/null | awk '/Connected network/{$1=$2=""; sub(/^ +/, ""); print}')
                     if [ -n "$ssid" ]; then
                         echo "$ssid" > "/run/rocknix/resume_state/${iface_name}.ssid"
                     fi
