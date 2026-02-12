@@ -318,10 +318,16 @@ action_wifi_roaming_trigger() {
 
 action_wifi_roaming_monitor() {
     local iface="$1"
+    # L-4 Fix: Remove default to wlan0 fallback to prevent monitoring wrong interface
     if [ -z "$iface" ]; then
         iface=$(get_wifi_iface 2>/dev/null)
     fi
-    : "${iface:=wlan0}"
+    
+    if [ -z "$iface" ]; then
+         log_roam "ERROR: Could not detect WiFi interface. Ensure IWD is running or specify interface."
+         exit 1
+    fi
+    
     : "${STORAGE_PROFILES_DIR:=${CONF_DIR}/network/profiles}"
     
     load_roaming_config

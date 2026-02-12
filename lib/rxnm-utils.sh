@@ -377,7 +377,7 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    printf '%s' "$1" | od -A n -t x1 | tr -d ' \n'
+    echo "$1" | tr -cd '[:alnum:]_-'
 }
 
 json_escape() {
@@ -443,9 +443,14 @@ secure_write() {
     
     # Fallback Path: Shell implementation
     local tmp
-    tmp=$(mktemp "${dest}.XXXXXX") || return 1
+    # Fix: Force umask 077 for the temp file creation
+    tmp=$(umask 077 && mktemp "${dest}.XXXXXX") || return 1
+    
     printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
-    chmod "$perms" "$tmp"
+    
+    # Apply requested permissions (only if wider than 600 needed)
+    if [ "$perms" != "600" ]; then chmod "$perms" "$tmp"; fi
+    
     sync
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }

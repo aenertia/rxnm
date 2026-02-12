@@ -43,7 +43,7 @@ SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check dirs constants tiny test-all install
+.PHONY: all clean check dirs constants tiny test-all install verify
 
 all: dirs constants $(TARGET)
 
@@ -130,3 +130,8 @@ test-all: all
 	@bash tests/test_consistency.sh
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
+
+# Final Implementation Verification (Batches 1-4)
+verify:
+	@echo "[VERIFY] Running Implementation Verification..."
+	@bash tests/verify_implementation.sh

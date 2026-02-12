@@ -169,7 +169,7 @@ build_gateway_config() {
              detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
              [ -z "$detected_ip" ] && detected_ip=$(_get_system_template_val "70-br-usb-host.network" "Address")
         elif [[ "$iface" == wlan* ]] && [ "$share" == "true" ]; then
-             detected_ip=$(_get_system_template_val "70-wifi-ap.network" "Address")
+             detected_ip=$(_get_system_template_val "71-wifi-ap.network" "Address")
         fi
         
         if [ -n "$detected_ip" ]; then ip="$detected_ip"

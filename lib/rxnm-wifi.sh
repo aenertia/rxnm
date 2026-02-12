@@ -128,6 +128,13 @@ _task_host_mode() {
     ensure_interface_active "$iface"
     ensure_dirs
     
+    # 0. Mask conflicting templates (Batch 3)
+    # Identify files that match this interface but are for station mode
+    if type build_template_conflict_map &>/dev/null; then
+        local conflicts=$(build_template_conflict_map "$iface" "ap")
+        for t in $conflicts; do mask_system_template "$t"; done
+    fi
+    
     # 1. Configure Network Interface (L3)
     local host_file="${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     local content
@@ -136,6 +143,10 @@ _task_host_mode() {
     
     # 2. Reload Systemd (L3 Up)
     reload_networkd
+    if is_service_active "systemd-networkd"; then
+        timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
+    fi
+    
     tune_network_stack "host"
     if [ "$use_share" == "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
     
@@ -180,6 +191,14 @@ _task_client_mode() {
     rm -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     rm -f "${STORAGE_NET_DIR}/70-share-${iface}.network"
     rm -f "$STORAGE_HOST_NET_FILE"
+    
+    # Unmask conflicts (Batch 3)
+    if type build_template_conflict_map &>/dev/null; then
+        # If we are going to client mode, we should unmask the station templates
+        # We query for what conflicts with "ap" mode, which are usually "station" templates
+        local conflicts=$(build_template_conflict_map "$iface" "ap")
+        for t in $conflicts; do unmask_system_template "$t"; done
+    fi
     
     reload_networkd
     reconfigure_iface "$iface"
@@ -574,6 +593,27 @@ action_connect() {
     
     ensure_interface_active "$iface"
     
+    log_info "Connecting to $ssid on $iface..."
+    
+    # Force networkd to ingest any new config BEFORE we bring up the link layer via IWD
+    if is_service_active "systemd-networkd"; then
+        timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
+    fi
+    
+    # --- Acceleration: Try C Agent first ---
+    # The agent uses direct DBus calls to IWD which is significantly faster and cleaner
+    # than spawning an interactive iwctl shell process.
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        if "$RXNM_AGENT_BIN" --connect "$ssid" --iface "$iface" >/dev/null; then
+             audit_log "WIFI_CONNECT" "Connected to $ssid via Agent"
+             json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'", "method": "agent"}'
+             return 0
+        fi
+        # If Agent fails (e.g. network not found yet), fall through to robust legacy loop
+        log_debug "Agent connect failed, falling back to iwctl..."
+    fi
+    
+    # --- Legacy Fallback: iwctl loop ---
     local cmd="connect"
     [[ "$hidden" == "true" ]] && cmd="connect-hidden"
     
@@ -581,8 +621,6 @@ action_connect() {
     local max_attempts=3
     local retry_delay=2
     local out=""
-    
-    log_info "Connecting to $ssid on $iface..."
     
     while [ $attempts -lt $max_attempts ]; do
         if [ "${EPHEMERAL_CREDS:-false}" == "true" ] && [ -n "${pass:-}" ]; then
@@ -625,7 +663,7 @@ action_connect() {
                  fi
             fi
             
-            audit_log "WIFI_CONNECT" "Connected to $ssid"
+            audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
             json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'"}'
             return 0
         fi

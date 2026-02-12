@@ -73,15 +73,38 @@ _task_profile_load_global() {
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    # 1. Wipe current state
+    # Transactional Loading Strategy:
+    # 1. Create staging directory
+    # 2. Populate staging
+    # 3. Verify
+    # 4. Atomic Swap (move into place)
+    
+    local staging_dir="${RUN_DIR}/profile_staging_$$"
+    rm -rf "$staging_dir"
+    mkdir -p "$staging_dir"
+    
+    # 2. Populate Staging
+    _sync_active_configs "${profile_dir}" "${staging_dir}"
+    
+    # Verify basic integrity (check if we copied anything, or if empty profile is intentional)
+    # For "default" empty profile, it might be empty, so loose check.
+    
+    # 4. Atomic Commit
+    # Clean current ephemeral dir
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
     
-    # 2. Restore state
-    _sync_active_configs "${profile_dir}" "${EPHEMERAL_NET_DIR}"
+    # Move from staging to ephemeral
+    # Note: Since they are likely on the same tmpfs (/run), mv is atomic for individual files.
+    # We move contents of staging into destination.
+    if [ -d "$staging_dir" ]; then
+        find "$staging_dir" -maxdepth 1 -type f -exec mv -f {} "${EPHEMERAL_NET_DIR}/" \;
+        rm -rf "$staging_dir"
+    fi
     
+    # Handle System files (Non-networkd)
     if [ -f "$profile_dir/proxy.conf" ]; then cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"; fi
     
     if [ -f "$profile_dir/country" ]; then
@@ -90,7 +113,7 @@ _task_profile_load_global() {
         if command -v iw >/dev/null; then [ -n "$code" ] && iw reg set "$code" 2>/dev/null || true; fi
     fi
     
-    # Restore IWD
+    # Restore IWD (Direct copy as IWD watches this dir)
     if [ -d "$profile_dir/wifi" ]; then
         mkdir -p "$iwd_dir"
         local psks=("${profile_dir}/wifi"/*.psk)

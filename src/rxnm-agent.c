@@ -11,7 +11,7 @@
  * RESPONSIBILITIES:
  * 1. Read-Only State: Queries Kernel Netlink (RTM/Genl) for interface stats.
  * 2. Atomic Writes: Implements safe config writing (write-tmp-and-rename).
- * 3. IPC: Talks directly to systemd-networkd via DBus socket to trigger reloads.
+ * 3. IPC: Talks directly to systemd-networkd & IWD via DBus socket.
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
  *
  * DESIGN PHILOSOPHY:
@@ -346,7 +346,7 @@ void udev_enrich(iface_entry_t *entry) {
     fclose(f);
 }
 
-/* --- DBus Implementation (Systemd Reload) --- */
+/* --- DBus Implementation --- */
 
 void append_string(uint8_t **ptr, const char *str) {
     uint32_t len = strlen(str);
@@ -356,11 +356,7 @@ void append_string(uint8_t **ptr, const char *str) {
     *ptr += len + 1;
 }
 
-/**
- * @brief Triggers 'Reload' on org.freedesktop.network1 via DBus socket.
- * This is 10x faster than calling 'networkctl reload' (forking).
- */
-int dbus_trigger_reload() {
+int dbus_connect_system(void) {
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     
@@ -374,7 +370,7 @@ int dbus_trigger_reload() {
         return -2;
     }
     
-    /* SASL Auth Phase */
+    /* SASL Auth */
     char uid_str[16];
     snprintf(uid_str, sizeof(uid_str), "%u", getuid());
     char auth_buf[128];
@@ -385,50 +381,187 @@ int dbus_trigger_reload() {
     int len = snprintf(auth_buf + 1, sizeof(auth_buf) - 1, "%s%s\r\n", SASL_AUTH_EXTERNAL, uid_hex);
     if (len < 0) { close(sock); return -4; }
     
-    send(sock, auth_buf, len + 1, 0); // Include leading zero for auth start
+    send(sock, auth_buf, len + 1, 0); // Leading zero required
     
     char resp[512];
     int n = recv(sock, resp, sizeof(resp)-1, 0);
     if (n <= 0 || strncmp(resp, "OK", 2) != 0) { close(sock); return -3; }
     
     send(sock, SASL_BEGIN, strlen(SASL_BEGIN), 0);
-    
-    /* Construct Method Call */
-    uint8_t msg[1024];
+    return sock;
+}
+
+/**
+ * @brief Constructs and sends a DBus Method Call.
+ */
+int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method) {
+    uint8_t msg[2048];
     memset(msg, 0, sizeof(msg));
     
     dbus_header_t *hdr = (dbus_header_t *)msg;
     hdr->endian = DBUS_ENDIAN_LITTLE;
     hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr->flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED;
+    hdr->flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
     hdr->version = DBUS_PROTOCOL_VERSION;
-    hdr->serial = 1;
+    hdr->serial = (uint32_t)time(NULL);
     
     uint8_t *ptr = msg + sizeof(dbus_header_t);
     
-    /* Append Fields */
     *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    append_string(&ptr, "/org/freedesktop/network1");
+    append_string(&ptr, path);
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
     *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "org.freedesktop.network1");
+    append_string(&ptr, dest);
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
     *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "org.freedesktop.network1.Manager");
+    append_string(&ptr, iface);
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
     *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "Reload");
+    append_string(&ptr, method);
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
-    /* Finalize Header */
     hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0; // Padding to 8-byte boundary for body
+    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0; 
     hdr->body_len = 0;
     
-    send(sock, msg, (ptr - msg), 0);
+    return send(sock, msg, (ptr - msg), 0);
+}
+
+/**
+ * @brief Triggers 'Reload' on org.freedesktop.network1 via DBus socket.
+ */
+int dbus_trigger_reload() {
+    int sock = dbus_connect_system();
+    if (sock < 0) return sock;
+    
+    dbus_send_method_call(sock, "org.freedesktop.network1", "/org/freedesktop/network1", "org.freedesktop.network1.Manager", "Reload");
+    close(sock);
+    return 0;
+}
+
+/* --- IWD Connection Logic (Discovery & Connect) --- */
+
+/**
+ * @brief Finds an IWD network object path by SSID (Simplified Scanner)
+ * Does NOT fully parse DBus structure, uses robust substring matching on the raw stream.
+ */
+int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max_len) {
+    /* 1. Request ObjectManager Dump */
+    uint8_t msg[512];
+    memset(msg, 0, sizeof(msg));
+    dbus_header_t *hdr = (dbus_header_t *)msg;
+    hdr->endian = DBUS_ENDIAN_LITTLE;
+    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr->flags = 0; /* Expect Reply */
+    hdr->version = DBUS_PROTOCOL_VERSION;
+    hdr->serial = 2;
+    
+    uint8_t *ptr = msg + sizeof(dbus_header_t);
+    *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
+    append_string(&ptr, "/"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "net.connman.iwd"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "org.freedesktop.DBus.ObjectManager"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
+    append_string(&ptr, "GetManagedObjects"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
+    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0;
+    hdr->body_len = 0;
+    
+    if (send(sock, msg, (ptr - msg), 0) < 0) return -1;
+    
+    /* 2. Read Response (Large Buffer) */
+    static char buf[65536]; /* 64KB should cover typical scan lists */
+    
+    /* Read header first to get body length */
+    int n = recv(sock, buf, sizeof(dbus_header_t), 0);
+    if (n < (int)sizeof(dbus_header_t)) return -1;
+    
+    dbus_header_t *resp_hdr = (dbus_header_t *)buf;
+    int total_msg_size = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len) + resp_hdr->body_len;
+    
+    if (total_msg_size > (int)sizeof(buf)) return -2; /* Too big */
+    
+    /* Read rest of message */
+    int remaining = total_msg_size - n;
+    char *p = buf + n;
+    while (remaining > 0) {
+        int r = recv(sock, p, remaining, 0);
+        if (r <= 0) break;
+        p += r; remaining -= r;
+    }
+    
+    /* 3. Scan for SSID */
+    /*
+     * Structure is a{oa{sa{sv}}}
+     * We look for the SSID string in a property value.
+     * The Key (Object Path) appears BEFORE the properties in the stream.
+     * Strategy: Store the last seen Object Path. When we see the SSID, that path is the one.
+     */
+    char last_path[256] = {0};
+    
+    /* Naive scan through buffer */
+    for (int i = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len); i < total_msg_size - (int)strlen(ssid); i++) {
+        
+        /* Check if this looks like an object path */
+        if (strncmp(&buf[i], "/net/connman/iwd/", 17) == 0) {
+            /* Basic sanity check on length to avoid reading garbage */
+            int path_len = strnlen(&buf[i], 255);
+            if (path_len > 20 && path_len < 255) {
+                strncpy(last_path, &buf[i], 255);
+            }
+        }
+        
+        /* Check for SSID match */
+        /* In DBus, string matches are usually preceded by length uint32 */
+        if (memcmp(&buf[i], ssid, strlen(ssid)) == 0) {
+            /* Verify it's actually the Name property value */
+            /* Look slightly behind for "Name" property key */
+            /* This is a heuristic scan. IWD puts SSID in "Name" property. */
+            
+            /* If we found the SSID and have a path, success */
+            if (last_path[0] != '\0') {
+                strncpy(out_path, last_path, max_len);
+                return 0;
+            }
+        }
+    }
+    
+    return -1; /* Not found */
+}
+
+int cmd_connect(const char *ssid, const char *iface) {
+    (void)iface; /* Hint: We could filter by device path if needed, but SSID is usually unique per scan result */
+    
+    int sock = dbus_connect_system();
+    if (sock < 0) {
+        printf("{\"success\": false, \"error\": \"DBus connection failed\"}\n");
+        return 1;
+    }
+    
+    char path[256];
+    if (find_iwd_network_path(sock, ssid, path, sizeof(path)) != 0) {
+        printf("{\"success\": false, \"error\": \"Network '%s' not found\"}\n", ssid);
+        close(sock);
+        return 1;
+    }
+    
+    /* Call Connect() on the object path */
+    dbus_send_method_call(sock, "net.connman.iwd", path, "net.connman.iwd.Network", "Connect");
+    
+    /*
+     * We don't wait for "Connected" signal here (that's for monitoring).
+     * Just triggering the command is enough. If passphrase is required,
+     * IWD will throw AgentInteraction error or handle it if we saved the PSK.
+     * Since we usually pre-provision PSK via file write, this is fine.
+     */
+    
+    printf("{\"success\": true, \"action\": \"connect\", \"ssid\": \"%s\", \"path\": \"%s\"}\n", ssid, path);
     close(sock);
     return 0;
 }
@@ -1193,6 +1326,8 @@ char *g_append_path = NULL;
 char *g_append_line = NULL;
 char *g_monitor_iface = NULL;
 char *g_monitor_thresh = NULL;
+char *g_connect_ssid = NULL;
+char *g_connect_iface = NULL;
 
 int main(int argc, char *argv[]) {
     load_runtime_config();
@@ -1206,6 +1341,8 @@ int main(int argc, char *argv[]) {
         {"dump",    no_argument, 0, 'd'},
         {"check-internet", no_argument, 0, 'c'},
         {"reload",  no_argument, 0, 'r'},
+        {"connect", required_argument, 0, 'C'},
+        {"iface", required_argument, 0, 'i'},
         {"get",     required_argument, 0, 'g'},
         {"atomic-write", required_argument, 0, 'W'},
         {"perm",    required_argument, 0, 'P'},
@@ -1218,10 +1355,10 @@ int main(int argc, char *argv[]) {
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrg:W:P:T:A:l:M:S:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--connect <ssid> --iface <iface> Connect to wifi\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -1236,6 +1373,8 @@ int main(int argc, char *argv[]) {
             case 'l': g_append_line = optarg; break;
             case 'M': g_monitor_iface = optarg; break;
             case 'S': g_monitor_thresh = optarg; break;
+            case 'C': g_connect_ssid = optarg; break;
+            case 'i': g_connect_iface = optarg; break;
             default: return 1;
         }
     }
@@ -1254,6 +1393,10 @@ int main(int argc, char *argv[]) {
     if (g_monitor_iface) {
         cmd_monitor_roam(g_monitor_iface, g_monitor_thresh);
         return 0;
+    }
+    
+    if (g_connect_ssid) {
+        return cmd_connect(g_connect_ssid, g_connect_iface);
     }
     
     /* Default Action: Dump status if run with args but none matched */

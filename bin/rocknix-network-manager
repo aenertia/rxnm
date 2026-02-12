@@ -76,6 +76,10 @@ source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
 source "${LIB_DIR}/rxnm-config-builder.sh"
 source "${LIB_DIR}/rxnm-plugins.sh"
+# Batch 2: Load Schema Validator
+source "${LIB_DIR}/rxnm-config-schema.sh"
+# Batch 3: Load Template Masking
+source "${LIB_DIR}/rxnm-templates.sh"
 
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
@@ -457,6 +461,28 @@ if [ "$SHOW_HELP" == "true" ]; then
     exit 0
 fi
 
+# Batch 2: Configuration State Validation
+# Check intent against schema before execution
+if [[ "$CATEGORY" == "wifi" ]] || [[ "$CATEGORY" == "interface" ]]; then
+    # We grab the first argument as potential action for descriptor building
+    VAL_ACTION="${1:-}"
+    
+    # Special handling for interface dispatch where arg 1 might be interface name
+    if [[ "$CATEGORY" == "interface" ]]; then
+        # If arg 1 is not a command, it's a target, so action is arg 2
+        # Simple heuristic: Is arg1 an action keyword?
+        if ! [[ "$VAL_ACTION" =~ ^(show|set|enable|disable|list|hotplug)$ ]]; then
+             VAL_ACTION="${2:-}"
+        fi
+    fi
+
+    descriptor=$(build_config_descriptor "$CATEGORY" "$VAL_ACTION" "$@")
+    if ! validate_config_state "$descriptor"; then
+        # Error is handled inside validation function (json_error)
+        exit 1
+    fi
+fi
+
 # Dispatch to Category Handlers
 case "$CATEGORY" in
     wifi)
@@ -740,7 +766,10 @@ case "$CATEGORY" in
                  fi
                  ;;
             reload) action_reload ;;
-            setup|start) action_setup ;;
+            setup|start) 
+                init_template_cache
+                action_setup 
+                ;;
             stop) action_stop ;;
         esac
         ;;
