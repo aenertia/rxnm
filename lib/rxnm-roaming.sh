@@ -71,8 +71,10 @@ _task_update_map() {
         local current_map="{}"
         [ -f "$ROAM_MAP_FILE" ] && current_map=$(cat "$ROAM_MAP_FILE")
         
-        # Merge new scan data into map
-        "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$scan_json" --arg now "$now" '
+        local tmp_map="${ROAM_MAP_FILE}.tmp"
+        
+        # Merge new scan data into map atomically to prevent file corruption
+        if "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$scan_json" --arg now "$now" '
             ($scan.results | map(
                 (.bssids // []) | map({
                     key: .bssid,
@@ -85,7 +87,11 @@ _task_update_map() {
                 })
             ) | flatten | from_entries) as $new_data |
             $map * $new_data
-        ' > "$ROAM_MAP_FILE"
+        ' > "$tmp_map"; then
+            mv "$tmp_map" "$ROAM_MAP_FILE"
+        else
+            rm -f "$tmp_map"
+        fi
     fi
 }
 

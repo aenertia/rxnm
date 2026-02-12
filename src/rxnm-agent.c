@@ -321,7 +321,10 @@ void extract_bash_var(const char *line, const char *key, char *dest, size_t dest
         if (end) {
             if (p[0] == '"' && end[-1] == '"') { p++; end--; }
             size_t len = end - p;
-            if (len < dest_size) { strncpy(dest, p, len); dest[len] = '\0'; return; }
+            size_t copy_len = len < dest_size ? len : dest_size - 1;
+            strncpy(dest, p, copy_len);
+            dest[copy_len] = '\0';
+            return;
         }
     }
     // Pattern 2: export KEY=Val
@@ -334,7 +337,9 @@ void extract_bash_var(const char *line, const char *key, char *dest, size_t dest
         if (p[0] == '"') { p++; end = strchr(p, '"'); }
         if (end) {
             size_t len = end - p;
-            if (len < dest_size) { strncpy(dest, p, len); dest[len] = '\0'; }
+            size_t copy_len = len < dest_size ? len : dest_size - 1;
+            strncpy(dest, p, copy_len);
+            dest[copy_len] = '\0';
         }
     }
 }
@@ -422,12 +427,14 @@ void udev_enrich(iface_entry_t *entry) {
 
 /* --- DBus Implementation --- */
 
-void append_string(uint8_t **ptr, const char *str) {
+bool append_string(uint8_t **ptr, const uint8_t *limit, const char *str) {
     uint32_t len = strlen(str);
+    if (*ptr + 4 + len + 1 > limit) return false;
     *((uint32_t *)*ptr) = len;
     *ptr += 4;
     memcpy(*ptr, str, len + 1);
     *ptr += len + 1;
+    return true;
 }
 
 int dbus_connect_system(void) {
@@ -535,6 +542,7 @@ int dbus_connect_system(void) {
 int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method) {
     uint8_t msg[2048];
     memset(msg, 0, sizeof(msg));
+    uint8_t *limit = msg + sizeof(msg);
     
     dbus_header_t *hdr = (dbus_header_t *)msg;
     hdr->endian = DBUS_ENDIAN_LITTLE;
@@ -545,24 +553,28 @@ int dbus_send_method_call(int sock, const char *dest, const char *path, const ch
     
     uint8_t *ptr = msg + sizeof(dbus_header_t);
     
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    append_string(&ptr, path);
+    if (!append_string(&ptr, limit, path)) return -1;
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, dest);
+    if (!append_string(&ptr, limit, dest)) return -1;
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, iface);
+    if (!append_string(&ptr, limit, iface)) return -1;
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, method);
+    if (!append_string(&ptr, limit, method)) return -1;
     ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
     hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0; 
+    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0; 
     hdr->body_len = 0;
     
     return send(sock, msg, (ptr - msg), 0);
@@ -626,6 +638,8 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     /* 1. Request ObjectManager Dump */
     uint8_t msg[512];
     memset(msg, 0, sizeof(msg));
+    uint8_t *limit = msg + sizeof(msg);
+    
     dbus_header_t *hdr = (dbus_header_t *)msg;
     hdr->endian = DBUS_ENDIAN_LITTLE;
     hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
@@ -634,17 +648,28 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     hdr->serial = 2;
     
     uint8_t *ptr = msg + sizeof(dbus_header_t);
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    append_string(&ptr, "/"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!append_string(&ptr, limit, "/")) return -1; 
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "net.connman.iwd"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!append_string(&ptr, limit, "net.connman.iwd")) return -1; 
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "org.freedesktop.DBus.ObjectManager"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!append_string(&ptr, limit, "org.freedesktop.DBus.ObjectManager")) return -1; 
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    
+    if (ptr + 4 > limit) return -1;
     *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    append_string(&ptr, "GetManagedObjects"); ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!append_string(&ptr, limit, "GetManagedObjects")) return -1; 
+    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
     
     hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0) *ptr++ = 0;
+    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0;
     hdr->body_len = 0;
     
     if (send(sock, msg, (ptr - msg), 0) < 0) return -1;
