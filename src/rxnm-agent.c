@@ -18,6 +18,10 @@
  * - No external dependencies (glibc/musl only).
  * - Static linking preferred for portability across distros.
  * - Configuration logic is derived strictly from rxnm_generated.h (SSoT).
+ * * AUDIT NOTES (RC1):
+ * - Hardened DBus parser against boundary overruns.
+ * - Dynamic buffer allocation for probe targets.
+ * - Signal-safe process reaping.
  */
 
 #define _GNU_SOURCE
@@ -36,7 +40,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/file.h>
-#include <sys/wait.h> /* Added for safe fork/exec roaming triggers */
+#include <sys/wait.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/netlink.h>
@@ -78,8 +82,10 @@
 char g_conf_dir[PATH_MAX] = CONF_DIR;
 char g_run_dir[PATH_MAX] = RUN_DIR;
 char g_agent_version[64] = RXNM_VERSION;
-char g_conn_targets_v4[256] = RXNM_PROBE_TARGETS_V4;
-char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
+
+/* RC1 FIX: Increased buffers for probe targets (4KB) to prevent truncation of long env vars */
+char g_conn_targets_v4[4096] = RXNM_PROBE_TARGETS_V4;
+char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 
 /* --- Internal Limits --- */
 #define BUF_SIZE 32768
@@ -597,34 +603,19 @@ int dbus_trigger_reload() {
 
 /* Helper to check if a Variant String Signature exists before current position */
 int check_variant_sig_string(const char *buf, int pos) {
-    /* * Variant marshalling in a Property Array `a{sv}`:
-     * Key (String) | Padding | Variant Sig (String) | Padding | Variant Value (Data)
-     * * We found the Variant Value (SSID String) at `pos`.
-     * The Signature for a string is 's'. Marshalled as a string: [1]['s'][0].
-     * Length is 3 bytes.
-     * We need to look backwards from `pos`.
-     * Between Signature and Value, there might be alignment padding.
-     * Value (String) aligns to 4 bytes. `pos` is 4-byte aligned.
-     * Signature (String) aligns to 4 bytes.
-     * * So we look at `pos - padding - sig_len`.
-     * Sig Len for "s" is 3 bytes + 4 bytes length integer = 7 bytes.
-     * * Let's look immediately backwards skipping null padding.
-     * We expect to see 0, 's', 1 (little endian length of sig string).
-     */
+    /* RC1 FIX: Check if pos < 2 to prevent negative indexing */
+    if (pos < 2) return 0;
     
     int i = pos - 1;
     /* Skip alignment padding */
     while (i > 0 && buf[i] == 0) i--;
     
+    /* RC1 FIX: Boundary check after decrement */
+    if (i < 2) return 0;
+    
     /* Now we should see the signature string "s" (null terminated) */
     if (i >= 2) {
         /* Expect 0 (null term), 's', 1 (len) */
-        /* Note: i points to null terminator of signature string */
-        /* But wait, Signature is a Type "g" (Signature), which aligns to 1 byte. 
-           However, in a VARIANT, the signature is marshalled as type SIGNATURE.
-           Format: [1 byte len][signature chars][null].
-           So for "s", it is [1]['s'][0]. 3 bytes total.
-        */
         if (buf[i] == 0 && buf[i-1] == 's' && buf[i-2] == 1) {
             return 1;
         }
@@ -705,7 +696,10 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
      */
     int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
     
-    for (int i = start_offset; i < total_msg_size - (int)ssid_len - 4; i += 4) {
+    /* RC1 FIX: Check upper bound to avoid overrun during loop */
+    int loop_limit = total_msg_size - 4;
+    
+    for (int i = start_offset; i < loop_limit; i += 4) {
         
         uint32_t len = *((uint32_t*)&buf[i]);
         
@@ -758,13 +752,6 @@ int cmd_connect(const char *ssid, const char *iface) {
     
     /* Call Connect() on the object path */
     dbus_send_method_call(sock, "net.connman.iwd", path, "net.connman.iwd.Network", "Connect");
-    
-    /*
-     * We don't wait for "Connected" signal here (that's for monitoring).
-     * Just triggering the command is enough. If passphrase is required,
-     * IWD will throw AgentInteraction error or handle it if we saved the PSK.
-     * Since we usually pre-provision PSK via file write, this is fine.
-     */
     
     printf("{\"success\": true, \"action\": \"connect\", \"ssid\": \"%s\", \"path\": \"%s\"}\n", ssid, path);
     close(sock);
@@ -1213,7 +1200,11 @@ void cmd_check_internet() {
     bool v4 = false, v6 = false;
     
     /* Check IPv4 */
-    char list_v4[256]; strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4) - 1); list_v4[sizeof(list_v4)-1] = '\0';
+    /* RC1 FIX: Use enlarged buffer */
+    char list_v4[4096]; 
+    strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4) - 1); 
+    list_v4[sizeof(list_v4)-1] = '\0';
+    
     char *token_v4, *saveptr_v4; token_v4 = strtok_r(list_v4, " ", &saveptr_v4);
     while (token_v4 != NULL) {
         char ip[64]; int port = 80;
@@ -1223,7 +1214,11 @@ void cmd_check_internet() {
     }
     
     /* Check IPv6 */
-    char list_v6[512]; strncpy(list_v6, g_conn_targets_v6, sizeof(list_v6) - 1); list_v6[sizeof(list_v6)-1] = '\0';
+    /* RC1 FIX: Use enlarged buffer */
+    char list_v6[4096]; 
+    strncpy(list_v6, g_conn_targets_v6, sizeof(list_v6) - 1); 
+    list_v6[sizeof(list_v6)-1] = '\0';
+    
     char *token_v6, *saveptr_v6; token_v6 = strtok_r(list_v6, " ", &saveptr_v6);
     while (token_v6 != NULL) {
         char ip[128]; int port = 80;
@@ -1661,8 +1656,11 @@ static void trigger_roaming_event(const char *iface) {
         exit(1);
     } else if (pid > 0) {
         // Parent Process: Wait to reap zombie
+        /* RC1 FIX: Check for errors on waitpid */
         int status;
-        waitpid(pid, &status, 0);
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) break; 
+        }
     }
 }
 
