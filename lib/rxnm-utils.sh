@@ -377,7 +377,11 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    echo "$1" | tr -cd '[:alnum:]_-'
+    # Preserves UTF-8, Emojis, and Spaces for readability in filenames.
+    # Only replaces the directory separator '/' with underscore '_' to ensure filesystem safety.
+    # Note: Bash variable replacement ${var//\//_} handles UTF-8 correctly on modern Linux systems.
+    # Example: "Café 🚀/5G" -> "Café 🚀_5G"
+    printf '%s\n' "${1//\//_}"
 }
 
 json_escape() {
@@ -443,7 +447,7 @@ secure_write() {
     
     # Fallback Path: Shell implementation
     local tmp
-    # Fix: Force umask 077 for the temp file creation
+    # Fix: Force umask 077 for the temp file creation to prevent race condition window
     tmp=$(umask 077 && mktemp "${dest}.XXXXXX") || return 1
     
     printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
@@ -464,10 +468,7 @@ validate_ssid() {
         json_error "Invalid SSID length: $len" "1" "SSID must be 1-32 chars"
         return 1
     fi
-    if [[ "$ssid" =~ [\$\`\\\!\;] ]]; then
-        json_error "SSID contains forbidden characters" "1" "Avoid shell special chars"
-        return 1
-    fi
+    # Removed character restriction check to allow for UTF-8/Emoji/Special Chars
     return 0
 }
 
