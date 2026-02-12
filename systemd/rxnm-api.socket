@@ -1,0 +1,17 @@
+[Unit]
+Description=RXNM REST-Lite Socket Gateway
+Documentation=https://codeberg.org/aenertia/rxnm
+
+[Socket]
+# Listen on localhost port 29304 (Hex: 0x7278 / "rx")
+ListenStream=127.0.0.1:29304
+# inetd-style: spawn one service instance per connection
+Accept=yes
+# Limit concurrent connections to prevent DoS on low-power hardware
+MaxConnections=5
+# Rate limit connection attempts
+TriggerLimitIntervalSec=1s
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=sockets.target

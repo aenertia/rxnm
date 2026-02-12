@@ -1,0 +1,42 @@
+[Unit]
+Description=RXNM API Instance (%i)
+Documentation=https://codeberg.org/aenertia/rxnm
+After=network.target
+Requires=rxnm-api.socket
+
+[Service]
+# The '-' prefix ignores non-zero exit codes to prevent systemd from marking the unit as failed
+ExecStart=-/usr/bin/rxnm --stdin --json
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+
+# Execution settings
+User=root
+Group=root
+
+# --- Resource Constraints ---
+# Kill the process if it takes longer than 30s to process a request
+RuntimeMaxSec=30
+# Prevent fork bombs; slightly increased to accommodate sub-calls in nullify mode
+TasksMax=20
+# Cap memory usage for this instance
+MemoryMax=64M
+
+# --- System Access ---
+# Sandboxing is disabled to allow full access for 'tune' and 'nullify' commands.
+# These require writing to /proc, /sys, and interacting with the systemd manager.
+PrivateTmp=no
+ProtectSystem=no
+ProtectHome=no
+NoNewPrivileges=no
+RestrictRealtime=no
+
+# Explicitly disable kernel and system protections to ensure hardware 
+# unbinding and module purging function as intended.
+ProtectControlGroups=no
+ProtectKernelModules=no
+ProtectKernelTunables=no
+
+[Install]
+WantedBy=multi-user.target
