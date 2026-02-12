@@ -36,6 +36,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/wait.h> /* Added for safe fork/exec roaming triggers */
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/netlink.h>
@@ -1648,6 +1649,24 @@ void cmd_append_config(char *path, char *line) {
 }
 
 /**
+ * @brief Triggers external roaming logic safely via fork/exec to prevent Shell Injection.
+ */
+static void trigger_roaming_event(const char *iface) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child Process: Execute roaming trigger logic safely
+        execlp("rxnm", "rxnm", "wifi", "roaming", "trigger", iface, NULL);
+        // Fallback if 'rxnm' is not in standard PATH
+        execlp("/usr/bin/rxnm", "rxnm", "wifi", "roaming", "trigger", iface, NULL);
+        exit(1);
+    } else if (pid > 0) {
+        // Parent Process: Wait to reap zombie
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+/**
  * @brief Efficient roaming monitor loop using Netlink events.
  * Triggers external shell script when events occur.
  */
@@ -1656,11 +1675,8 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     int sock = open_netlink_rt();
     if (sock < 0) exit(1);
     
-    char trigger_cmd[256];
-    snprintf(trigger_cmd, sizeof(trigger_cmd), "rxnm wifi roaming trigger %s", iface);
-    
     // Initial check
-    system(trigger_cmd);
+    trigger_roaming_event(iface);
     
     while (1) {
         char buf[4096];
@@ -1676,8 +1692,8 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                     if (tb[IFLA_IFNAME]) {
                         char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
                         if (strcmp(name, iface) == 0) {
-                            // Link state changed, trigger check
-                            system(trigger_cmd);
+                            // Link state changed, trigger check safely
+                            trigger_roaming_event(iface);
                         }
                     }
                 }
