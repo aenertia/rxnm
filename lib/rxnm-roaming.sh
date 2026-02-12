@@ -305,7 +305,11 @@ action_wifi_roaming_trigger() {
     if [ -z "$iface" ]; then
         iface=$(get_wifi_iface 2>/dev/null)
     fi
-    : "${iface:=wlan0}"
+    
+    if [ -z "$iface" ]; then
+        log_roam "ERROR: Could not detect WiFi interface. Specify via --interface."
+        exit 1
+    fi
     
     load_roaming_config
     log_roam "Opportunistic Trigger: Checking location context for $iface..."

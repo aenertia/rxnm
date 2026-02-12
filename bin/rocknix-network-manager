@@ -165,7 +165,7 @@ Examples:
   rxnm system status --format table
   rxnm bridge create br0
 
-Use 'rxnm help <category>' for specific commands.
+Use 'rxnm <category> --help' for specific commands.
 EOF
 }
 
@@ -348,6 +348,8 @@ Actions:
   check portal          Check for captive portal
   reload                Reload network configuration
   proxy set             Configure global/interface proxy
+  nullify enable        Disable networking entirely (requires --yes)
+  nullify disable       Attempt to restore networking
 EOF
             ;;
         *)
@@ -383,21 +385,10 @@ fi
 # --- HIERARCHY DISPATCHER ---
 
 # List of Built-in Categories
-CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system")
+CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
 
 # Determine Category from first argument
 RAW_CMD="${1:-status}"
-
-# Help command interceptor
-if [ "$RAW_CMD" == "help" ]; then
-    if [ -n "${2:-}" ]; then
-        print_category_help "$2"
-    else
-        print_main_help
-    fi
-    exit 0
-fi
-
 CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
 # 1. Plugin Dispatch (Highest Priority)
@@ -449,10 +440,7 @@ case "$CATEGORY" in
         # NEW: Load Roaming Engine
         source "${LIB_DIR}/rxnm-roaming.sh"
         ;;
-    interface|bridge) 
-        source "${LIB_DIR}/rxnm-interfaces.sh" 
-        source "${LIB_DIR}/rxnm-diagnostics.sh"
-        ;;
+    interface|bridge) source "${LIB_DIR}/rxnm-interfaces.sh" ;;
     vpn|tun|tap) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-vpn.sh" 
@@ -460,13 +448,13 @@ case "$CATEGORY" in
     bond|vlan|vrf|macvlan|ipvlan|veth) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-virt.sh" 
-        source "${LIB_DIR}/rxnm-diagnostics.sh"
         ;;
     bluetooth) source "${LIB_DIR}/rxnm-bluetooth.sh" ;;
     profile) source "${LIB_DIR}/rxnm-profiles.sh" ;;
-    system) 
+    system|config) 
         source "${LIB_DIR}/rxnm-diagnostics.sh" 
         source "${LIB_DIR}/rxnm-wifi.sh" 
+        source "${LIB_DIR}/rxnm-nullify.sh"
         ;;
 esac
 
@@ -755,7 +743,7 @@ case "$CATEGORY" in
         ;;
         
     system)
-        ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop")
+        ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop" "nullify")
         shift
         case "$ACTION" in
             status) action_status "${1:-}" ;;
@@ -786,6 +774,7 @@ case "$CATEGORY" in
                 action_setup 
                 ;;
             stop) action_stop ;;
+            nullify) action_system_nullify "${1:-}" ;;
         esac
         ;;
         
@@ -831,11 +820,6 @@ case "$CATEGORY" in
          if [ "$ACTION" == "delete" ]; then
              [ -z "$NAME" ] && { json_error "Name required"; exit 1; }
              action_delete_netdev "$NAME"
-             exit 0
-         fi
-         
-         if [ "$ACTION" == "list" ]; then
-             action_status ""
              exit 0
          fi
          

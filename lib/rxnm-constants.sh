@@ -144,3 +144,7 @@ else export JQ_BIN="jq"; fi
 # --- State Caches ---
 declare -A SERVICE_STATE_CACHE
 declare -A SERVICE_STATE_TS
+
+# --- Nullify Mode Constants ---
+export NULLIFY_SERVICES="systemd-networkd NetworkManager connman iwd wpa_supplicant bluetooth bluez ifupdown dhcpcd systemd-resolved avahi-daemon cups-browsed sshd dropbear telnetd ntpd chrony systemd-timesyncd smbd nmbd wsdd rpcbind nfs-common nginx lighttpd apache2 nftables iptables ufw firewalld docker docker.socket containerd podman podman.socket lxc lxc-net libvirtd virtlogd tailscaled zerotier-one tinc nebula warpgate"
+export NULLIFY_MODULES="nf_tables x_tables ip_tables ip6_tables nf_conntrack nf_nat cfg80211 mac80211 bluetooth bnep rfcomm dwmac_rk stmmac ath11k_pci ath12k rmnet qrtr g_ether usb_f_rndis ipv6 wireguard bridge bonding veth macvlan ipvlan tun tap overlay br_netfilter dummy vxlan geneve ax25 netrom sctp dccp appletalk"

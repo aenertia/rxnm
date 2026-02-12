@@ -28,7 +28,7 @@ _rxnm_completion() {
     local RUN_DIR="/run/rocknix"
     local STATUS_CACHE="${RUN_DIR}/status.json"
     local GLOBAL_OPTS="--json --format --yes --force --debug --help"
-    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system help"
+    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
 
     # --- LIVE QUERY HELPERS ---
 
@@ -113,11 +113,6 @@ _rxnm_completion() {
     local category="${words[1]}"
     
     case "$category" in
-        help)
-            if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "${TOP_CATS}" -- "$cur") )
-            fi
-            ;;
         wifi)
             local cmds="scan connect disconnect ap wps networks list forget country p2p dpp"
             if [[ $cword -eq 2 ]]; then
@@ -226,7 +221,7 @@ _rxnm_completion() {
              ;;
 
         system)
-            local cmds="status check proxy reload setup start stop"
+            local cmds="status check proxy reload setup start stop nullify"
             if [[ $cword -eq 2 ]]; then
                  COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
             fi
@@ -237,6 +232,9 @@ _rxnm_completion() {
                 proxy) 
                     if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "set" -- "$cur") ); fi
                     if [[ "${words[3]}" == "set" ]]; then COMPREPLY=( $(compgen -W "--http --https --noproxy --interface" -- "$cur") ); fi
+                    ;;
+                nullify)
+                    if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "enable disable" -- "$cur") ); fi
                     ;;
             esac
             ;;

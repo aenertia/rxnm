@@ -47,6 +47,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
+#include <dirent.h>
 
 /* Generated SSoT Constants */
 #include "rxnm_generated.h"
@@ -1390,6 +1391,80 @@ void cmd_tune(char *profile) {
 }
 
 /**
+ * @brief Nullify network stack (zero-stack state)
+ */
+void cmd_nullify(const char *action) {
+    if (strcmp(action, "enable") == 0) {
+        write_sysctl("/proc/sys/net/ipv4/conf/all/disable_ipv4", "1");
+        write_sysctl("/proc/sys/net/ipv6/conf/all/disable_ipv6", "1");
+        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh1", "0");
+        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh2", "0");
+        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh3", "0");
+        write_sysctl("/proc/sys/net/core/rmem_default", "4096");
+        write_sysctl("/proc/sys/net/core/wmem_default", "4096");
+        write_sysctl("/proc/sys/net/ipv4/tcp_congestion_control", "reno");
+        write_sysctl("/proc/sys/net/core/default_qdisc", "pfifo_fast");
+        write_sysctl("/proc/sys/net/ipv4/tcp_timestamps", "0");
+        write_sysctl("/proc/sys/net/ipv4/tcp_sack", "0");
+        write_sysctl("/proc/sys/net/core/netdev_max_backlog", "1");
+        write_sysctl("/proc/sys/net/core/bpf_jit_enable", "0");
+        
+        const char *buses[] = {"pci", "sdio"};
+        for (int i = 0; i < 2; i++) {
+            char path[512];
+            snprintf(path, sizeof(path), "/sys/bus/%s/devices", buses[i]);
+            DIR *dir = opendir(path);
+            if (dir) {
+                struct dirent *ent;
+                while ((ent = readdir(dir)) != NULL) {
+                    if (ent->d_name[0] == '.') continue;
+                    
+                    int is_net = 0;
+                    char dev_path[1024];
+                    snprintf(dev_path, sizeof(dev_path), "%s/%s", path, ent->d_name);
+                    
+                    char net_path[1048];
+                    snprintf(net_path, sizeof(net_path), "%s/net", dev_path);
+                    struct stat st;
+                    if (stat(net_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+                        is_net = 1;
+                    } else {
+                        char class_path[1048];
+                        snprintf(class_path, sizeof(class_path), "%s/class", dev_path);
+                        FILE *f = fopen(class_path, "r");
+                        if (f) {
+                            char class_val[32] = {0};
+                            if (fgets(class_val, sizeof(class_val), f)) {
+                                if (strncmp(class_val, "0x02", 4) == 0) is_net = 1;
+                            }
+                            fclose(f);
+                        }
+                    }
+                    
+                    if (is_net) {
+                        char unbind_path[1048];
+                        snprintf(unbind_path, sizeof(unbind_path), "%s/driver/unbind", dev_path);
+                        FILE *f = fopen(unbind_path, "w");
+                        if (f) {
+                            fprintf(f, "%s", ent->d_name);
+                            fclose(f);
+                        }
+                    }
+                }
+                closedir(dir);
+            }
+        }
+    } else if (strcmp(action, "disable") == 0) {
+        write_sysctl("/proc/sys/net/ipv4/conf/all/disable_ipv4", "0");
+        write_sysctl("/proc/sys/net/ipv6/conf/all/disable_ipv6", "0");
+        write_sysctl("/proc/sys/net/core/rmem_default", "212992");
+        write_sysctl("/proc/sys/net/core/wmem_default", "212992");
+        write_sysctl("/proc/sys/net/core/default_qdisc", "fq_codel");
+        write_sysctl("/proc/sys/net/core/bpf_jit_enable", "1");
+    }
+}
+
+/**
  * @brief Atomically writes stdin to a file.
  * Implementation: Dynamically allocates buffer to handle >64KB input.
  * Writes to ${path}.tmp.${pid}, then fsyncs and renames.
@@ -1616,6 +1691,7 @@ char *g_monitor_iface = NULL;
 char *g_monitor_thresh = NULL;
 char *g_connect_ssid = NULL;
 char *g_connect_iface = NULL;
+char *g_nullify_cmd = NULL;
 
 int main(int argc, char *argv[]) {
     /* Register cleanup to satisfy Valgrind zero-leak checks */
@@ -1642,11 +1718,12 @@ int main(int argc, char *argv[]) {
         {"line", required_argument, 0, 'l'},
         {"monitor-roam", required_argument, 0, 'M'},
         {"threshold", required_argument, 0, 'S'},
+        {"nullify", required_argument, 0, 'N'},
         {0, 0, 0, 0}
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--connect <ssid> --iface <iface> Connect to wifi\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
@@ -1666,6 +1743,7 @@ int main(int argc, char *argv[]) {
             case 'S': g_monitor_thresh = optarg; break;
             case 'C': g_connect_ssid = optarg; break;
             case 'i': g_connect_iface = optarg; break;
+            case 'N': g_nullify_cmd = optarg; break;
             default: return 1;
         }
     }
@@ -1690,6 +1768,11 @@ int main(int argc, char *argv[]) {
         return cmd_connect(g_connect_ssid, g_connect_iface);
     }
     
+    if (g_nullify_cmd) {
+        cmd_nullify(g_nullify_cmd);
+        return 0;
+    }
+
     /* Default Action: Dump status if run with args but none matched */
     if (optind == 1) { collect_network_state(); print_json_status(); return 0; }
     
