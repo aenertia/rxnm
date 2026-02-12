@@ -9,7 +9,7 @@
 #
 # This script serves as the primary entry point for the RXNM system. It:
 # 1. Bootstraps the environment (paths, library sourcing).
-# 2. Normalizes user input (aliases, global flags).
+# 2. Normalizes user input (aliases, global flags, JSON stdin).
 # 3. Dispatches commands to specific logic modules or external plugins.
 #
 # DESIGN NOTE: To minimize startup latency on low-power devices (RK3326),
@@ -108,7 +108,7 @@ expand_alias() {
             echo "$opt"
             return 0
         fi
-        if [[ "$opt" == "$input"* ]]; then
+        if [[ "$input" != "" ]] && [[ "$opt" == "$input"* ]]; then
             if [ -n "$match" ]; then return 1; fi # Ambiguous match
             match="$opt"
         fi
@@ -131,6 +131,7 @@ print_main_help() {
     
     cat <<EOF
 Usage: rxnm <category> [target] <action> [options]
+       echo '{"category":"wifi", "action":"connect", "ssid":"MyNet"}' | rxnm --stdin
 
 Categories:
   wifi          Manage Wireless connections
@@ -143,6 +144,7 @@ Categories:
   bond          Manage Interface Bonding
   vlan          Manage VLANs
   vrf           Manage Virtual Routing Functions
+  api           Schema and Versioning
 EOF
 
     if [ -n "$plugins" ]; then
@@ -156,6 +158,7 @@ EOF
 Global Options:
   --format <fmt>  Output format: human (default), json, table
   --yes, -y       Skip confirmation prompts
+  --stdin         Read configuration from JSON on stdin
   --help, -h      Show help
   --version       Show version
 
@@ -322,22 +325,6 @@ Options:
   --group <group>       Group owner
 EOF
             ;;
-        bluetooth)
-            cat <<EOF
-Usage: rxnm bluetooth <action> [options]
-
-Actions:
-  scan                  Scan for devices
-  pair <mac>            Pair with device
-  unpair <mac>          Unpair device
-  pan enable            Enable PAN Tethering
-  pan disable           Disable PAN Tethering
-
-Options (for pan enable):
-  --mode <client|host>  Client (connect to phone) or Host (share net)
-  --share               Enable NAT (Host mode only)
-EOF
-            ;;
         system)
             cat <<EOF
 Usage: rxnm system <action> [options]
@@ -352,6 +339,12 @@ Actions:
   nullify disable       Attempt to restore networking
 EOF
             ;;
+        api)
+            cat <<EOF
+Usage: rxnm api <action>
+Actions: schema, version
+EOF
+            ;;
         *)
             echo "No specific help for '$category'."
             ;;
@@ -362,6 +355,7 @@ EOF
 # Parse flags that appear before subcommands or anywhere in the chain.
 ARGS=()
 SHOW_HELP="false"
+USE_STDIN="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -370,10 +364,80 @@ while [[ $# -gt 0 ]]; do
         --yes|-y|--force) FORCE_ACTION="true"; shift ;;
         --debug) export RXNM_DEBUG=1; set -x; shift ;;
         --help|-h) SHOW_HELP="true"; shift ;;
+        --stdin) USE_STDIN="true"; shift ;;
+        --version) echo "RXNM $RXNM_VERSION (API ${RXNM_API_VERSION:-1.0})"; exit 0 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
-# Reset positional arguments to the non-flag arguments
+
+# --- JSON STDIN EXPANSION (REST LITE MODE) ---
+if [ "$USE_STDIN" == "true" ]; then
+    if [ -p /dev/stdin ] || [ -f /dev/stdin ]; then
+        # Read the raw JSON from stdin
+        INPUT_JSON=$(cat)
+        
+        # 1. API Version Compatibility Check
+        REQ_VER=$("$JQ_BIN" -r '.api_version // empty' <<< "$INPUT_JSON")
+        if [ -n "$REQ_VER" ] && [ -n "${RXNM_API_VERSION:-}" ] && [ "$REQ_VER" != "$RXNM_API_VERSION" ]; then
+             # Compare major version (strict)
+             if [[ "${REQ_VER%%.*}" != "${RXNM_API_VERSION%%.*}" ]]; then
+                 if [ "${RXNM_FORMAT}" == "json" ] || [ "$("$JQ_BIN" -r '.format' <<< "$INPUT_JSON")" == "json" ]; then
+                     echo "{\"success\": false, \"error\": \"API Version Mismatch\", \"supported\": \"$RXNM_API_VERSION\", \"requested\": \"$REQ_VER\"}"
+                     exit 1
+                 else
+                     echo "Error: API Version Mismatch (Server: $RXNM_API_VERSION, Client: $REQ_VER)" >&2
+                     exit 1
+                 fi
+             fi
+        fi
+
+        # 2. Extract Core Commands
+        JSON_CAT=$("$JQ_BIN" -r '.category // empty' <<< "$INPUT_JSON")
+        JSON_ACT=$("$JQ_BIN" -r '.action // empty' <<< "$INPUT_JSON")
+        
+        # 3. Extract Globals (Overrides)
+        J_FMT=$("$JQ_BIN" -r '.format // empty' <<< "$INPUT_JSON")
+        J_JSON=$("$JQ_BIN" -r '.json // false' <<< "$INPUT_JSON")
+        J_FORCE=$("$JQ_BIN" -r '.force // .yes // false' <<< "$INPUT_JSON")
+        
+        if [ "$J_FMT" == "json" ] || [ "$J_JSON" == "true" ]; then RXNM_FORMAT="json"; fi
+        if [ "$J_FORCE" == "true" ]; then FORCE_ACTION="true"; fi
+        
+        if [ -n "$JSON_CAT" ]; then
+            # Rebuild ARGS array from JSON structure
+            ARGS=("$JSON_CAT")
+            [ -n "$JSON_ACT" ] && ARGS+=("$JSON_ACT")
+            
+            # Map JSON keys to CLI flags
+            # Normalizes snake_case keys (api_version) to kebab-case flags (--api-version)
+            while IFS= read -r line; do
+                ARGS+=("$line")
+            done < <("$JQ_BIN" -r '
+                del(.category, .action, .json, .format, .yes, .force, .api_version) | 
+                to_entries[] | 
+                select(.value != null and .value != false) | 
+                if (.value | type) == "boolean" and .value == true then 
+                    "--" + (.key | gsub("_";"-")) 
+                elif (.value | type) == "array" then
+                    "--" + (.key | gsub("_";"-")) + "\n" + (.value | join(","))
+                else 
+                    "--" + (.key | gsub("_";"-")) + "\n" + (.value | tostring) 
+                end
+            ' <<< "$INPUT_JSON")
+        else
+             # Error out if no category provided in JSON
+             if [ "${RXNM_FORMAT}" == "json" ]; then
+                 echo '{"success": false, "error": "Invalid JSON input: category required"}'
+                 exit 1
+             else
+                 echo "Error: Invalid JSON input (category required)" >&2
+                 exit 1
+             fi
+        fi
+    fi
+fi
+
+# Reset positional arguments to the expanded/normalized ARGS array
 set -- "${ARGS[@]}"
 
 # If help requested at root
@@ -385,7 +449,7 @@ fi
 # --- HIERARCHY DISPATCHER ---
 
 # List of Built-in Categories
-CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
+CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config" "api")
 
 # Determine Category from first argument
 RAW_CMD="${1:-status}"
@@ -456,6 +520,7 @@ case "$CATEGORY" in
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-nullify.sh"
         ;;
+    api) ;;
 esac
 
 # Check for category-specific help
@@ -488,6 +553,23 @@ fi
 
 # Dispatch to Category Handlers
 case "$CATEGORY" in
+    api)
+        ACTION="${1:-schema}"
+        case "$ACTION" in
+            schema)
+                SCHEMA_FILE="${LIB_DIR}/../api-schema.json"
+                if [ -f "$SCHEMA_FILE" ]; then
+                    cat "$SCHEMA_FILE"
+                else
+                    echo '{"error": "Schema file not found"}'
+                fi
+                ;;
+            version)
+                json_success "{\"version\": \"${RXNM_VERSION}\", \"api\": \"${RXNM_API_VERSION:-1.0}\"}"
+                ;;
+        esac
+        ;;
+
     wifi)
         ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming")
         shift

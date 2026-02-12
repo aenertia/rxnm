@@ -223,9 +223,11 @@ json_success() {
     fi
     if [ -z "$data" ]; then data="{}"; fi
     
-    # Ensure success=true is present
+    local api_ver="${RXNM_API_VERSION:-1.0}"
+    
+    # REFINED: Inject api_version into every success response
     local full_json
-    full_json=$("$JQ_BIN" -n --argjson data "$data" '{success:true} + $data')
+    full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
     
     case "${RXNM_FORMAT:-human}" in
         json)
@@ -265,7 +267,7 @@ json_success() {
                     print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
                     ;;
                 *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
+                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
                     ;;
             esac
             ;;
@@ -306,7 +308,7 @@ json_success() {
                      echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
                      ;;
                 *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success) | to_entries | .[] | "\(.key): \(.value)"'
+                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
                     ;;
             esac
             ;;
@@ -319,10 +321,11 @@ json_error() {
     local msg="$1"
     local code="${2:-1}"
     local hint="${3:-}"
+    local api_ver="${RXNM_API_VERSION:-1.0}"
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then
-        "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" \
-            '{success:false, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
+        "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
+            '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
     else
         echo "✗ Error: $msg" >&2
         [ -n "$hint" ] && echo "  hint: $hint" >&2

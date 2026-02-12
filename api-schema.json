@@ -1,72 +1,588 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RXNM Unified API Schema",
-  "description": "Comprehensive schema for all RXNM JSON outputs including Status, WiFi, Bluetooth, Profiles, Diagnostics, and Configuration Actions.",
+  "title": "RXNM 1.0 Unified API Schema",
+  "description": "Contract for RXNM interactions including Input Requests (stdin) and Output Responses (stdout).",
   "type": "object",
-  "required": [
-    "success"
-  ],
-  "properties": {
-    "success": {
-      "type": "boolean",
-      "description": "Global success indicator."
-    },
-    "error": {
-      "type": "string",
-      "description": "Error message if success is false."
-    },
-    "hint": {
-      "type": "string",
-      "description": "User-friendly suggestion for resolving the error."
-    },
-    "exit_code": {
-      "type": "integer",
-      "description": "Process exit code if success is false."
-    },
-    "agent_version": {
-      "type": "string",
-      "description": "Version of the native agent if used."
-    }
-  },
   "oneOf": [
     {
-      "$ref": "#/definitions/SystemStatusResponse",
-      "description": "Output of 'rxnm system status'"
+      "$ref": "#/definitions/InputRequest",
+      "description": "Any valid input command object"
     },
     {
-      "$ref": "#/definitions/WifiScanResponse",
-      "description": "Output of 'rxnm wifi scan'"
-    },
-    {
-      "$ref": "#/definitions/WifiKnownResponse",
-      "description": "Output of 'rxnm wifi list'"
-    },
-    {
-      "$ref": "#/definitions/WifiP2PPeersResponse",
-      "description": "Output of 'rxnm wifi p2p scan'"
-    },
-    {
-      "$ref": "#/definitions/WifiP2PStatusResponse",
-      "description": "Output of 'rxnm wifi p2p status'"
-    },
-    {
-      "$ref": "#/definitions/BluetoothScanResponse",
-      "description": "Output of 'rxnm bluetooth scan'"
-    },
-    {
-      "$ref": "#/definitions/ProfileListResponse",
-      "description": "Output of 'rxnm profile list'"
-    },
-    {
-      "$ref": "#/definitions/DiagnosticResponse",
-      "description": "Output of 'rxnm system check internet/portal'"
-    },
-    {
-      "$ref": "#/definitions/ActionResponse",
-      "description": "Generic acknowledgment for state changing commands (connect, set, create, delete, dpp, p2p)"
+      "$ref": "#/definitions/OutputResponse",
+      "description": "Any valid output response object"
     }
   ],
   "definitions": {
+    "InputRequest": {
+      "type": "object",
+      "required": [
+        "category"
+      ],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "wifi",
+            "interface",
+            "system",
+            "bluetooth",
+            "vpn",
+            "profile",
+            "bridge",
+            "bond",
+            "vlan",
+            "vrf",
+            "macvlan",
+            "ipvlan",
+            "veth",
+            "tun",
+            "tap",
+            "config",
+            "api"
+          ]
+        },
+        "action": {
+          "type": "string"
+        },
+        "api_version": {
+          "type": "string",
+          "default": "1.0"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean",
+          "const": true
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "human",
+            "table"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "wifi"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/WifiInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "interface"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/InterfaceInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "bluetooth"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/BluetoothInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "system"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/SystemInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "vpn"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/VpnInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "bridge",
+                  "bond",
+                  "vlan",
+                  "vrf",
+                  "macvlan",
+                  "ipvlan",
+                  "veth",
+                  "tun",
+                  "tap"
+                ]
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/VirtualInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "profile"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/ProfileInput"
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "api"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/definitions/ApiInput"
+          }
+        }
+      ]
+    },
+    "WifiInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "scan",
+            "connect",
+            "disconnect",
+            "ap",
+            "wps",
+            "list",
+            "networks",
+            "forget",
+            "country",
+            "p2p",
+            "dpp",
+            "roaming"
+          ]
+        },
+        "ssid": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "interface": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "ap",
+            "adhoc"
+          ]
+        },
+        "share": {
+          "type": "boolean"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "ipv6_pd": {
+          "enum": [
+            "yes",
+            "no"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        },
+        "peer": {
+          "type": "string"
+        },
+        "threshold": {
+          "type": "integer",
+          "description": "Signal threshold for roaming nudge"
+        },
+        "channel": {
+          "type": "integer",
+          "description": "WiFi channel for AP mode"
+        },
+        "subcommand": {
+          "type": "string"
+        }
+      }
+    },
+    "InterfaceInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "show",
+            "set",
+            "enable",
+            "disable",
+            "list",
+            "hotplug"
+          ]
+        },
+        "target": {
+          "type": "string"
+        },
+        "subcommand": {
+          "enum": [
+            "dhcp",
+            "static",
+            "hardware"
+          ]
+        },
+        "ip": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "dns": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "domains": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "routes": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "mtu": {
+          "type": "integer"
+        },
+        "metric": {
+          "type": "integer"
+        },
+        "mac": {
+          "type": "string"
+        },
+        "ipv6_privacy": {
+          "type": "string"
+        },
+        "dhcp_id": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        },
+        "duplex": {
+          "type": "string"
+        },
+        "autoneg": {
+          "type": "string"
+        },
+        "wol": {
+          "type": "string"
+        },
+        "mac_policy": {
+          "type": "string"
+        },
+        "name_policy": {
+          "type": "string"
+        }
+      }
+    },
+    "BluetoothInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "scan",
+            "pair",
+            "unpair",
+            "pan"
+          ]
+        },
+        "mac": {
+          "type": "string"
+        },
+        "subcommand": {
+          "enum": [
+            "enable",
+            "disable"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "client",
+            "host"
+          ]
+        },
+        "share": {
+          "type": "boolean"
+        },
+        "ip": {
+          "type": "string"
+        }
+      }
+    },
+    "SystemInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "status",
+            "check",
+            "proxy",
+            "reload",
+            "setup",
+            "start",
+            "stop",
+            "nullify"
+          ]
+        },
+        "subcommand": {
+          "type": "string"
+        },
+        "http": {
+          "type": "string"
+        },
+        "https": {
+          "type": "string"
+        },
+        "noproxy": {
+          "type": "string"
+        },
+        "interface": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        }
+      }
+    },
+    "VpnInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "connect",
+            "disconnect",
+            "delete",
+            "create"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "private_key": {
+          "type": "string"
+        },
+        "peer_key": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "allowed_ips": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        }
+      }
+    },
+    "VirtualInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "create",
+            "delete",
+            "add-member",
+            "add-slave",
+            "list"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "id": {
+          "type": "integer"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "table": {
+          "type": "integer"
+        },
+        "peer": {
+          "type": "string"
+        },
+        "bridge": {
+          "type": "string"
+        },
+        "bond": {
+          "type": "string"
+        },
+        "vrf": {
+          "type": "string"
+        },
+        "stp": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ProfileInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "save",
+            "load",
+            "delete",
+            "export",
+            "import"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "interface": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        }
+      }
+    },
+    "ApiInput": {
+      "properties": {
+        "action": {
+          "enum": [
+            "schema",
+            "version"
+          ]
+        }
+      }
+    },
+    "OutputResponse": {
+      "type": "object",
+      "required": [
+        "success"
+      ],
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "Global success indicator."
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message if success is false."
+        },
+        "hint": {
+          "type": "string",
+          "description": "User-friendly suggestion for resolving the error."
+        },
+        "exit_code": {
+          "type": "integer",
+          "description": "Process exit code if success is false."
+        },
+        "agent_version": {
+          "type": "string",
+          "description": "Version of the native agent."
+        },
+        "api_version": {
+          "type": "string",
+          "description": "API Version (e.g., '1.0')."
+        }
+      },
+      "oneOf": [
+        {
+          "$ref": "#/definitions/SystemStatusResponse"
+        },
+        {
+          "$ref": "#/definitions/WifiScanResponse"
+        },
+        {
+          "$ref": "#/definitions/WifiKnownResponse"
+        },
+        {
+          "$ref": "#/definitions/WifiP2PPeersResponse"
+        },
+        {
+          "$ref": "#/definitions/WifiP2PStatusResponse"
+        },
+        {
+          "$ref": "#/definitions/BluetoothScanResponse"
+        },
+        {
+          "$ref": "#/definitions/ProfileListResponse"
+        },
+        {
+          "$ref": "#/definitions/DiagnosticResponse"
+        },
+        {
+          "$ref": "#/definitions/ActionResponse"
+        }
+      ]
+    },
     "SystemStatusResponse": {
       "type": "object",
       "required": [
@@ -123,7 +639,8 @@
           ]
         },
         "state": {
-          "type": "string"
+          "type": "string",
+          "description": "Operational state (routable, no-carrier, etc)"
         },
         "connected": {
           "type": "boolean"
@@ -133,13 +650,21 @@
             "string",
             "null"
           ],
-          "description": "Primary IPv4 Address (optionally with CIDR)"
+          "description": "Primary IPv4 Address"
+        },
+        "ipv4": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of all IPv4 addresses"
         },
         "ipv6": {
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "List of all IPv6 addresses"
         },
         "gateway": {
           "type": [
@@ -213,13 +738,12 @@
         },
         "routes": {
           "type": "array",
-          "description": "List of active routes for this interface",
           "items": {
             "type": "object",
             "properties": {
               "dst": {
                 "type": "string",
-                "description": "Destination subnet with CIDR (e.g., 192.168.1.0/24)"
+                "description": "Destination subnet"
               },
               "gw": {
                 "type": "string"
@@ -242,7 +766,8 @@
           ]
         },
         "rssi": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Signal strength in dBm"
         },
         "frequency": {
           "type": "integer",
@@ -300,6 +825,23 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 100
+              },
+              "bssids": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "bssid": {
+                      "type": "string"
+                    },
+                    "signal": {
+                      "type": "integer"
+                    },
+                    "freq": {
+                      "type": "integer"
+                    }
+                  }
+                }
               }
             }
           }
@@ -379,7 +921,7 @@
       "properties": {
         "is_go": {
           "type": "boolean",
-          "description": "True if this device is acting as a Group Owner"
+          "description": "True if acting as Group Owner"
         },
         "peers": {
           "type": "array",
@@ -422,6 +964,18 @@
                 "type": "string"
               },
               "name": {
+                "type": "string"
+              },
+              "rssi": {
+                "type": "integer"
+              },
+              "connected": {
+                "type": "boolean"
+              },
+              "paired": {
+                "type": "boolean"
+              },
+              "adapter": {
                 "type": "string"
               }
             }
@@ -479,36 +1033,33 @@
         },
         "auto_ack": {
           "type": "boolean",
-          "description": "If true, RXNM automatically acknowledged the portal (e.g. transparent proxy)"
+          "description": "Auto-acknowledged portal"
         },
         "hijacked": {
           "type": "boolean",
-          "description": "True if redirect URL matches the probe URL (unusual portal behavior)"
+          "description": "True if unusual portal behavior detected"
         },
         "http_code": {
-          "type": "string",
-          "description": "HTTP Status code returned during probe"
+          "type": "string"
         },
         "reason": {
-          "type": "string",
-          "description": "Explanation for offline status (e.g., local_link_down)"
+          "type": "string"
         },
         "state": {
-          "type": "string",
-          "description": "Systemd networkd operational state during check"
+          "type": "string"
         },
         "note": {
           "type": "string"
         },
         "host": {
           "type": "string",
-          "description": "Host successfully reached in fallback mode"
+          "description": "Host reached in fallback mode"
         }
       }
     },
     "ActionResponse": {
       "type": "object",
-      "description": "Flexible object for command acknowledgments (connect, set, create, delete)",
+      "description": "Flexible object for command acknowledgments",
       "properties": {
         "action": {
           "type": "string"
@@ -556,8 +1107,7 @@
           "type": "string"
         },
         "ipv6_pd": {
-          "type": "string",
-          "description": "Prefix Delegation setting/status (yes/no)"
+          "type": "string"
         },
         "dhcp_id": {
           "type": "string"
@@ -601,6 +1151,24 @@
         },
         "country": {
           "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "bridge": {
+          "type": "string"
+        },
+        "bond": {
+          "type": "string"
+        },
+        "vrf": {
+          "type": "string"
+        },
+        "adapter": {
+          "type": "string"
+        },
+        "paired": {
+          "type": "boolean"
         }
       }
     },
@@ -636,4 +1204,3 @@
     }
   }
 }
-```
