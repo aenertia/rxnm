@@ -87,6 +87,13 @@ char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
 #define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
 #define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
 
+/* --- Timeout & Backoff Configuration --- */
+/* Optimized for SG2002/RK3326: Start slow to allow CPU yield, cap lower for responsiveness */
+#define DBUS_CONNECT_MAX_WAIT_US 5000000 /* 5 Seconds Max Retry Duration */
+#define DBUS_BACKOFF_START_US 2000       /* 2.0ms Initial Backoff (Yield CPU) */
+#define DBUS_BACKOFF_CAP_US 100000       /* 100ms Cap (Ensure < 0.1s latency on wake) */
+#define DBUS_IO_TIMEOUT_SEC 2            /* 2 Seconds I/O Timeout (Select/SO_RCV) */
+
 /* --- Netlink/WiFi Constants --- */
 #define NL80211_GENL_NAME           "nl80211"
 #define NL80211_CMD_GET_INTERFACE   5
@@ -164,6 +171,16 @@ bool file_contains(const char *path, const char *search_term) {
     }
     fclose(f);
     return found;
+}
+
+/**
+ * @brief Robust sleep using nanosleep (POSIX.1-2008)
+ */
+void safe_usleep(long us) {
+    struct timespec ts;
+    ts.tv_sec = us / 1000000;
+    ts.tv_nsec = (us % 1000000) * 1000;
+    nanosleep(&ts, NULL);
 }
 
 /**
@@ -357,18 +374,82 @@ void append_string(uint8_t **ptr, const char *str) {
 }
 
 int dbus_connect_system(void) {
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock < 0) return -1;
-    
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, DBUS_SOCK_PATH, sizeof(addr.sun_path)-1);
-    
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        return -2;
+    long current_backoff = DBUS_BACKOFF_START_US;
+    long total_waited = 0;
+    int sock = -1;
+    int res = -1;
+
+    while (total_waited < DBUS_CONNECT_MAX_WAIT_US) {
+        if (sock >= 0) close(sock); // Clean up previous attempt
+        
+        sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) return -1;
+        
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, DBUS_SOCK_PATH, sizeof(addr.sun_path)-1);
+        
+        /* Set Non-Blocking for Connect (Fail Fast) */
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+        
+        res = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+        
+        // Success or In-Progress -> Break loop to proceed to Select phase
+        if (res == 0) break;
+        if (res < 0 && errno == EINPROGRESS) break;
+        
+        // Fatal errors (Not worth retrying)
+        if (errno == EACCES || errno == EAFNOSUPPORT || errno == EPROTOTYPE) {
+            close(sock);
+            return -2;
+        }
+        
+        // Retryable errors (ENOENT=No Socket, ECONNREFUSED=No Listener, EAGAIN)
+        // Backoff and retry
+        safe_usleep(current_backoff);
+        total_waited += current_backoff;
+        
+        // Exponential backoff, capped at 100ms per sleep for responsiveness
+        current_backoff *= 2;
+        if (current_backoff > DBUS_BACKOFF_CAP_US) current_backoff = DBUS_BACKOFF_CAP_US; 
     }
+    
+    if (total_waited >= DBUS_CONNECT_MAX_WAIT_US) {
+        if (sock >= 0) close(sock);
+        return -2; // Timeout
+    }
+
+    /* Wait for connection completion (Select) if EINPROGRESS */
+    if (res < 0 && errno == EINPROGRESS) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(sock, &wfds);
+        struct timeval tv = { .tv_sec = DBUS_IO_TIMEOUT_SEC, .tv_usec = 0 };
+        
+        if (select(sock + 1, NULL, &wfds, NULL, &tv) <= 0) {
+            close(sock);
+            return -2; /* Timeout or Error */
+        }
+        
+        int so_error;
+        socklen_t len = sizeof(so_error);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len);
+        if (so_error != 0) {
+            close(sock);
+            return -2;
+        }
+    }
+    
+    /* Restore Blocking Mode */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+    
+    /* Set RCV/SND Timeouts to prevent hangs on read/write */
+    struct timeval tv = { .tv_sec = DBUS_IO_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     
     /* SASL Auth */
     char uid_str[16];
@@ -444,9 +525,45 @@ int dbus_trigger_reload() {
 
 /* --- IWD Connection Logic (Discovery & Connect) --- */
 
+/* Helper to check if a Variant String Signature exists before current position */
+int check_variant_sig_string(const char *buf, int pos) {
+    /* * Variant marshalling in a Property Array `a{sv}`:
+     * Key (String) | Padding | Variant Sig (String) | Padding | Variant Value (Data)
+     * * We found the Variant Value (SSID String) at `pos`.
+     * The Signature for a string is 's'. Marshalled as a string: [1]['s'][0].
+     * Length is 3 bytes.
+     * We need to look backwards from `pos`.
+     * Between Signature and Value, there might be alignment padding.
+     * Value (String) aligns to 4 bytes. `pos` is 4-byte aligned.
+     * Signature (String) aligns to 4 bytes.
+     * * So we look at `pos - padding - sig_len`.
+     * Sig Len for "s" is 3 bytes + 4 bytes length integer = 7 bytes.
+     * * Let's look immediately backwards skipping null padding.
+     * We expect to see 0, 's', 1 (little endian length of sig string).
+     */
+    
+    int i = pos - 1;
+    /* Skip alignment padding */
+    while (i > 0 && buf[i] == 0) i--;
+    
+    /* Now we should see the signature string "s" (null terminated) */
+    if (i >= 2) {
+        /* Expect 0 (null term), 's', 1 (len) */
+        /* Note: i points to null terminator of signature string */
+        /* But wait, Signature is a Type "g" (Signature), which aligns to 1 byte. 
+           However, in a VARIANT, the signature is marshalled as type SIGNATURE.
+           Format: [1 byte len][signature chars][null].
+           So for "s", it is [1]['s'][0]. 3 bytes total.
+        */
+        if (buf[i] == 0 && buf[i-1] == 's' && buf[i-2] == 1) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /**
- * @brief Finds an IWD network object path by SSID (Simplified Scanner)
- * Does NOT fully parse DBus structure, uses robust substring matching on the raw stream.
+ * @brief Finds an IWD network object path by SSID (Robust Scanner)
  */
 int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max_len) {
     /* 1. Request ObjectManager Dump */
@@ -497,37 +614,42 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     }
     
     /* 3. Scan for SSID */
-    /*
-     * Structure is a{oa{sa{sv}}}
-     * We look for the SSID string in a property value.
-     * The Key (Object Path) appears BEFORE the properties in the stream.
-     * Strategy: Store the last seen Object Path. When we see the SSID, that path is the one.
-     */
     char last_path[256] = {0};
+    uint32_t ssid_len = strlen(ssid);
     
-    /* Naive scan through buffer */
-    for (int i = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len); i < total_msg_size - (int)strlen(ssid); i++) {
+    /* * Iterating 4 bytes at a time (Alignment of uint32 length) 
+     * Start after header
+     */
+    int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
+    
+    for (int i = start_offset; i < total_msg_size - (int)ssid_len - 4; i += 4) {
         
-        /* Check if this looks like an object path */
-        if (strncmp(&buf[i], "/net/connman/iwd/", 17) == 0) {
-            /* Basic sanity check on length to avoid reading garbage */
-            int path_len = strnlen(&buf[i], 255);
-            if (path_len > 20 && path_len < 255) {
-                strncpy(last_path, &buf[i], 255);
-            }
+        uint32_t len = *((uint32_t*)&buf[i]);
+        
+        /* Sanity Check Length */
+        if (len > 255 || len == 0) continue;
+        
+        /* Fix: compare unsigned len with signed expression properly */
+        if (i + 4 + len > (uint32_t)total_msg_size) continue;
+        
+        /* Is this an Object Path? */
+        if (len > 15 && strncmp(&buf[i+4], "/net/connman/iwd", 16) == 0) {
+            strncpy(last_path, &buf[i+4], 255);
+            last_path[len] = '\0'; // Ensure null term if not present in buffer logic (it is in dbus)
+            continue;
         }
         
-        /* Check for SSID match */
-        /* In DBus, string matches are usually preceded by length uint32 */
-        if (memcmp(&buf[i], ssid, strlen(ssid)) == 0) {
-            /* Verify it's actually the Name property value */
-            /* Look slightly behind for "Name" property key */
-            /* This is a heuristic scan. IWD puts SSID in "Name" property. */
-            
-            /* If we found the SSID and have a path, success */
+        /* Is this our SSID? */
+        if (len == ssid_len && memcmp(&buf[i+4], ssid, ssid_len) == 0) {
+            /* * Robustness Check:
+             * 1. We must have seen an Object Path recently.
+             * 2. The string must be inside a Variant.
+             */
             if (last_path[0] != '\0') {
-                strncpy(out_path, last_path, max_len);
-                return 0;
+                if (check_variant_sig_string(buf, i)) {
+                    strncpy(out_path, last_path, max_len);
+                    return 0;
+                }
             }
         }
     }
