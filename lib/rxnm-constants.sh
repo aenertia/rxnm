@@ -19,9 +19,11 @@
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
 # Connectivity Probes (Used for Internet Checks)
+# Target 1: Microsoft NCSI (Anycast, highly available, not a DNS resolver)
+# Target 2: Google Public DNS on Port 80 (Avoids Port 443 DoH blocking/DPI)
 # Format: "IP:PORT IP:PORT"
-: "${RXNM_PROBE_TARGETS_V4:=1.1.1.1:80 8.8.8.8:443}"
-: "${RXNM_PROBE_TARGETS_V6:=[2606:4700:4700::1111]:80 [2001:4860:4860::8888]:443}"
+: "${RXNM_PROBE_TARGETS_V4:=13.107.4.52:80 8.8.8.8:80}"
+: "${RXNM_PROBE_TARGETS_V6:=[2620:1ec:c11::200]:80 [2001:4860:4860::8888]:80}"
 
 # --- Directory Structure ---
 # These paths define the layout of the ephemeral and persistent state.

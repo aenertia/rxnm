@@ -92,16 +92,17 @@ build_config_descriptor() {
             case "$action" in
                 connect) states+=("wifi:station") ;;
                 ap)
-                    local subcmd="${args[0]}"
+                    # Safe array expansion for set -u
+                    local subcmd="${args[0]:-}"
                     if [ "$subcmd" == "start" ]; then
                         states+=("wifi:ap")
                         # Check for NAT/Share
-                        for arg in "${args[@]}"; do
+                        for arg in "${args[@]:-}"; do
                             if [[ "$arg" == "--share" ]]; then states+=("net:nat" "net:dhcp_server"); fi
                             if [[ "$arg" == "--interface" ]]; then
                                 # Next arg is interface
                                 local idx=0
-                                for a in "${args[@]}"; do if [[ "$a" == "--interface" ]]; then iface="${args[$((idx+1))]}"; break; fi; ((idx++)); done
+                                for a in "${args[@]:-}"; do if [[ "$a" == "--interface" ]]; then iface="${args[$((idx+1))]:-}"; break; fi; ((idx++)); done
                             fi
                         done
                     fi
@@ -111,12 +112,14 @@ build_config_descriptor() {
             ;;
         interface)
             # Extract target interface if present
-            if [[ "${args[0]}" != -* ]]; then iface="${args[0]}"; fi
+            # Safe array expansion for set -u
+            local arg0="${args[0]:-}"
+            if [[ -n "$arg0" ]] && [[ "$arg0" != -* ]]; then iface="$arg0"; fi
             
             case "$action" in
                 set)
                     local subcmd=""
-                    for arg in "${args[@]}"; do if [[ "$arg" != -* ]] && [ -z "$subcmd" ] && [ "$arg" != "$iface" ]; then subcmd="$arg"; fi; done
+                    for arg in "${args[@]:-}"; do if [[ "$arg" != -* ]] && [ -z "$subcmd" ] && [ "$arg" != "$iface" ]; then subcmd="$arg"; fi; done
                     
                     if [ "$subcmd" == "dhcp" ]; then states+=("net:dhcp_client"); fi
                     if [ "$subcmd" == "static" ]; then states+=("net:static"); fi

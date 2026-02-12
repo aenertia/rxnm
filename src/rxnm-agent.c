@@ -81,9 +81,6 @@ char g_conn_targets_v6[512] = RXNM_PROBE_TARGETS_V6;
 
 /* --- Internal Limits --- */
 #define BUF_SIZE 32768
-#define MAX_IFACES 64
-#define MAX_IPV6_PER_IFACE 8
-#define MAX_ROUTES_PER_IFACE 32
 #define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
 #define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
 
@@ -122,13 +119,25 @@ typedef struct {
     int master_index;
     char name[IFNAMSIZ];
     char mac[18];
-    char ipv4[IPV4_CIDR_LEN];
-    char ipv6[MAX_IPV6_PER_IFACE][IPV6_CIDR_LEN];
-    int ipv6_count;
+    
+    /* Dynamically scaled IPv4 array */
+    char (*ipv4)[IPV4_CIDR_LEN];
+    size_t ipv4_count;
+    size_t ipv4_capacity;
+    
+    /* Dynamically scaled IPv6 array */
+    char (*ipv6)[IPV6_CIDR_LEN];
+    size_t ipv6_count;
+    size_t ipv6_capacity;
+    
     char gateway[INET6_ADDRSTRLEN];
     uint32_t metric;
-    route_entry_t routes[MAX_ROUTES_PER_IFACE];
-    int route_count;
+    
+    /* Dynamically scaled Routes array */
+    route_entry_t *routes;
+    size_t route_count;
+    size_t route_capacity;
+    
     char state[16];
     int mtu;
     bool exists;
@@ -152,10 +161,31 @@ typedef struct {
     bool wifi_connected;
 } iface_entry_t;
 
-/* Global Interface Cache */
-iface_entry_t ifaces[MAX_IFACES];
+/* Global Dynamic Interface Cache */
+iface_entry_t **ifaces = NULL;
+size_t ifaces_count = 0;
+size_t ifaces_capacity = 0;
 
 /* --- Utilities --- */
+
+/**
+ * @brief Safely frees all dynamically allocated memory tracking the network state.
+ */
+void cleanup_ifaces(void) {
+    if (!ifaces) return;
+    for (size_t i = 0; i < ifaces_count; i++) {
+        if (ifaces[i]) {
+            if (ifaces[i]->ipv4) free(ifaces[i]->ipv4);
+            if (ifaces[i]->ipv6) free(ifaces[i]->ipv6);
+            if (ifaces[i]->routes) free(ifaces[i]->routes);
+            free(ifaces[i]);
+        }
+    }
+    free(ifaces);
+    ifaces = NULL;
+    ifaces_count = 0;
+    ifaces_capacity = 0;
+}
 
 /**
  * @brief Checks if a file contains a specific string substring.
@@ -185,25 +215,51 @@ void safe_usleep(long us) {
 
 /**
  * @brief Retrieve or initialize an interface entry by kernel index.
+ * Automatically scales the global ifaces array if capacity is reached.
  */
 iface_entry_t* get_iface(int index) {
     /* 1. Search existing */
-    for (int i = 0; i < MAX_IFACES; i++) {
-        if (ifaces[i].exists && ifaces[i].index == index) return &ifaces[i];
+    for (size_t i = 0; i < ifaces_count; i++) {
+        if (ifaces[i]->exists && ifaces[i]->index == index) return ifaces[i];
     }
-    /* 2. Allocate new */
-    for (int i = 0; i < MAX_IFACES; i++) {
-        if (!ifaces[i].exists) {
-            memset(&ifaces[i], 0, sizeof(iface_entry_t));
-            ifaces[i].exists = true;
-            ifaces[i].index = index;
-            ifaces[i].signal_dbm = -100;
-            ifaces[i].speed_mbps = -1;
-            strcpy(ifaces[i].state, "unknown");
-            return &ifaces[i];
+    
+    /* 2. Scale array if necessary */
+    if (ifaces_count >= ifaces_capacity) {
+        size_t new_cap = (ifaces_capacity == 0) ? 16 : ifaces_capacity * 2;
+        iface_entry_t **new_ifaces = realloc(ifaces, new_cap * sizeof(iface_entry_t*));
+        if (!new_ifaces) {
+            fprintf(stderr, "OOM expanding interfaces array\n");
+            exit(1);
         }
+        ifaces = new_ifaces;
+        ifaces_capacity = new_cap;
     }
-    return NULL; // Full
+    
+    /* 3. Allocate and initialize new entry */
+    iface_entry_t *entry = calloc(1, sizeof(iface_entry_t));
+    if (!entry) {
+        fprintf(stderr, "OOM allocating interface entry\n");
+        exit(1);
+    }
+    
+    entry->exists = true;
+    entry->index = index;
+    entry->signal_dbm = -100;
+    entry->speed_mbps = -1;
+    strcpy(entry->state, "unknown");
+    
+    /* Pre-allocate inner arrays with sensible defaults */
+    entry->ipv4_capacity = 2;
+    entry->ipv4 = calloc(entry->ipv4_capacity, IPV4_CIDR_LEN);
+    
+    entry->ipv6_capacity = 4;
+    entry->ipv6 = calloc(entry->ipv6_capacity, IPV6_CIDR_LEN);
+    
+    entry->route_capacity = 8;
+    entry->routes = calloc(entry->route_capacity, sizeof(route_entry_t));
+    
+    ifaces[ifaces_count++] = entry;
+    return entry;
 }
 
 bool sysfs_has_subdir(const char *ifname, const char *subdir) {
@@ -767,20 +823,41 @@ void process_addr_msg(struct nlmsghdr *nh) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
         if (ifa->ifa_family == AF_INET) {
             /* Prefer global scope addresses */
-            if (entry->ipv4[0] == '\0' && ifa->ifa_scope < RT_SCOPE_HOST) {
+            if (ifa->ifa_scope < RT_SCOPE_HOST) {
                 char ipv4_buf[INET_ADDRSTRLEN];
+                
+                /* Dynamically expand IPv4 array if full */
+                if (entry->ipv4_count >= entry->ipv4_capacity) {
+                    size_t new_cap = entry->ipv4_capacity * 2;
+                    void *new_ipv4 = realloc(entry->ipv4, new_cap * IPV4_CIDR_LEN);
+                    if (!new_ipv4) return;
+                    entry->ipv4 = new_ipv4;
+                    entry->ipv4_capacity = new_cap;
+                    memset((char*)entry->ipv4 + (entry->ipv4_count * IPV4_CIDR_LEN), 0, (new_cap - entry->ipv4_count) * IPV4_CIDR_LEN);
+                }
+                
                 if (inet_ntop(AF_INET, addr_ptr, ipv4_buf, sizeof(ipv4_buf))) {
-                    snprintf(entry->ipv4, sizeof(entry->ipv4), "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
+                    snprintf(entry->ipv4[entry->ipv4_count], IPV4_CIDR_LEN, "%s/%d", ipv4_buf, ifa->ifa_prefixlen);
+                    entry->ipv4_count++;
                 }
             }
         } else if (ifa->ifa_family == AF_INET6) {
             if (ifa->ifa_scope < RT_SCOPE_HOST) { // Ignore link-local for brevity in summary
                 char ipv6_buf[INET6_ADDRSTRLEN];
-                if (entry->ipv6_count < MAX_IPV6_PER_IFACE) {
-                    if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
-                        snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
-                        entry->ipv6_count++;
-                    }
+                
+                /* Dynamically expand IPv6 array if full */
+                if (entry->ipv6_count >= entry->ipv6_capacity) {
+                    size_t new_cap = entry->ipv6_capacity * 2;
+                    void *new_ipv6 = realloc(entry->ipv6, new_cap * IPV6_CIDR_LEN);
+                    if (!new_ipv6) return;
+                    entry->ipv6 = new_ipv6;
+                    entry->ipv6_capacity = new_cap;
+                    memset((char*)entry->ipv6 + (entry->ipv6_count * IPV6_CIDR_LEN), 0, (new_cap - entry->ipv6_count) * IPV6_CIDR_LEN);
+                }
+                
+                if (inet_ntop(AF_INET6, addr_ptr, ipv6_buf, sizeof(ipv6_buf))) {
+                    snprintf(entry->ipv6[entry->ipv6_count], IPV6_CIDR_LEN, "%s/%d", ipv6_buf, ifa->ifa_prefixlen);
+                    entry->ipv6_count++;
                 }
             }
         }
@@ -803,7 +880,15 @@ void process_route_msg(struct nlmsghdr *nh) {
     iface_entry_t *entry = get_iface(oif);
     if (!entry) return;
     
-    if (entry->route_count >= MAX_ROUTES_PER_IFACE) return;
+    /* Dynamically expand Routes array if full */
+    if (entry->route_count >= entry->route_capacity) {
+        size_t new_cap = entry->route_capacity * 2;
+        void *new_routes = realloc(entry->routes, new_cap * sizeof(route_entry_t));
+        if (!new_routes) return;
+        entry->routes = new_routes;
+        entry->route_capacity = new_cap;
+        memset(entry->routes + entry->route_count, 0, (new_cap - entry->route_count) * sizeof(route_entry_t));
+    }
     
     route_entry_t *route = &entry->routes[entry->route_count];
     memset(route, 0, sizeof(route_entry_t));
@@ -1005,14 +1090,14 @@ void collect_wifi_state() {
     
 step2:
     /* Request Station Info for each WiFi Interface */
-    for (int i = 0; i < MAX_IFACES; i++) {
-        if (ifaces[i].exists && ifaces[i].is_wifi) {
+    for (size_t i = 0; i < ifaces_count; i++) {
+        if (ifaces[i]->exists && ifaces[i]->is_wifi) {
             struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req = {
                 .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid,
                 .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .n.nlmsg_seq = time(NULL) + i,
                 .g.cmd = NL80211_CMD_GET_STATION, .g.version = 1
             };
-            uint32_t idx = ifaces[i].index;
+            uint32_t idx = ifaces[i]->index;
             add_nl_attr(&sta_req.n, NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
             
             send(sock, &sta_req, sta_req.n.nlmsg_len, 0);
@@ -1029,7 +1114,11 @@ step2:
     close(sock);
     
     /* Fallback for drivers that don't support NL80211 station dump (e.g., some realtek) */
-    for (int i = 0; i < MAX_IFACES; i++) if (ifaces[i].exists && ifaces[i].is_wifi) sysfs_collect_bssid_fallback(&ifaces[i]);
+    for (size_t i = 0; i < ifaces_count; i++) {
+        if (ifaces[i]->exists && ifaces[i]->is_wifi) {
+            sysfs_collect_bssid_fallback(ifaces[i]);
+        }
+    }
 }
 
 void collect_network_state() {
@@ -1175,46 +1264,53 @@ void print_json_status() {
     printf("  },\n  \"interfaces\": {\n");
     
     bool first_iface = true;
-    for (int i = 0; i < MAX_IFACES; i++) {
-        if (!ifaces[i].exists || ifaces[i].name[0] == '\0') continue;
+    for (size_t i = 0; i < ifaces_count; i++) {
+        iface_entry_t *entry = ifaces[i];
+        if (!entry->exists || entry->name[0] == '\0') continue;
         if (!first_iface) printf(",\n");
         
         printf("    \"%s\": {\n      \"name\": \"%s\",\n      \"state\": \"%s\",\n      \"mtu\": %d,\n      \"type\": \"%s\",\n", 
-               ifaces[i].name, ifaces[i].name, ifaces[i].state, ifaces[i].mtu, detect_iface_type(&ifaces[i]));
+               entry->name, entry->name, entry->state, entry->mtu, detect_iface_type(entry));
         
-        if (ifaces[i].mac[0]) printf("      \"mac\": \"%s\",\n", ifaces[i].mac);
-        if (ifaces[i].vendor[0]) json_print_string("vendor", ifaces[i].vendor, true);
-        if (ifaces[i].driver[0]) json_print_string("driver", ifaces[i].driver, true);
-        if (ifaces[i].bus_info[0]) json_print_string("bus_info", ifaces[i].bus_info, true);
+        if (entry->mac[0]) printf("      \"mac\": \"%s\",\n", entry->mac);
+        if (entry->vendor[0]) json_print_string("vendor", entry->vendor, true);
+        if (entry->driver[0]) json_print_string("driver", entry->driver, true);
+        if (entry->bus_info[0]) json_print_string("bus_info", entry->bus_info, true);
         
-        if (ifaces[i].ipv4[0]) printf("      \"ip\": \"%s\",\n", ifaces[i].ipv4);
-        if (ifaces[i].gateway[0]) printf("      \"gateway\": \"%s\",\n", ifaces[i].gateway);
-        if (ifaces[i].metric > 0) printf("      \"metric\": %u,\n", ifaces[i].metric);
+        if (entry->ipv4_count > 0) printf("      \"ip\": \"%s\",\n", entry->ipv4[0]);
+        else printf("      \"ip\": null,\n");
+        
+        printf("      \"ipv4\": [");
+        for(size_t j=0; j<entry->ipv4_count; j++) printf("\"%s\"%s", entry->ipv4[j], (j < entry->ipv4_count - 1) ? ", " : "");
+        printf("],\n");
+        
+        if (entry->gateway[0]) printf("      \"gateway\": \"%s\",\n", entry->gateway);
+        if (entry->metric > 0) printf("      \"metric\": %u,\n", entry->metric);
         
         printf("      \"ipv6\": [");
-        for(int j=0; j<ifaces[i].ipv6_count; j++) printf("\"%s\"%s", ifaces[i].ipv6[j], (j < ifaces[i].ipv6_count - 1) ? ", " : "");
+        for(size_t j=0; j<entry->ipv6_count; j++) printf("\"%s\"%s", entry->ipv6[j], (j < entry->ipv6_count - 1) ? ", " : "");
         printf("],\n      \"routes\": [");
-        for(int k=0; k<ifaces[i].route_count; k++) {
-            printf("\n        { \"dst\": \"%s\"", ifaces[i].routes[k].dst);
-            if (ifaces[i].routes[k].gw[0]) printf(", \"gw\": \"%s\"", ifaces[i].routes[k].gw);
-            if (ifaces[i].routes[k].metric > 0) printf(", \"metric\": %u", ifaces[i].routes[k].metric);
-            printf(" }%s", (k < ifaces[i].route_count - 1) ? "," : "");
+        for(size_t k=0; k<entry->route_count; k++) {
+            printf("\n        { \"dst\": \"%s\"", entry->routes[k].dst);
+            if (entry->routes[k].gw[0]) printf(", \"gw\": \"%s\"", entry->routes[k].gw);
+            if (entry->routes[k].metric > 0) printf(", \"metric\": %u", entry->routes[k].metric);
+            printf(" }%s", (k < entry->route_count - 1) ? "," : "");
         }
-        printf("%s],\n      \"stats\": {\n        \"rx_bytes\": %llu,\n        \"tx_bytes\": %llu\n      },\n", ifaces[i].route_count > 0 ? "\n      " : "", (unsigned long long)ifaces[i].rx_bytes, (unsigned long long)ifaces[i].tx_bytes);
+        printf("%s],\n      \"stats\": {\n        \"rx_bytes\": %llu,\n        \"tx_bytes\": %llu\n      },\n", entry->route_count > 0 ? "\n      " : "", (unsigned long long)entry->rx_bytes, (unsigned long long)entry->tx_bytes);
         
-        int speed_mbps = -1; char speed_path[256]; snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", ifaces[i].name);
+        int speed_mbps = -1; char speed_path[256]; snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", entry->name);
         FILE *f_speed = fopen(speed_path, "r");
         if (f_speed) { if (fscanf(f_speed, "%d", &speed_mbps) != 1) speed_mbps = -1; fclose(f_speed); }
         if (speed_mbps > 0) printf("      \"speed\": %d,\n", speed_mbps);
         
-        if (ifaces[i].is_wifi) {
+        if (entry->is_wifi) {
             printf("      \"wifi\": {\n");
-            json_print_string("ssid", ifaces[i].ssid, true);
-            if (ifaces[i].bssid[0]) printf("        \"bssid\": \"%s\",\n", ifaces[i].bssid); else printf("        \"bssid\": null,\n");
-            printf("        \"rssi\": %d,\n        \"frequency\": %u\n      },\n", ifaces[i].signal_dbm, ifaces[i].frequency);
+            json_print_string("ssid", entry->ssid, true);
+            if (entry->bssid[0]) printf("        \"bssid\": \"%s\",\n", entry->bssid); else printf("        \"bssid\": null,\n");
+            printf("        \"rssi\": %d,\n        \"frequency\": %u\n      },\n", entry->signal_dbm, entry->frequency);
         }
         
-        bool is_connected = (strcmp(ifaces[i].state, "routable") == 0 || strcmp(ifaces[i].state, "enslaved") == 0 || strcmp(ifaces[i].state, "online") == 0 || strcmp(ifaces[i].state, "up") == 0);
+        bool is_connected = (strcmp(entry->state, "routable") == 0 || strcmp(entry->state, "enslaved") == 0 || strcmp(entry->state, "online") == 0 || strcmp(entry->state, "up") == 0);
         printf("      \"connected\": %s\n    }", is_connected ? "true" : "false");
         first_iface = false;
     }
@@ -1231,12 +1327,19 @@ void cmd_get_value(char *key) {
     char *ifname = strtok(NULL, "."); if (!ifname) return;
     
     iface_entry_t *iface = NULL;
-    for (int i = 0; i < MAX_IFACES; i++) { if (ifaces[i].exists && strcmp(ifaces[i].name, ifname) == 0) { iface = &ifaces[i]; break; } }
+    for (size_t i = 0; i < ifaces_count; i++) { 
+        if (ifaces[i]->exists && strcmp(ifaces[i]->name, ifname) == 0) { 
+            iface = ifaces[i]; 
+            break; 
+        } 
+    }
     if (!iface) return;
     
     char *field = strtok(NULL, "."); if (!field) return;
     
-    if (strcmp(field, "ip") == 0) printf("%s\n", iface->ipv4);
+    if (strcmp(field, "ip") == 0) {
+        if (iface->ipv4_count > 0) printf("%s\n", iface->ipv4[0]);
+    }
     else if (strcmp(field, "mac") == 0) printf("%s\n", iface->mac);
     else if (strcmp(field, "state") == 0) printf("%s\n", iface->state);
     else if (strcmp(field, "gateway") == 0) printf("%s\n", iface->gateway);
@@ -1288,57 +1391,120 @@ void cmd_tune(char *profile) {
 
 /**
  * @brief Atomically writes stdin to a file.
- * Implementation: Writes to ${path}.tmp.${pid}, then fsyncs and renames.
+ * Implementation: Dynamically allocates buffer to handle >64KB input.
+ * Writes to ${path}.tmp.${pid}, then fsyncs and renames.
  */
 void cmd_atomic_write(char *path, char *perm_str) {
-    char buf[65536];
-    size_t len = fread(buf, 1, sizeof(buf), stdin);
-    
-    /* Optimization: Don't write if content is identical (reduce flash wear) */
-    bool changed = true;
-    FILE *f = fopen(path, "r");
-    if (f) {
-        char ex_buf[65536];
-        size_t ex_len = fread(ex_buf, 1, sizeof(ex_buf), f);
-        fclose(f);
-        if (len == ex_len && memcmp(buf, ex_buf, len) == 0) {
-            changed = false;
+    size_t capacity = 65536; // Start with 64KB
+    size_t total_len = 0;
+    char *buf = malloc(capacity);
+    if (!buf) {
+        fprintf(stderr, "OOM allocating atomic buffer\n");
+        exit(1);
+    }
+
+    /* 1. Read entire input into dynamically resizing buffer */
+    while (1) {
+        size_t bytes_read = fread(buf + total_len, 1, capacity - total_len, stdin);
+        total_len += bytes_read;
+
+        if (feof(stdin)) break;
+
+        if (ferror(stdin)) {
+            fprintf(stderr, "Error reading stdin\n");
+            free(buf);
+            exit(1);
+        }
+
+        if (total_len == capacity) {
+            capacity *= 2;
+            if (capacity > 16 * 1024 * 1024) { // 16MB Safety Cap
+                fprintf(stderr, "Input exceeds 16MB safety cap\n");
+                free(buf);
+                exit(1);
+            }
+            char *new_buf = realloc(buf, capacity);
+            if (!new_buf) {
+                fprintf(stderr, "OOM expanding atomic buffer\n");
+                free(buf);
+                exit(1);
+            }
+            buf = new_buf;
         }
     }
-    
+
+    /* 2. Optimization: Don't write if content is identical (reduce flash wear) */
+    /* Memory efficient chunked comparison against existing file */
+    bool changed = true;
+    struct stat st;
+    if (stat(path, &st) == 0 && (size_t)st.st_size == total_len) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            changed = false;
+            size_t offset = 0;
+            char chunk[8192];
+            while (offset < total_len) {
+                size_t to_read = (total_len - offset > sizeof(chunk)) ? sizeof(chunk) : (total_len - offset);
+                if (fread(chunk, 1, to_read, f) != to_read) {
+                    changed = true;
+                    break;
+                }
+                if (memcmp(buf + offset, chunk, to_read) != 0) {
+                    changed = true;
+                    break;
+                }
+                offset += to_read;
+            }
+            fclose(f);
+        }
+    }
+
     if (!changed) {
+        free(buf);
         return;
     }
-    
+
+    /* 3. Write temp file and atomically rename */
     char tmp_path[PATH_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, getpid());
-    
+
     int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
         fprintf(stderr, "Error creating temp file\n");
+        free(buf);
         exit(1);
     }
-    
-    if (write(fd, buf, len) != (ssize_t)len) {
-        fprintf(stderr, "Error writing to temp file\n");
-        close(fd);
-        unlink(tmp_path);
-        exit(1);
+
+    size_t written = 0;
+    while (written < total_len) {
+        ssize_t w = write(fd, buf + written, total_len - written);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "Error writing to temp file\n");
+            close(fd);
+            unlink(tmp_path);
+            free(buf);
+            exit(1);
+        }
+        written += w;
     }
-    
+
     if (perm_str) {
         int mode = strtol(perm_str, NULL, 8);
         fchmod(fd, mode);
     }
-    
+
     fsync(fd);
     close(fd);
-    
+
     if (rename(tmp_path, path) != 0) {
          fprintf(stderr, "Error renaming temp file\n");
          unlink(tmp_path);
+         free(buf);
          exit(1);
     }
+    
+    free(buf);
 }
 
 /**
@@ -1452,6 +1618,9 @@ char *g_connect_ssid = NULL;
 char *g_connect_iface = NULL;
 
 int main(int argc, char *argv[]) {
+    /* Register cleanup to satisfy Valgrind zero-leak checks */
+    atexit(cleanup_ifaces);
+    
     load_runtime_config();
     
     static struct option long_options[] = {
