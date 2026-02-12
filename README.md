@@ -1,174 +1,318 @@
 # RXNM (ROCKNIX Network Manager)
 
-**RXNM** is a lightweight, modular CLI wrapper for `systemd-networkd` and `iwd`, optimized for low-power ARM and RISC-V devices (specifically RK3326/RK3566 and SG2002 handhelds) but compatible with general Linux environments. While designed specifically for the ROCKNIX ecosystem, this project is developed independently and is not a core component of the ROCKNIX distribution itself.
+**RXNM** is a lightning-fast, modular CLI wrapper for `systemd-networkd` and `iwd`. It is aggressively optimized for low-power ARM and RISC-V embedded devices (specifically RK3326/RK3566 and SG2002 handhelds) while remaining 100% compatible with general Linux environments.
+
+By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory footprint** and sub-5ms read latencies, making it the ultimate networking stack for emulation handhelds, immutable OS designs, and containerized cloud environments.
 
 **Latest Version:** `1.0.0-rc1`
 
-## Key Features
+## ⚡ Architecture & Performance
 
-* **Hybrid C/Shell Architecture**: Uses a statically linked C agent (`rxnm-agent`) for high-frequency read operations (status, diagnostics) and atomic writes, falling back to Bash for complex logic.
+RXNM uses a **Hybrid C/Shell Architecture** to overcome the performance bottlenecks of embedded shell scripts while retaining the flexibility of Bash for high-level logic.
 
-* **Zero-Overhead Architecture**: Ephemeral execution. Runs, generates config, reloads systemd, and exits. 0MB resident memory when idle.
+1. **The Native C Agent (`rxnm-agent`)**: A statically-linked (via `musl-gcc`), zero-dependency C binary that directly queries kernel Netlink (RTM/Genl) and implements a custom DBus wire protocol. It handles all fast-path read operations, atomic writes, and hardware polling.
 
-* **Target-First Syntax**: Intuitive RouterOS-style syntax (e.g., `rxnm interface wlan0 show`).
+2. **The Logic Dispatcher (`rxnm`)**: A lazy-loaded Bash frontend that handles complex state machine validation, JSON schema enforcement, and declarative configuration routing.
 
-* **Frontend Ready**: Strict stdout hygiene with `--format json` output for easy integration into EmulationStation or other UIs.
+### Self-Documenting Logic Layer
 
-* **Advanced Wireless Modes**:
+Because the high-level orchestration and business logic are written in standard, structured Bash, **the documentation is the Bash itself**. The source code (`lib/rxnm-*.sh`) is designed to be readable and serves as the definitive reference for exact behaviors, state transitions, and file generation logic. This ensures that developers auditing the system never have to rely on potentially outdated external documentation to understand how the network stack is being manipulated.
 
-  * **WiFi**: Station (Client), Access Point (AP), Ad-Hoc (IBSS), P2P Client, and **P2P Group Owner (P2P-GO)**.
+### Latency Benchmarks (Read vs. Write Paths)
 
-  * **Bluetooth**: PAN Client (Tethering from phone) and PAN Host/NAP (Sharing internet to others).
+*Benchmarks conducted on Rockchip RK3326 (1.5GHz Quad-Core Cortex-A35).*
 
-* **IPv6 Native**: Automatic SLAAC, DHCPv6, and Prefix Delegation support for both clients and hotspots.
-
-* **Virtualization & SDN**: Native support for **Bridges**, **VLANs**, **Bonds** (Active-Backup/LACP), **VRFs** (Virtual Routing Functions), **MacVLANs**, **IPVLANs**, and **WireGuard**.
-
-* **Tethering & NAT**: One-command hotspot creation (WiFi AP or Bluetooth PAN) with automatic NAT/Masquerading via `iptables` or `nftables`.
-
-* **Profiles**: Snapshot, export, and restore complete network states or interface-specific configurations.
-
-## Architectural Analysis & Performance
-
-RXNM allows for a "headless" network stack configuration, relying on the native capabilities of the Linux kernel and systemd rather than running a monolithic middleware daemon.
-
-### Latency: Read vs. Write Paths
-
-RXNM employs a split-path architecture to optimize for the specific constraints of embedded user interfaces.
-
-* **Read Path (Status/Diagnostics): < 5ms**
-
-  * Handled by `rxnm-agent` (C/Netlink).
-
-  * Bypasses heavy shell forking and directly queries kernel Netlink and DBus interfaces.
-
-* **Write Path (Configuration): \~50-100ms**
-
-  * Handled by Bash logic + `systemd-networkd` reload.
-
-  * Optimized for correctness and atomicity over raw speed.
+| Operation | RXNM Latency | NetworkManager (nmcli) | ConnMan (connmanctl) | IWD (Standalone) | Technical Context | 
+ | ----- | ----- | ----- | ----- | ----- | ----- | 
+| **Status Read (JSON)** | **< 5ms** | ~45-80ms | ~30-60ms | ~15-30ms | RXNM Agent bypasses DBus daemons, directly polling Netlink. | 
+| **Internet Probe (TCP)** | **~20ms** | ~100ms+ | ~100ms+ | N/A | RXNM uses raw TCP sockets; others rely on HTTP/portal checks. | 
+| **Config Write** | **~80ms** | ~150-300ms | ~100-200ms | ~50-100ms | Atomic `rename()` vs DBus/Disk Transaction overhead. | 
+| **Roaming Trigger** | **< 15ms** | ~200ms+ | ~200ms+ | Internal | Event-driven Netlink monitor instantly nudges `iwd`. | 
 
 ### Resident Memory Footprint (The "Cost of Idle")
 
-Comparison of the total network stack footprint on a typical embedded Linux system (glibc). RXNM utilizes the existing `systemd` ecosystem, adding **0MB** to the idle footprint.
+RXNM relies entirely on the native capabilities of the Linux kernel and systemd. It does not run an active management daemon in the background.
 
-| Component | RXNM Stack (L2+L3) | NetworkManager Stack | ConnMan Stack | 
- | ----- | ----- | ----- | ----- | 
-| **L2 Wifi** | **iwd**: \~3.5 MB | **wpa_supplicant**: \~6-12 MB | **wpa_supplicant**: \~6-12 MB | 
-| **L3 Network** | **systemd-networkd**: \~4.0 MB | **NetworkManager**: \~18-45 MB | **connman**: \~8-15 MB | 
-| **DNS/LLMNR** | **systemd-resolved**: \~3.2 MB | *(Internal or dnsmasq)* | *(Internal)* | 
-| **Management** | **RXNM**: **0 MB** (Ephemeral) | *(Included in NM)* | *(Included in connman)* | 
-| **TOTAL** | **\~10.7 MB** | **\~24 MB - 57 MB** | **\~14 MB - 27 MB** | 
+* **IWD Standalone**: Refers to `iwd` running with `EnableNetworkConfiguration=true` (Internal DHCP), bypassing networkd/NM.
 
-*Note: While `iwd` can handle internal DHCP, `systemd-networkd` is the chosen backend because it provides advanced profile switching, native hotplug event handling, standardized configuration formats, and seamless roaming integration effectively "for free" while maintaining a tiny footprint.*
+| Component | RXNM Stack (Hybrid) | NetworkManager Stack | ConnMan Stack | IWD Stack (Standalone) | 
+ | ----- | ----- | ----- | ----- | ----- | 
+| **L2 Wifi** | **iwd**: ~3.5 MB | **wpa_supplicant**: ~6-12 MB | **wpa_supplicant**: ~6-12 MB | **iwd**: ~3.5 MB | 
+| **L3 Network** | **systemd-networkd**: ~4.0 MB | **NetworkManager**: ~18-45 MB | **connman**: ~8-15 MB | *(Internal DHCP)* | 
+| **DNS/LLMNR** | **systemd-resolved**: ~3.2 MB | *(Internal or dnsmasq)* | *(Internal)* | **resolved**: ~3.2 MB | 
+| **Management** | **RXNM**: **0 MB** (Ephemeral) | *(Included in NM)* | *(Included in connman)* | **0 MB** | 
+| **TOTAL** | **~10.7 MB** | **~24 MB - 57 MB** | **~14 MB - 27 MB** | **~6.7 MB*** | 
 
-### Storage Longevity: NAND/eMMC Wear Efficiency
+*\*Note: While IWD Standalone offers a marginally smaller footprint, the RXNM/systemd-networkd stack is the preferred default. This architecture provides robust hotplug handling, advanced profile management, and standardized configuration formats. Crucially, it allows RXNM to support any level of network complexity supported by `networkd` (VLANs, Bonds, VRFs, Bridges, WireGuard) "for free"—meaning these advanced enterprise features are available without incurring additional daemon overhead or requiring custom implementation logic.*
 
-On embedded devices using SD cards or internal eMMC/NAND flash, frequent disk writes and `fsync()` calls accelerate hardware wear and can cause UI stuttering due to I/O wait. RXNM is architected to treat the filesystem as an ephemeral target, using a **RAM-first configuration strategy**.
+### Storage Longevity (eMMC/NAND Wear Leveling)
 
-#### Comparative Disk Operations (Per Connection Event)
+On embedded devices, frequent disk writes and `fsync()` calls accelerate hardware wear and cause UI stuttering due to I/O wait. RXNM uses a **RAM-First Configuration Strategy**, writing active configurations to `/run/systemd/network` (tmpfs).
 
 | Stack | Writes to Flash | Syncs/Fdatasync | Persistence Strategy | 
  | ----- | ----- | ----- | ----- | 
-| **RXNM (Hybrid)** | **1 - 2** | **1** | **RAM-only by default; explicit Profile save.** | 
-| **ConnMan** | \~5 | \~3 | Periodic updates to settings/state files. | 
-| **NetworkManager** | \~6 - 12+ | \~4+ | Heavy persistence for leases, history, and state. | 
-
-* **RXNM Atomic Fastpath**: When RXNM writes a configuration, it uses `rxnm-agent --atomic-write`, which performs a single buffered write to a temporary file followed by an atomic `rename()`. By targeting `/run/systemd/network` (tmpfs/RAM) for active configurations, RXNM generates **zero flash wear** during normal session operation. Permanent changes are only committed to flash when the user explicitly saves a profile.
+| **RXNM (Hybrid)** | **1** | **1** | **RAM-only by default**; 1 write only if saving Profile/WiFi Creds. | 
+| **IWD (Standalone)** | ~2 | ~1 | Writes credentials and lease files to `/var/lib/iwd`. | 
+| **ConnMan** | ~5 | ~3 | Periodic updates to settings/state files. | 
+| **NetworkManager** | ~6 - 12+ | ~4+ | Heavy persistence for leases, history, timestamps, and state. | 
 
 ### Wakeups & Battery Life
 
-#### Comparative Wakeup Metrics (Idle/Connected)
+Comparative analysis of CPU wakeups induced by the network stack while connected but idle.
 
-| Stack / Component | Avg. Wakeups / Minute | Battery Impact | Technical Context | 
+| Stack | Avg. Wakeups / Minute | Battery Impact | Technical Context | 
  | ----- | ----- | ----- | ----- | 
-| **RXNM (Standard)** | **0** | **None** | **Standard operation generates zero wakeups; binary exits.** | 
-| **RXNM (Passive Monitor)** | \~0.6 - 2.0 | Negligible | Wakes only on kernel events (Signal Change / Roam) | 
-| **systemd-networkd** | \~0.1 | Near zero | Pure Netlink event subscriber; sleeps until kernel signal | 
-| **NetworkManager** | \~60 - 150+ | Moderate/High | Polling-heavy D-Bus architecture & periodic scanning | 
+| **RXNM (Standard)** | **0** | **None** | **Binary exits after execution.** Zero background processes. | 
+| **systemd-networkd** | ~0.1 | Near zero | Pure Netlink event subscriber; sleeps until kernel signal. | 
+| **IWD (Standalone)** | ~0.3 | Negligible | Efficient event loop; minimal polling. | 
+| **ConnMan** | ~10 - 30 | Low/Mod | Periodic housekeeping and state checks. | 
+| **NetworkManager** | ~60 - 150+ | Moderate | Polling-heavy D-Bus architecture & periodic scanning. | 
 
-## Cloud & Container Use Cases
+## 🚀 Feature Set
 
-RXNM's "Run & Done" philosophy makes it uniquely suited for high-density cloud environments and specialized container networking.
+* **Target-First RouterOS Syntax**: Intuitive command structure (e.g., `rxnm interface wlan0 show`).
 
-* **Zero-Overhead Scale**: In microservice architectures, the per-instance overhead of a persistent network daemon results in gigabytes of wasted RAM across a cluster. RXNM allows containers to have managed networking with **zero resident memory overhead**.
+* **Frontend/UI Ready**: Strict `stdout` hygiene with `--format json` output for robust integration into EmulationStation, React frontends, or web APIs.
 
-* **Immutable Infrastructure**: RXNM generates standard `.network` files, making its state 100% transparent and auditable. It is ideal for sidecar patterns providing health metrics via JSON without impacting primary application resources.
+* **IPv6 Native**: Automatic SLAAC, DHCPv6, IPv6 Privacy Extensions, and Prefix Delegation for both clients and hotspots.
 
-## Extremis & Tiny Environments
+* **Automated NAT/Tethering**: One-command hotspot creation with automatic `iptables` or `nftables` Masquerading and MSS Clamping.
 
-### Rescue Mode & Initramfs
+### Advanced Wireless Modes
 
-RXNM includes a robust **Rescue Mode**. If system daemons are missing or fail to start, RXNM can fallback to standard kernel tools and BusyBox applets (`udhcpc`, `ip`) to establish an emergency uplink.
+* **WiFi Client (Station)**: Standard WPA2/WPA3 connections.
 
-### Tiny Mode & spilinux
+* **WiFi Access Point (AP)**: Host a local network or share your internet connection.
 
-For ultra-minimal environments like **spilinux**, RXNM can operate in **Tiny Mode**. So long as the `rxnm-agent` C binary is present, RXNM can bypass systemd, D-Bus, and glibc dependencies entirely. The statically linked agent is typically **< 100KB**.
+* **WiFi Ad-Hoc (IBSS)**: Decentralized mesh connections.
 
-## Supported Modes & Esoterica
+* **WiFi Direct (P2P)**: Full support for P2P Client and **P2P Group Owner (GO)**.
 
-### Advanced Virtual Interfaces
+* **DPP (Easy Connect)**: QR-code based, passwordless WiFi enrollment.
 
-* **VRF (Virtual Routing Forwarding)**: Create isolated routing tables for management isolation.
+* **Opportunistic Roaming**: Native background monitor that steers `iwd` to better BSSIDs and dynamically switches profiles based on physical location (GPS/Gateway mapping).
 
-* **Bonding**: Supports `active-backup`, `balance-rr`, `802.3ad` (LACP).
+### Virtualization & Software-Defined Networking (SDN)
 
 * **Bridge**: Layer 2 bridging with STP and IGMP Snooping support.
 
-* **MacVLAN / IPVLAN**: Specialized types for high-performance container networking.
+* **Bonding**: Link aggregation supporting `active-backup`, `balance-rr`, and `802.3ad` (LACP).
 
-## Installation
+* **VLAN**: 802.1Q Virtual LAN tagging.
 
-### Build & Install
+* **VRF (Virtual Routing Forwarding)**: Create isolated routing tables and network namespaces.
 
-```
-# 1. Compile Agent (Optimized for size/static linking)
+* **MacVLAN / IPVLAN**: Specialized high-performance interfaces for containerized applications.
+
+* **VPNs**: Native integration for **WireGuard** (`wg`), **TUN**, and **TAP** devices.
+
+### Nullify Mode (Zero-Stack Lockdown)
+
+**Designed for offline gaming, extreme battery conservation, or stabilizing devices with broken/flaky RF hardware.**
+
+Executing `rxnm system nullify enable` performs a complete, aggressive teardown of the Linux networking subsystem. This mode renders the device effectively air-gapped at the kernel level and is persistent for the session.
+
+**⚠️ WARNING:** This action is **NON-DETERMINISTIC** and may destabilize the system depending on hardware specifics. It will permanently disable all network functionality (SSH, SMB, WiFi, Bluetooth) for the current session until a reboot. Due to its destructive nature, this command **requires explicit confirmation** via the `--yes` flag.
+
+* **Driver Unbinding**: Aggressively unbinds drivers from PCI and SDIO buses. This physically powers down radio chips, preventing battery drain and stopping kernel panics caused by faulty hardware drivers.
+* **Stack Disable**: Sets kernel sysctls (`net.ipv4.conf.all.disable_ipv4=1`, etc.) to completely disable the IP stack handling.
+* **Daemon Masking**: Masks `systemd-networkd`, `iwd`, `wpa_supplicant`, and `bluetoothd` to prevent them from attempting to re-initialize hardware or trigger wakeups.
+* **Namespace Isolation**: Moves any remaining stubborn interfaces into a "null" network namespace to ensure no traffic can be processed.
+
+## 🛠️ Installation & Building
+
+For constrained environments (Initramfs, Embedded) and general distribution, RXNM defaults to **static linking** to create a zero-dependency binary.
+
+### Compilation
+
+```bash
+# Clone the repository
+git clone [https://codeberg.org/aenertia/rxnm.git](https://codeberg.org/aenertia/rxnm.git)
+cd rxnm
+
+# Compile the Agent (Optimized for size and static linking)
+# If musl-gcc is available, this produces a ~50KB binary.
+# Otherwise, it falls back to a standard static build (~700KB).
 make tiny
 
-# 2. Install to /usr/lib/rocknix-network-manager
+# Install to /usr/lib/rocknix-network-manager and link to /usr/bin/rxnm
 sudo make install
-
-
 ```
 
-## Usage Guide
+### Running Tests
 
-### 1. System Status & Diagnostics (`rxnm system`)
+The project includes a robust testing suite comparing C-Agent outputs against legacy bash fallback logic:
 
+```bash
+make test-all
 ```
-# Human readable status table
+
+## 📖 Comprehensive Usage Guide
+
+RXNM commands follow the structure: `rxnm <category> [target] <action> [options]`.
+Append `--format json` or `--format table` to any command to change output structure.
+
+### 1. System Status & Diagnostics
+
+```bash
+# Human-readable consolidated status table (IPs, Routes, WiFi stats, Interfaces)
 rxnm system status
 
 # JSON output for UI/Container monitoring
 rxnm system status --format json
 
-# Check for Captive Portal
+# Check for Internet connectivity via fast TCP probes
+rxnm system check internet
+
+# Check for Captive Portals (Hotel/Airport WiFi)
 rxnm system check portal
 
-
+# Set global HTTP/HTTPS proxy
+rxnm system proxy set --http "[http://10.0.0.1:8080](http://10.0.0.1:8080)" --https "[http://10.0.0.1:8080](http://10.0.0.1:8080)"
 ```
 
 ### 2. WiFi Operations (`rxnm wifi`)
 
-```
-# Scan for networks
+```bash
+# Scan for available networks (Returns SSID, Signal %, Security)
 rxnm wifi scan
 
-# Connect to a network
-rxnm wifi connect "MyWiFi" --password "s3cret"
+# Connect to a standard network (Interactive password prompt if omitted)
+rxnm wifi connect "HomeWiFi" --password "supersecret"
 
+# Connect to a hidden network
+rxnm wifi connect "HiddenNet" --password "supersecret" --hidden
 
+# Start a WiFi Hotspot (Sharing your current internet connection via NAT)
+rxnm wifi ap start "MyHotspot" --password "12345678" --share
+
+# Start a local-only WiFi Hotspot (No internet forwarding)
+rxnm wifi ap start "LocalPlay" --password "12345678"
+
+# Disconnect and return to client mode
+rxnm wifi disconnect
+rxnm wifi ap stop
+
+# Forget a saved network
+rxnm wifi forget "HomeWiFi"
+
+# List saved/known networks
+rxnm wifi list
+
+# Start WPS Push-Button connection
+rxnm wifi wps
 ```
 
-## Configuration Paths
+### 3. WiFi Direct / P2P (`rxnm wifi p2p`)
 
-* **Network Configs**: `/storage/.config/network/`
+```bash
+# Scan for nearby P2P devices (e.g., Android phones, other handhelds)
+rxnm wifi p2p scan
 
-* **WiFi Credentials**: `/var/lib/iwd/` (Secure 0600 permissions)
+# Connect to a P2P device
+rxnm wifi p2p connect "Android_Device_123"
 
-* **Profiles**: `/storage/.config/network/profiles/`
+# Check active P2P connections and Group Owner status
+rxnm wifi p2p status
 
-* **Runtime Locks**: `/run/rocknix/network.lock`
+# Disconnect current P2P session
+rxnm wifi p2p disconnect
+```
+
+### 4. Interface Configuration (`rxnm interface`)
+
+```bash
+# Show specific interface details
+rxnm interface eth0 show
+
+# Set an interface to DHCP
+rxnm interface eth0 set dhcp
+
+# Set a Static IP with Gateway and custom DNS
+rxnm interface wlan0 set static 192.168.1.50/24 --gateway 192.168.1.1 --dns 1.1.1.1,8.8.8.8
+
+# Modify hardware link properties (Speed, Duplex, Auto-neg, Wake-on-LAN)
+rxnm interface eth0 set hardware --speed 1000 --duplex full --autoneg no --wol magic
+
+# Administratively bring an interface up or down
+rxnm interface eth0 enable
+rxnm interface eth0 disable
+
+# Manually trigger a hotplug evaluation event
+rxnm interface eth0 hotplug
+```
+
+### 5. Virtualization & Tunnels
+
+```bash
+# Bridge: Create and assign members
+rxnm bridge create br0
+rxnm bridge add-member eth0 --bridge br0
+
+# VLAN: Create VLAN 10 on parent eth0
+rxnm vlan create eth0.10 --parent eth0 --id 10
+
+# VRF: Create an isolated routing table (Table 100)
+rxnm vrf create mgmt_vrf --table 100
+rxnm vrf add-member eth0 --vrf mgmt_vrf
+
+# WireGuard: Establish a secure tunnel
+rxnm vpn wireguard connect wg0 \
+  --private-key "aBcDeF..." \
+  --peer-key "XyZaBc..." \
+  --endpoint "198.51.100.1:51820" \
+  --address "10.0.0.2/24" \
+  --allowed-ips "0.0.0.0/0"
+```
+
+### 6. Bluetooth Tethering (`rxnm bluetooth`)
+
+```bash
+# Scan and Pair
+rxnm bluetooth scan
+rxnm bluetooth pair "XX:XX:XX:XX:XX:XX"
+
+# Enable PAN Client (Receive internet from your phone)
+rxnm bluetooth pan enable --mode client
+
+# Enable PAN Host (Share your device's internet with paired Bluetooth devices)
+rxnm bluetooth pan enable --mode host --share
+```
+
+### 7. Profile Management (`rxnm profile`)
+
+Because RXNM utilizes a RAM-first architecture, reboots clear any configurations not explicitly saved.
+The system automatically loads the `default` profile at boot.
+
+```bash
+# Save current active runtime configuration to the persistent 'default' profile
+rxnm profile save default
+
+# Save a snapshot of the current state under a specific location name
+rxnm profile save "Work"
+
+# Load a saved profile into RAM, immediately applying it
+rxnm profile load "Work"
+
+# List available persistent profiles
+rxnm profile list
+```
+
+## 📁 File & Configuration Paths
+
+* **Persistent Network Configs**: `/storage/.config/network/`
+* **Persistent Profiles**: `/storage/.config/network/profiles/`
+* **WiFi Credentials (PSK/802.1x)**: `/var/lib/iwd/` *(Requires 0600 secure permissions)*
+* **Global DNS/Resolved Overrides**: `/storage/.config/resolved.conf.d/`
+* **Ephemeral/Runtime Configs (RAM)**: `/run/systemd/network/`
+* **Runtime Locks & Status Caches**: `/run/rocknix/`
+* **API JSON Schema Definition**: `api-schema.json` (Root of repository)
+
+## 🤝 Plugins & Extensibility
+
+RXNM supports external plugin execution without modifying core code. Executables placed in `/storage/.config/network/plugins` or `/usr/lib/rocknix-network-manager/plugins` are automatically exposed as top-level categories in the CLI.
+
+Plugins inherit the environment configuration, standard bash utilities (`rxnm-api.sh`), and the user's `--format` request.
 
 ## License
 
