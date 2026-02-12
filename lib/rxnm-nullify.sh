@@ -86,15 +86,32 @@ _nullify_namespace_restore() {
 }
 
 _nullify_services_mask() {
+    local state_file="/run/rocknix/nullify-pre-state.txt"
+    > "$state_file"
     for svc in $NULLIFY_SERVICES; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo "$svc:active" >> "$state_file"
+        elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+            echo "$svc:enabled" >> "$state_file"
+        fi
         systemctl mask --now "$svc" 2>/dev/null || true
     done
 }
 
 _nullify_services_unmask() {
+    local state_file="/run/rocknix/nullify-pre-state.txt"
     for svc in $NULLIFY_SERVICES; do
         systemctl unmask "$svc" 2>/dev/null || true
     done
+    
+    if [ -f "$state_file" ]; then
+        while IFS=: read -r svc state; do
+            if [ "$state" == "active" ]; then
+                systemctl start "$svc" 2>/dev/null || true
+            fi
+        done < "$state_file"
+        rm -f "$state_file"
+    fi
 }
 
 _nullify_modules_purge() {
@@ -111,8 +128,68 @@ _nullify_modules_restore() {
     rm -f /run/modprobe.d/rxnm-null.conf
 }
 
+_nullify_dry_run() {
+    local cmd="$1"
+    echo "Dry-Run Mode: Nullify $cmd"
+    echo ""
+    if [ "$cmd" == "enable" ]; then
+        echo "Would mask services:"
+        for svc in $NULLIFY_SERVICES; do
+            echo "  $svc"
+        done
+        echo ""
+        echo "Would unbind devices:"
+        for bus in pci sdio; do
+            local dev_dir="/sys/bus/$bus/devices"
+            if [ -d "$dev_dir" ]; then
+                for dev in "$dev_dir"/*; do
+                    [ -e "$dev" ] || continue
+                    local is_net=0
+                    if [ -d "$dev/net" ]; then
+                        is_net=1
+                    elif [ -f "$dev/class" ]; then
+                        local class_val
+                        read -r class_val < "$dev/class" 2>/dev/null || class_val=""
+                        if [[ "$class_val" == 0x02* ]]; then
+                            is_net=1
+                        fi
+                    fi
+                    if [ "$is_net" -eq 1 ]; then
+                        local dev_name
+                        dev_name=$(basename "$dev")
+                        local driver="unknown"
+                        [ -L "$dev/driver" ] && driver=$(basename $(readlink "$dev/driver"))
+                        echo "  $dev ($driver)"
+                    fi
+                done
+            fi
+        done
+        echo ""
+        echo "Would disable sysctls:"
+        echo "  net.ipv4.conf.all.disable_ipv4 -> 1"
+        echo "  net.ipv6.conf.all.disable_ipv6 -> 1"
+    elif [ "$cmd" == "disable" ]; then
+        echo "Would unmask services:"
+        for svc in $NULLIFY_SERVICES; do
+            echo "  $svc"
+        done
+        echo ""
+        echo "Would enable sysctls:"
+        echo "  net.ipv4.conf.all.disable_ipv4 -> 0"
+        echo "  net.ipv6.conf.all.disable_ipv6 -> 0"
+        echo "  net.core.default_qdisc -> fq_codel"
+        echo "  net.core.bpf_jit_enable -> 1"
+    fi
+}
+
 action_system_nullify() {
     local cmd="$1"
+    local dry_run="$2"
+    
+    if [ "$dry_run" == "--dry-run" ]; then
+        _nullify_dry_run "$cmd"
+        return 0
+    fi
     
     if [ "$cmd" == "enable" ]; then
         if [ "$FORCE_ACTION" != "true" ]; then

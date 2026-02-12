@@ -774,7 +774,7 @@ case "$CATEGORY" in
                 action_setup 
                 ;;
             stop) action_stop ;;
-            nullify) action_system_nullify "${1:-}" ;;
+            nullify) action_system_nullify "${1:-}" "${2:-}" ;;
         esac
         ;;
         
