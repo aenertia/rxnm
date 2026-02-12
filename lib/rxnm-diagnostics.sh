@@ -308,10 +308,11 @@ action_status() {
         json_output=$(action_status_legacy "$filter_iface")
     fi
     
-    # 4. Update Cache
+    # 4. Update Cache (Fail gracefully if we lack permissions)
     if [ -z "$filter_iface" ]; then
-        [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
-        echo "$json_output" > "$CACHE_FILE"
+        if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
+            echo "$json_output" > "$CACHE_FILE" 2>/dev/null || true
+        fi
     fi
     
     if [ "${RXNM_FORMAT:-human}" == "json" ]; then

@@ -28,7 +28,7 @@ _rxnm_completion() {
     local RUN_DIR="/run/rocknix"
     local STATUS_CACHE="${RUN_DIR}/status.json"
     local GLOBAL_OPTS="--json --format --yes --force --debug --help"
-    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
+    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system help"
 
     # --- LIVE QUERY HELPERS ---
 
@@ -113,6 +113,11 @@ _rxnm_completion() {
     local category="${words[1]}"
     
     case "$category" in
+        help)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "${TOP_CATS}" -- "$cur") )
+            fi
+            ;;
         wifi)
             local cmds="scan connect disconnect ap wps networks list forget country p2p dpp"
             if [[ $cword -eq 2 ]]; then

@@ -165,7 +165,7 @@ Examples:
   rxnm system status --format table
   rxnm bridge create br0
 
-Use 'rxnm <category> --help' for specific commands.
+Use 'rxnm help <category>' for specific commands.
 EOF
 }
 
@@ -383,10 +383,21 @@ fi
 # --- HIERARCHY DISPATCHER ---
 
 # List of Built-in Categories
-CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config")
+CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system")
 
 # Determine Category from first argument
 RAW_CMD="${1:-status}"
+
+# Help command interceptor
+if [ "$RAW_CMD" == "help" ]; then
+    if [ -n "${2:-}" ]; then
+        print_category_help "$2"
+    else
+        print_main_help
+    fi
+    exit 0
+fi
+
 CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
 
 # 1. Plugin Dispatch (Highest Priority)
@@ -438,7 +449,10 @@ case "$CATEGORY" in
         # NEW: Load Roaming Engine
         source "${LIB_DIR}/rxnm-roaming.sh"
         ;;
-    interface|bridge) source "${LIB_DIR}/rxnm-interfaces.sh" ;;
+    interface|bridge) 
+        source "${LIB_DIR}/rxnm-interfaces.sh" 
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
+        ;;
     vpn|tun|tap) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-vpn.sh" 
@@ -446,10 +460,11 @@ case "$CATEGORY" in
     bond|vlan|vrf|macvlan|ipvlan|veth) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-virt.sh" 
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
         ;;
     bluetooth) source "${LIB_DIR}/rxnm-bluetooth.sh" ;;
     profile) source "${LIB_DIR}/rxnm-profiles.sh" ;;
-    system|config) 
+    system) 
         source "${LIB_DIR}/rxnm-diagnostics.sh" 
         source "${LIB_DIR}/rxnm-wifi.sh" 
         ;;
@@ -816,6 +831,11 @@ case "$CATEGORY" in
          if [ "$ACTION" == "delete" ]; then
              [ -z "$NAME" ] && { json_error "Name required"; exit 1; }
              action_delete_netdev "$NAME"
+             exit 0
+         fi
+         
+         if [ "$ACTION" == "list" ]; then
+             action_status ""
              exit 0
          fi
          
