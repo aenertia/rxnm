@@ -186,3 +186,30 @@ validate_config_state() {
     
     return 0
 }
+
+# Description: Basic JSON structure validation for stdin input.
+# Arguments: $1 = JSON String
+validate_json_input() {
+    local json="$1"
+    if [ -z "$json" ]; then
+        json_error "Empty input received on stdin" "1"
+        return 1
+    fi
+    
+    # Check for basic JSON validity using jq if available
+    if command -v "$JQ_BIN" >/dev/null; then
+        if ! echo "$json" | "$JQ_BIN" . >/dev/null 2>&1; then
+            json_error "Invalid JSON format" "1" "Ensure JSON is well-formed"
+            return 1
+        fi
+        
+        # Check required field: category
+        local cat
+        cat=$(echo "$json" | "$JQ_BIN" -r '.category // empty')
+        if [ -z "$cat" ]; then
+            json_error "Missing required field: category" "1"
+            return 1
+        fi
+    fi
+    return 0
+}

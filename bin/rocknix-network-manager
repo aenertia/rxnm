@@ -74,12 +74,12 @@ fi
 source "${LIB_DIR}/rxnm-constants.sh"
 source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
-source "${LIB_DIR}/rxnm-config-builder.sh"
+# Plugins needed for discovery
 source "${LIB_DIR}/rxnm-plugins.sh"
-# Batch 2: Load Schema Validator
+# Schema needed for validation
 source "${LIB_DIR}/rxnm-config-schema.sh"
-# Batch 3: Load Template Masking
-source "${LIB_DIR}/rxnm-templates.sh"
+
+# Lazy Load Note: config-builder.sh and templates.sh are now sourced only on demand
 
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
@@ -104,13 +104,19 @@ expand_alias() {
     local options=("${@:2}")
     local match=""
     
+    if [ -z "$input" ]; then return 0; fi
+
     for opt in "${options[@]}"; do
         if [[ "$opt" == "$input" ]]; then
             echo "$opt"
             return 0
         fi
         if [[ "$input" != "" ]] && [[ "$opt" == "$input"* ]]; then
-            if [ -n "$match" ]; then return 1; fi # Ambiguous match
+            if [ -n "$match" ]; then 
+                # Ambiguous match found
+                echo "ambiguous" 
+                return 1 
+            fi
             match="$opt"
         fi
     done
@@ -146,21 +152,13 @@ Categories:
   vlan          Manage VLANs
   vrf           Manage Virtual Routing Functions
   api           Schema and Versioning
-EOF
-
-    if [ -n "$plugins" ]; then
-        echo ""
-        echo "Plugins / Helpers:"
-        echo "$plugins" | awk '{print "  " $0}'
-    fi
-
-    cat <<EOF
 
 Global Options:
   --format <fmt>  Output format: human (default), json, table, simple
   --simple        Shortcut for '--format simple' (Bash friendly)
   --get <key>     Extract specific value (implies --simple)
   --yes, -y       Skip confirmation prompts
+  --force         Force action (same as --yes)
   --stdin         Read configuration from JSON on stdin
   --help, -h      Show help
   --version       Show version
@@ -174,6 +172,12 @@ Examples:
 
 Use 'rxnm <category> --help' for specific commands.
 EOF
+
+    if [ -n "$plugins" ]; then
+        echo ""
+        echo "Plugins / Helpers:"
+        echo "$plugins" | awk '{print "  " $0}'
+    fi
 }
 
 # Function: print_category_help
@@ -205,7 +209,7 @@ Actions:
   scan [iface]          Scan for networks
   connect <ssid>        Connect to a network
   disconnect [iface]    Disconnect from current AP
-  list                  List known networks
+  list                  List known networks (saved profiles)
   forget <ssid>         Forget a known network
   ap start <ssid>       Start Access Point (Hotspot)
   country <code>        Set WiFi Country Code
@@ -282,6 +286,7 @@ Actions:
 
 Options:
   --interface <iface>   Scope profile to a specific interface
+  --file <path>         File path for import/export
 EOF
             ;;
         bridge|bond|vlan|vrf|macvlan|ipvlan|veth)
@@ -342,6 +347,12 @@ Actions:
   proxy set             Configure global/interface proxy
   nullify enable        Disable networking entirely (requires --yes)
   nullify disable       Attempt to restore networking
+
+Options:
+  --http <url>          Set HTTP proxy
+  --https <url>         Set HTTPS proxy
+  --noproxy <list>      Set no_proxy exclusions
+  --dry-run             Show actions without executing (nullify only)
 EOF
             ;;
         api)
@@ -352,6 +363,7 @@ EOF
             ;;
         *)
             echo "No specific help for '$category'."
+            echo "Run 'rxnm --help' for a list of categories."
             ;;
     esac
 }
@@ -372,7 +384,7 @@ while [[ $# -gt 0 ]]; do
         --debug) export RXNM_DEBUG=1; set -x; shift ;;
         --help|-h) SHOW_HELP="true"; shift ;;
         --stdin) USE_STDIN="true"; shift ;;
-        --version) echo "RXNM $RXNM_VERSION (API ${RXNM_API_VERSION:-1.0})"; exit 0 ;;
+        --version) echo "RXNM ${RXNM_VERSION:-1.0.0} (API ${RXNM_API_VERSION:-1.0})"; exit 0 ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
@@ -382,6 +394,11 @@ if [ "$USE_STDIN" == "true" ]; then
     if [ -p /dev/stdin ] || [ -f /dev/stdin ]; then
         # Read the raw JSON from stdin
         INPUT_JSON=$(cat)
+        
+        # 0. Schema Validation (Input)
+        if ! validate_json_input "$INPUT_JSON"; then
+             exit 1
+        fi
         
         # 1. API Version Compatibility Check
         REQ_VER=$("$JQ_BIN" -r '.api_version // empty' <<< "$INPUT_JSON")
@@ -447,7 +464,7 @@ fi
 # Reset positional arguments to the expanded/normalized ARGS array
 set -- "${ARGS[@]}"
 
-# If help requested at root
+# If help requested at root (or explicit global help)
 if [ "$SHOW_HELP" == "true" ] && [ $# -eq 0 ]; then
     print_main_help
     exit 0
@@ -461,6 +478,20 @@ CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipv
 # Determine Category from first argument
 RAW_CMD="${1:-status}"
 CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
+
+# Handle ambiguous expansion
+if [ "$CATEGORY" == "ambiguous" ]; then
+    json_error "Ambiguous command: '$RAW_CMD'. Please be more specific." "1"
+    exit 1
+fi
+
+# Category Aliases (Mapping)
+case "$CATEGORY" in
+    if|iface) CATEGORY="interface" ;;
+    bt) CATEGORY="bluetooth" ;;
+    sys) CATEGORY="system" ;;
+    virt) CATEGORY="bridge" ;; # Or generic virt handling
+esac
 
 # 1. Plugin Dispatch (Highest Priority)
 # Check if a plugin exists for this category (Extension or Override)
@@ -501,6 +532,13 @@ else
     shift
 fi
 
+# CRITICAL FIX: Handle help request before dispatching action
+# This prevents "rxnm interface --help" from trying to execute an action named "--help"
+if [ "$SHOW_HELP" == "true" ]; then
+    print_category_help "$CATEGORY"
+    exit 0
+fi
+
 # Load Dependencies (Lazy Loading)
 # Logic: We only source the bash libraries required for the requested category
 # to reduce startup time.
@@ -538,16 +576,12 @@ case "$CATEGORY" in
     api) ;;
 esac
 
-# Check for category-specific help
-# This must happen AFTER shifting the category but BEFORE dispatching action
-if [ "$SHOW_HELP" == "true" ]; then
-    print_category_help "$CATEGORY"
-    exit 0
-fi
-
-# Batch 2: Configuration State Validation
+# Batch 2: Configuration State Validation & Deferred Loading
 # Check intent against schema before execution
-if [[ "$CATEGORY" == "wifi" ]] || [[ "$CATEGORY" == "interface" ]]; then
+if [[ "$CATEGORY" == "wifi" ]] || [[ "$CATEGORY" == "interface" ]] || \
+   [[ "$CATEGORY" == "bridge" ]] || [[ "$CATEGORY" == "bond" ]] || \
+   [[ "$CATEGORY" == "vlan" ]] || [[ "$CATEGORY" == "vrf" ]]; then
+    
     # We grab the first argument as potential action for descriptor building
     VAL_ACTION="${1:-}"
     
@@ -560,10 +594,16 @@ if [[ "$CATEGORY" == "wifi" ]] || [[ "$CATEGORY" == "interface" ]]; then
         fi
     fi
 
-    descriptor=$(build_config_descriptor "$CATEGORY" "$VAL_ACTION" "$@")
-    if ! validate_config_state "$descriptor"; then
-        # Error is handled inside validation function (json_error)
-        exit 1
+    # Optimization: Only load builders/templates if we are likely modifying configuration
+    if [[ "$VAL_ACTION" =~ ^(set|create|delete|add|connect|disconnect|ap)$ ]]; then
+        source "${LIB_DIR}/rxnm-config-builder.sh"
+        source "${LIB_DIR}/rxnm-templates.sh"
+        
+        descriptor=$(build_config_descriptor "$CATEGORY" "$VAL_ACTION" "$@")
+        if ! validate_config_state "$descriptor"; then
+            # Error is handled inside validation function (json_error)
+            exit 1
+        fi
     fi
 fi
 

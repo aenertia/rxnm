@@ -143,6 +143,9 @@ log_warn() {
 }
 log_error() {
     echo "[ERROR] $*" >&2
+    if [ "${RXNM_FORMAT:-human}" != "json" ]; then
+         echo "Try 'rxnm --help' for usage information." >&2
+    fi
 }
 
 # Description: Exits the script with an error message formatted correctly for the requested output mode.
