@@ -1,0 +1,38 @@
+name: RXNM Integration Tests
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  integration:
+    name: Build & Interop Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Build Test Runner Image
+      run: |
+        podman build -t rxnm-test-node -f tests/integration/Containerfile .
+
+    - name: Run Core Test Suite
+      run: |
+        # Run the internal unit/foundation tests inside the container env first
+        podman run --rm --privileged \
+          -v $(pwd):/usr/src/rxnm:Z \
+          rxnm-test-node bash -c "cd /usr/src/rxnm && make test-all"
+
+    - name: Create Test Network
+      run: |
+        podman network create --disable-dns rxnm-net
+
+    - name: Run Interoperability Suite
+      run: |
+        chmod +x tests/integration/run_interop.sh
+        ./tests/integration/run_interop.sh
+      env:
+        RXNM_DEBUG: 1

@@ -1,0 +1,57 @@
+# Use Fedora Latest Stable
+FROM registry.fedoraproject.org/fedora:latest
+
+# --- Systemd Container Standards ---
+ENV container=docker
+STOPSIGNAL SIGRTMIN+3
+
+# --- Build & Runtime Dependency Installation ---
+# - gcc/make/binutils: Standard compilation
+# - glibc-static: Required for 'make tiny' (static linking) on Fedora
+# - systemd-networkd/iwd: RXNM core backends
+# - NetworkManager/firewalld: Installed just to be masked (prevents interference)
+RUN dnf -y install \
+    gcc \
+    make \
+    binutils \
+    glibc-static \
+    systemd \
+    systemd-networkd \
+    systemd-resolved \
+    NetworkManager \
+    firewalld \
+    iproute \
+    iputils \
+    procps-ng \
+    jq \
+    bash \
+    kmod \
+    dbus \
+    iwd \
+    hostname \
+    && dnf clean all
+
+# --- Service Hygiene ---
+RUN cd /lib/systemd/system/sysinit.target.wants/ && \
+    for i in *; do [ $i == systemd-tmpfiles-setup.service ] || rm -f $i; done && \
+    rm -f /lib/systemd/system/multi-user.target.wants/* && \
+    rm -f /etc/systemd/system/*.wants/* && \
+    rm -f /lib/systemd/system/local-fs.target.wants/* && \
+    rm -f /lib/systemd/system/sockets.target.wants/*udev* && \
+    rm -f /lib/systemd/system/sockets.target.wants/*initctl* && \
+    rm -f /lib/systemd/system/basic.target.wants/* && \
+    rm -f /lib/systemd/system/anaconda.target.wants/*
+
+# --- Conflict Resolution ---
+# Mask interfering services to ensure networkd/RXNM exclusivity
+RUN systemctl mask NetworkManager NetworkManager-wait-online firewalld
+
+# Enable core stack
+RUN systemctl enable systemd-networkd systemd-resolved iwd
+
+# --- Rocknix Directory Mimicry ---
+RUN mkdir -p /storage/.config/network && \
+    mkdir -p /var/lib/iwd && \
+    mkdir -p /run/rocknix
+
+CMD ["/sbin/init"]
