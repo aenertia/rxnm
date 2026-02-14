@@ -74,6 +74,7 @@ fi
 source "${LIB_DIR}/rxnm-constants.sh"
 source "${LIB_DIR}/rxnm-utils.sh"
 source "${LIB_DIR}/rxnm-system.sh"
+source "${LIB_DIR}/rxnm-help.sh"  # Sourced early for help support
 # Plugins needed for discovery
 source "${LIB_DIR}/rxnm-plugins.sh"
 # Schema needed for validation
@@ -122,250 +123,6 @@ expand_alias() {
     done
     
     [ -n "$match" ] && echo "$match" || echo "$input"
-}
-
-# --- HELP TEXT GENERATORS ---
-
-# Function: print_main_help
-# Description: Outputs the top-level help text, including available categories and global options.
-#              Dynamically lists available plugins.
-# Arguments: None.
-# Globals: None.
-# Returns: stdout (Help text).
-print_main_help() {
-    local plugins
-    plugins=$(list_plugins)
-    
-    cat <<EOF
-Usage: rxnm <category> [target] <action> [options]
-       echo '{"category":"wifi", "action":"connect", "ssid":"MyNet"}' | rxnm --stdin
-
-Categories:
-  wifi          Manage Wireless connections
-  interface     Configure interfaces (IP, DHCP, State)
-  system        Status, diagnostics, global settings
-  profile       Manage configuration profiles
-  bluetooth     Bluetooth Tethering (PAN/NAP)
-  vpn           WireGuard and Tunnels
-  bridge        Manage Network Bridges
-  bond          Manage Interface Bonding
-  vlan          Manage VLANs
-  vrf           Manage Virtual Routing Functions
-  api           Schema and Versioning
-
-Global Options:
-  --format <fmt>  Output format: human (default), json, table, simple
-  --simple        Shortcut for '--format simple' (Bash friendly)
-  --get <key>     Extract specific value (implies --simple)
-  --yes, -y       Skip confirmation prompts
-  --force         Force action (same as --yes)
-  --stdin         Read configuration from JSON on stdin
-  --help, -h      Show help
-  --version       Show version
-
-Examples:
-  rxnm wifi connect "MyNetwork"
-  rxnm interface wlan0 set dhcp
-  rxnm system status --format table
-  rxnm interface wlan0 show --get ip
-  rxnm bridge create br0
-
-Use 'rxnm <category> --help' for specific commands.
-EOF
-
-    if [ -n "$plugins" ]; then
-        echo ""
-        echo "Plugins / Helpers:"
-        echo "$plugins" | awk '{print "  " $0}'
-    fi
-}
-
-# Function: print_category_help
-# Description: Outputs detailed help text for a specific command category.
-#              Checks if the category is a plugin and delegates help if so.
-# Arguments:
-#   $1 - The category name (e.g., 'wifi', 'interface').
-# Globals: None.
-# Returns: stdout (Category help text).
-print_category_help() {
-    local category="$1"
-    
-    # Check if this category is handled by a plugin (Extension)
-    local plugin_path
-    plugin_path=$(find_plugin "$category")
-    if [ -n "$plugin_path" ]; then
-        echo "Help for plugin '$category':"
-        # Try to invoke the plugin with --help if it supports it
-        exec_plugin "$plugin_path" "--help" || echo "  No help available for this plugin."
-        return
-    fi
-
-    case "$category" in
-        wifi)
-            cat <<EOF
-Usage: rxnm wifi <action> [options]
-
-Actions:
-  scan [iface]          Scan for networks
-  connect <ssid>        Connect to a network
-  disconnect [iface]    Disconnect from current AP
-  list                  List known networks (saved profiles)
-  forget <ssid>         Forget a known network
-  ap start <ssid>       Start Access Point (Hotspot)
-  country <code>        Set WiFi Country Code
-  
-  p2p scan              Scan for WiFi Direct peers
-  p2p connect <name>    Connect to P2P peer
-  p2p disconnect        Disconnect P2P
-  p2p status            Show P2P status (Peers/GO Mode)
-  
-  dpp enroll <uri>      Start DPP enrollment (QR code string)
-  dpp stop              Stop DPP session
-  
-  roaming monitor       Start opportunistic roaming monitor (Foreground)
-  roaming enable        Enable roaming background service
-  roaming disable       Disable roaming background service
-
-Options:
-  --password <pass>     WiFi Password
-  --password-stdin      Read password from stdin (Secure)
-  --hidden              Connect to hidden SSID
-  --interface <iface>   Target interface (Auto-detected if omitted)
-  --ip <cidr>           Custom IP for AP mode
-  --share               Enable NAT/Masquerading for AP
-  --ipv6-pd <yes|no>    Enable/Disable IPv6 Prefix Delegation (Default: yes)
-EOF
-            ;;
-        interface)
-            cat <<EOF
-Usage: rxnm interface [name] <action> [options]
-
-Actions:
-  show                  Show interface details
-  hotplug               Trigger hotplug event (Standard/Rescue)
-  set dhcp              Enable DHCP
-  set static <ip>       Set Static IP (CIDR format)
-  set hardware          Set physical link properties (speed, duplex)
-  enable / disable      Set link state
-  list                  List all interfaces
-
-Options:
-  --gateway <ip>        Set Gateway
-  --dns <ip>            Set DNS servers (comma separated)
-  --routes <list>       Set static routes (dest@gw@metric, comma separated)
-  --metric <int>        Route metric priority
-  --mtu <int>           Set MTU (68-65535)
-  --mac <addr>          Set MAC Address (XX:XX:XX:XX:XX:XX)
-  --ipv6-privacy <opt>  Set IPv6 Privacy (yes|no|prefer-public|kernel)
-  --dhcp-id <opt>       Set DHCP Client ID (mac|duid)
-  --ipv6-pd <yes|no>    Enable/Disable IPv6 Prefix Delegation (Default: yes)
-  --get <key>           Get single value (e.g. 'ip', 'mac', 'state')
-  
-  --speed <mbps>        Link speed (e.g. 100, 1000)
-  --duplex <mode>       Duplex mode (half, full)
-  --autoneg <yes|no>    Enable/Disable auto-negotiation
-  --wol <magic|off>     Wake-on-LAN
-  --mac-policy <opt>    MAC Policy (persistent, random, none)
-  --name-policy <opt>   Name Policy (kernel, database, onboard, keep)
-EOF
-            ;;
-        profile)
-            cat <<EOF
-Usage: rxnm profile <action> [name] [options]
-
-RXNM uses a RAM-first architecture. Changes are ephemeral unless saved to a profile.
-The 'default' profile is automatically loaded to RAM at boot.
-
-Actions:
-  list                  List saved persistent profiles
-  save [name]           Save active state to profile (defaults to 'default')
-  load [name]           Load profile into RAM (defaults to 'default')
-  delete <name>         Delete a persistent profile
-  export <name>         Export profile to tarball
-  import <file>         Import profile from tarball
-
-Options:
-  --interface <iface>   Scope profile to a specific interface
-  --file <path>         File path for import/export
-EOF
-            ;;
-        bridge|bond|vlan|vrf|macvlan|ipvlan|veth)
-            cat <<EOF
-Usage: rxnm $category <action> <name> [options]
-
-Actions:
-  create <name>         Create new virtual device
-  delete <name>         Delete device
-  add-member <iface>    Add interface to $category (Bridge/VRF only)
-  add-slave <iface>     Add interface to $category (Bond only)
-  list                  List devices (via rxnm interface list)
-
-Options:
-  --parent <iface>      Parent interface (VLAN/MacVLAN/IPVLAN)
-  --id <vlan-id>        VLAN ID (1-4094)
-  --mode <mode>         Mode for Bond (active-backup, etc) or MacVLAN
-  --table <id>          Routing table ID for VRF
-  --peer <name>         Peer interface name (veth only)
-EOF
-            ;;
-        vpn)
-            cat <<EOF
-Usage: rxnm vpn wireguard <action> <name> [options]
-
-Actions:
-  connect <name>        Create/Connect WireGuard interface
-  disconnect <name>     Remove WireGuard interface
-  delete <name>         Alias for disconnect
-
-Options:
-  --private-key <key>   WireGuard Private Key
-  --peer-key <key>      Peer Public Key
-  --endpoint <addr:port> Remote Endpoint
-  --allowed-ips <cidr>  Allowed IPs (e.g. 0.0.0.0/0)
-  --address <cidr>      Interface Address
-EOF
-            ;;
-        tun|tap)
-             cat <<EOF
-Usage: rxnm $category create <name> [options]
-       rxnm $category delete <name>
-
-Options:
-  --user <user>         Owner of the interface
-  --group <group>       Group owner
-EOF
-            ;;
-        system)
-            cat <<EOF
-Usage: rxnm system <action> [options]
-
-Actions:
-  status                Show network status
-  check internet        Check internet connectivity
-  check portal          Check for captive portal
-  reload                Reload network configuration
-  proxy set             Configure global/interface proxy
-  nullify enable        Disable networking entirely (requires --yes)
-  nullify disable       Attempt to restore networking
-
-Options:
-  --http <url>          Set HTTP proxy
-  --https <url>         Set HTTPS proxy
-  --noproxy <list>      Set no_proxy exclusions
-  --dry-run             Show actions without executing (nullify only)
-EOF
-            ;;
-        api)
-            cat <<EOF
-Usage: rxnm api <action>
-Actions: schema, version
-EOF
-            ;;
-        *)
-            echo "No specific help for '$category'."
-            echo "Run 'rxnm --help' for a list of categories."
-            ;;
-    esac
 }
 
 # --- GLOBAL OPTIONS PARSING ---
@@ -466,7 +223,7 @@ set -- "${ARGS[@]}"
 
 # If help requested at root (or explicit global help)
 if [ "$SHOW_HELP" == "true" ] && [ $# -eq 0 ]; then
-    print_main_help
+    rxnm_help_show_main
     exit 0
 fi
 
@@ -476,13 +233,26 @@ fi
 CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config" "api")
 
 # Determine Category from first argument
-RAW_CMD="${1:-status}"
-CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
+RAW_CMD="${1:-}"
+CATEGORY=""
 
-# Handle ambiguous expansion
-if [ "$CATEGORY" == "ambiguous" ]; then
-    json_error "Ambiguous command: '$RAW_CMD'. Please be more specific." "1"
-    exit 1
+if [ -n "$RAW_CMD" ]; then
+    CATEGORY=$(expand_alias "$RAW_CMD" "${CATS[@]}")
+    # Handle ambiguous expansion
+    if [ "$CATEGORY" == "ambiguous" ]; then
+        json_error "Ambiguous command: '$RAW_CMD'. Please be more specific." "1"
+        exit 1
+    fi
+else
+    # No category provided
+    if [ "$SHOW_HELP" == "true" ]; then
+        rxnm_help_show_main
+        exit 0
+    fi
+    # Default behavior: system status
+    CATEGORY="system"
+    # IMPORTANT: Inject 'system status' arguments so the shift logic works downstream
+    set -- "system" "status"
 fi
 
 # Category Aliases (Mapping)
@@ -520,14 +290,14 @@ for valid_cat in "${CATS[@]}"; do
 done
 
 if [ "$IS_VALID_CAT" = false ]; then
-    if [ -z "$RAW_CMD" ] || [ "$RAW_CMD" == "status" ]; then
-        # Default to system status if no args or just 'status'
-        CATEGORY="system"
-        set -- "status"
-    else
-        json_error "Unknown command or category: $RAW_CMD" "1" "Try 'rxnm --help'"
-        exit 1
+    if [ "$SHOW_HELP" == "true" ]; then
+        # If user asked for help on an invalid category, show main help
+        rxnm_help_show_main
+        exit 0
     fi
+    
+    json_error "Unknown command or category: $RAW_CMD" "1" "Try 'rxnm --help'"
+    exit 1
 else
     shift
 fi
@@ -535,7 +305,7 @@ fi
 # CRITICAL FIX: Handle help request before dispatching action
 # This prevents "rxnm interface --help" from trying to execute an action named "--help"
 if [ "$SHOW_HELP" == "true" ]; then
-    print_category_help "$CATEGORY"
+    rxnm_help_show_category "$CATEGORY"
     exit 0
 fi
 
@@ -628,7 +398,7 @@ case "$CATEGORY" in
 
     wifi)
         ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming")
-        shift
+        if [ $# -gt 0 ]; then shift; fi
         
         ARG_IFACE=""
         ARGS=("$@")
@@ -765,7 +535,7 @@ case "$CATEGORY" in
         if [ "$IS_KEYWORD" == "true" ]; then
             # Command-first syntax: rxnm interface set eth0 ...
             ACTION="$EXPANDED"
-            shift
+            if [ $# -gt 0 ]; then shift; fi
             # If next arg is not a flag, it's the target
             if [[ "${1:-}" != --* ]] && [ -n "${1:-}" ]; then
                 TARGET="$1"
@@ -774,9 +544,9 @@ case "$CATEGORY" in
         else
             # Object-first syntax: rxnm interface eth0 set ...
             TARGET="$ARG_1"
-            shift
+            if [ $# -gt 0 ]; then shift; fi
             ACTION=$(expand_alias "${1:-show}" "${VALID_ACTS[@]}")
-            shift
+            if [ $# -gt 0 ]; then shift; fi
         fi
         
         # Flag args override
@@ -882,7 +652,8 @@ case "$CATEGORY" in
         
     system)
         ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop" "nullify")
-        shift
+        if [ $# -gt 0 ]; then shift; fi
+        
         case "$ACTION" in
             status) action_status "${1:-}" ;;
             check)
@@ -917,7 +688,9 @@ case "$CATEGORY" in
         ;;
         
     bluetooth)
-        ACTION="${1:-}"; shift
+        ACTION="${1:-}"; 
+        if [ $# -gt 0 ]; then shift; fi
+        
         case "$ACTION" in
             pan)
                 SUBCMD="${1:-}"; shift
@@ -952,7 +725,9 @@ case "$CATEGORY" in
         ;;
 
     bridge|bond|vrf|vlan|macvlan|ipvlan|veth)
-         ACTION="${1:-}"; shift
+         ACTION="${1:-}"; 
+         if [ $# -gt 0 ]; then shift; fi
+         
          NAME="${1:-}"; [ -n "$NAME" ] && [[ "$NAME" != --* ]] && shift
          
          if [ "$ACTION" == "delete" ]; then
