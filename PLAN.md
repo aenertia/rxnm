@@ -1,25 +1,27 @@
 # RXNM 2.0: The Monolithic Convergent Evolution
 
 **Status:** Future Planning (Post-v1.0 RC3)
+
 **Target:** Unified Network Runtime for Extremis (MCU), Handhelds, and Cloud.
+
 **Core Philosophy:** Convergence of the "Micro" and "Full Fat" stacks into a single, power-aware high-performance C engine with eBPF/XDP at the center.
 
 ## 1. Vision: From "Hybrid" to "Monolithic"
 
-RXNM 1.0 established the **Hybrid Path** (Bash logic + C acceleration).
-RXNM 2.0 moves to a **Converged Engine** where the C Agent becomes the primary logic engine, and Bash/CLI becomes a thin wrapper or is eliminated entirely for extremis targets. For handhelds, this shift is primarily driven by the need to eliminate background "jitter" and maximize battery life during deep sleep and active gameplay.
+RXNM 1.0 established the **Hybrid Path** (Bash logic + C acceleration + `systemd-networkd`).
+RXNM 2.0 moves to a **Converged Engine** where the C Agent becomes the primary logic engine. For handhelds and extremis environments, this eliminates the overhead of the `systemd-networkd` daemon and its associated XML/INI parsing logic in favor of a monolithic state machine.
 
 ### Evolution Comparison
 
-| Metric | 1.0 (Hybrid RC3) | 2.0 (Converged Mono) | 
-| :--- | :--- | :--- | 
-| **Logic Engine** | Bash / `systemd-networkd` | Monolithic C Engine | 
-| **Connectivity** | `iwd` (D-Bus) | Internalized `ell`/`iwd` Logic | 
-| **Data Plane** | Kernel IP Stack | **eBPF / XDP (Primary)** | 
-| **IPC** | D-Bus (System/Lite) | **Zero-IPC (Internal)** | 
-| **Service Logic** | `ip netns` (Fork) | Native `setns` / BPF Maps | 
-| **CPU Wakeups (Idle)** | \~20-40 / sec | **< 2 / sec** | 
-| **Resident RAM** | \~11.5MB | **\~2.5MB (Unified)** | 
+| Metric | 1.0 (Hybrid RC3) | OpenWrt (netifd) | 2.0 (Converged Mono) | 
+| :--- | :--- | :--- | :--- | 
+| **Logic Engine** | Bash / systemd-networkd | C / **ubus** / Shell Scripts | Monolithic C Engine | 
+| **Connectivity** | `iwd` (D-Bus) | `hostapd` / `wpa_s` | Internalized `ell`/`iwd` Logic | 
+| **Data Plane** | Kernel IP Stack | Kernel IP Stack / Bridge | **eBPF / XDP (Primary)** | 
+| **IPC** | D-Bus (System/Lite) | **ubus** (libubox) | **Zero-IPC (Internal)** | 
+| **Service Logic** | `ip netns` (Fork) | Flat Router Namespace | Native `setns` / BPF Maps | 
+| **CPU Wakeups (Idle)** | \~20-40 / sec | \~10-20 / sec | **< 2 / sec** | 
+| **Resident RAM** | \~11.5MB | \~6.5MB | **\~2.5MB (Unified)** | 
 
 ## 2. Core Architecture Pillars
 
@@ -27,15 +29,15 @@ RXNM 2.0 moves to a **Converged Engine** where the C Agent becomes the primary l
 
 2.0 integrates core connectivity components directly into the agent memory space.
 
-* **Power Benefit:** Eliminates the D-Bus daemon requirement. In traditional stacks, every signal (RSSI change, scan results) triggers a context switch and CPU wakeup as messages bounce between `iwd`, `dbus`, and `NetworkManager`.
+* **Power Benefit:** Eliminates the D-Bus/ubus daemon requirement. By removing the context-switching between connectivity daemons and the manager, the CPU stays in deep sleep (C-state) longer.
 * **Unified State:** Authentication and L3 addressing happen in the same process memory space, enabling atomic, instant transitions from "Resume" to "Connected."
 
 ### B. eBPF/XDP: The Power-Aware Data Plane
 
 2.0 uses eBPF maps as the primary source of truth for routing and firewalling.
 
-* **Interrupt Coalescing:** XDP allows packets to be processed at the driver level. Inter-service (SOA) traffic never traverses the kernel's heavy IP stack, reducing the "Instructions Per Packet" (IPP).
-* **Stateless Firewalling:** Moves all "Nullify" and "Service Isolation" logic into XDP_DROP programs.
+* **Interrupt Coalescing:** XDP allows packets to be processed at the driver level. Inter-service (SOA) traffic never traverses the kernel's heavy IP stack, significantly reducing CPU interrupts.
+* **Comparison with netifd:** While `netifd` handles the control plane efficiently, its data plane is standard Linux bridging/routing. RXNM 2.0 uses XDP-Redirect to shunt packets between namespaces with sub-microsecond latency.
 
 ### C. Reactive Power Management
 
@@ -63,61 +65,69 @@ The build system (Make/Meson) performs automated preprocessing on harvested code
 * **Feature Pruning:** Removes Enterprise (EAP) and SIM-card logic from `ell/tls`, reducing the static binary size by \~40%.
 * **Symbol Namespacing:** Wraps harvested logic in `rxnm_` namespaces to prevent collisions while allowing us to track upstream bug fixes easily.
 
-### C. Build Complexity Requirements
+## 4. Performance & Efficiency Matrix
 
-* **LLVM/Clang Integrated:** Required for eBPF/XDP bytecode generation (CO-RE - Compile Once, Run Everywhere).
-* **Header Generation:** An expanded version of `sync-constants.sh` that generates C structures directly from the API schema to ensure 100% alignment between harvested logic and the RXNM API.
-* **Static Analysis:** Mandatory Valgrind and Bear checks to ensure the monolithic engine doesn't introduce memory leaks in high-uptime cloud or handheld environments.
+Comparison of the Monolithic 2.0 stack against standard `systemd-networkd` and OpenWrt `netifd`.
 
-## 4. Handheld-Specific Gains (Anbernic, Powkiddy, Retroid, Ayaneo)
+| Metric | systemd-networkd | OpenWrt (netifd) | Micro-RXNM 2.0 (Mono) | 
+| :--- | :--- | :--- | :--- | 
+| **Resident RAM** | \~11.5 MB | \~6.5 MB | **\~2.5 MB** | 
+| **Binary Footprint** | \~5.2 MB | \~1.2 MB | **\~0.9 MB** | 
+| **Cold Start Latency** | \~450ms | \~250ms | **\~15ms** | 
+| **USB/TB Hotplug** | \~180ms | \~80ms | **< 5ms** | 
+| **Idle Wakeups** | \~25/sec | \~12/sec | **< 2/sec** | 
+| **Throughput (PPS)** | Kernel Limited | Kernel Limited | **Line Rate (XDP)** | 
 
-### Tier 1: Low-Power Recovery (RK3326 / H700)
+## 5. Use Case Scenarios: The ROI of Zero-IPC
 
-* **RAM Recovery:** Recovering \~45MB compared to a standard stack allows 1GB devices to allocate more memory to GPU texture buffers.
-* **Standby Efficiency:** Reduces "idle drain" by \~15% by removing the "Daemon Storm" of background processes.
+### A. Handhelds (Anbernic, Powkiddy, Retroid, Ayaneo)
 
-### Tier 2: The Competitive Gamer (SM8550 / RK3588)
+* **Problem:** RAM is contested between network daemons and emulators.
+* **RXNM Solution:** Recovers **4MB - 45MB** of Resident RAM vs. traditional stacks.
+* **Power:** Extended standby by eliminating `ubus`/`dbus` polling interrupts.
 
-* **Jitter Elimination:** XDP processing ensures that RetroArch Netplay packets bypass the kernel's standard task scheduler.
-* **Docking Response:** Instant handover between WiFi and USB Ethernet without dropping TCP save-sync streams.
+### B. Embedded Router (MIPS/RISC-V MCU)
 
-## 5. Implementation Roadmap
+* **Comparison with OpenWrt:** `netifd` is the standard here, but RXNM 2.0's SOA approach allows for hardware-isolated namespaces (e.g., WAN vs. LAN) on the same 16MB Flash board.
+* **Benefit:** XDP offloading allows a 64MB RAM MCU to route gigabit traffic without pegging the CPU.
+
+### C. Cloud & Container Edge
+
+* **CNI Replacement:** RXNM 2.0 acts as a high-density networking runtime.
+* **Efficiency:** Supports up to **20x more isolated services** on the same hardware compared to standard container networking due to the monolithic management plane.
+
+## 6. Implementation Roadmap
 
 ### Phase 1: Harvesting Infrastructure
-
 * Create `scripts/harvest-upstream.sh` to pull specific source trees.
 * Establish the "Surgery" patchset to strip D-Bus/Glib from harvested files.
 * Implement the raw `bpf()` loader in the Agent.
 
 ### Phase 2: Integrated Logic Convergence
-
 * Integrate harvested `iwd` station logic into the Agent's event loop.
 * **Wakeup Audit:** Optimize the main loop to ensure zero wakeups when idle.
 * Demonstrate Zero-IPC WiFi connection (no external daemon).
 
 ### Phase 3: XDP-Native SOA & Data Plane
-
 * Implement the inter-namespace fast-path using `XDP-Redirect`.
 * Migrate "Nullify Mode" and "Firewall" logic to driver-level XDP programs.
 
 ### Phase 4: Release & Extremis Validation
-
 * Update the `rxnm` dispatcher to detect hardware capabilities and launch the 2.0 runtime.
 * Final validation on 16MB SPI Flash and 64MB RAM targets.
 
-## 6. Functionality Matrix: The 2.0 Standard
+## 7. Functionality Matrix: The 2.0 Standard
 
-| Feature | RXNM 1.0 (RC3) | RXNM 2.0 (Plan) | Transition Benefit | 
+| Feature | RXNM 1.0 (Hybrid) | OpenWrt (netifd) | RXNM 2.0 (Mono) | 
 | :--- | :--- | :--- | :--- | 
-| **Hotplug Logic** | Netlink -> Bash | **Netlink (Atomic C)** | \~100x Faster Response | 
-| **WiFi Auth** | External Daemon | **Internal Module** | Zero-IPC, No D-Bus overhead | 
-| **Firewall** | `iptables`/`nft` | **eBPF (Stateless)** | Zero CPU usage on idle | 
-| **Address Sync** | systemd-networkd | **Internal SLAAC/DHCP** | Reduced context switches | 
-| **Power Mgmt** | Passive | **Proactive (Wakeup-Free)** | **Extended Standby Time** | 
-| **IPv6** | Kernel Stack | **eBPF Accelerated** | Near-zero latency routing | 
+| **Logic Engine** | systemd-networkd | C + Shell Scripts | **Internal C Logic** | 
+| **WiFi Auth** | External `iwd` | External `wpa_s` | **Internal Module** | 
+| **Firewall** | `iptables`/`nft` | `fw4` (nftables) | **eBPF (Stateless)** | 
+| **IPC Bus** | D-Bus | **ubus** | **NONE (Monolithic)** | 
+| **Power Mgmt** | Passive | Passive | **Proactive** | 
 
-## 7. Summary
+## 8. Summary
 
 RXNM 2.0 is the evolution from a "Manager" to a "Network Runtime." By cannibalizing the best-in-class logic from `iwd` and merging it with **XDP hardware-acceleration**, we create a stack that is invisible to the user but carrier-grade in performance.
 
-The use of "Harvesting" ensures we benefit from the massive security and stability testing of upstream projects while discarding the desktop bloat that hinders handheld and extremis targets.
+While OpenWrt's `netifd` is significantly leaner than `systemd-networkd`, it still relies on an IPC bus (`ubus`) and external shell scripts for L3 configuration. RXNM 2.0 eliminates these remaining overheads, providing a single-binary networking solution that scales from 64MB MCUs to 128-core x86_64 cloud hosts.
