@@ -130,6 +130,7 @@ test-all: all
 	@bash tests/test_consistency.sh
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
+	@bash tests/test_cli_fuzz.sh
 
 # Final Implementation Verification (Batches 1-4)
 verify:

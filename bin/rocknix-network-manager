@@ -532,6 +532,8 @@ case "$CATEGORY" in
         source "${LIB_DIR}/rxnm-diagnostics.sh" 
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-nullify.sh"
+        # FIX: Missing interface library for proxy operations
+        source "${LIB_DIR}/rxnm-interfaces.sh"
         ;;
     api) ;;
 esac

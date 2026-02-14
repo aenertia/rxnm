@@ -87,6 +87,9 @@ char g_agent_version[64] = RXNM_VERSION;
 char g_conn_targets_v4[4096] = RXNM_PROBE_TARGETS_V4;
 char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 
+/* Configurable DBus Timeout (Default 5s) */
+long g_dbus_timeout_us = 5000000;
+
 /* --- Internal Limits --- */
 #define BUF_SIZE 32768
 #define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
@@ -94,7 +97,6 @@ char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 
 /* --- Timeout & Backoff Configuration --- */
 /* Optimized for SG2002/RK3326: Start slow to allow CPU yield, cap lower for responsiveness */
-#define DBUS_CONNECT_MAX_WAIT_US 5000000 /* 5 Seconds Max Retry Duration */
 #define DBUS_BACKOFF_START_US 2000       /* 2.0ms Initial Backoff (Yield CPU) */
 #define DBUS_BACKOFF_CAP_US 100000       /* 100ms Cap (Ensure < 0.1s latency on wake) */
 #define DBUS_IO_TIMEOUT_SEC 2            /* 2 Seconds I/O Timeout (Select/SO_RCV) */
@@ -356,6 +358,12 @@ void extract_bash_var(const char *line, const char *key, char *dest, size_t dest
  * Acts as a runtime fallback for compiled-in constants.
  */
 void load_runtime_config() {
+    // 1. Check Env Overrides first
+    char *env_timeout = getenv("RXNM_DBUS_TIMEOUT_MS");
+    if (env_timeout) {
+        g_dbus_timeout_us = atol(env_timeout) * 1000;
+    }
+
     char self_path[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
     if (len == -1) return;
@@ -450,7 +458,7 @@ int dbus_connect_system(void) {
     int sock = -1;
     int res = -1;
 
-    while (total_waited < DBUS_CONNECT_MAX_WAIT_US) {
+    while (total_waited < g_dbus_timeout_us) {
         if (sock >= 0) close(sock); // Clean up previous attempt
         
         sock = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -487,7 +495,7 @@ int dbus_connect_system(void) {
         if (current_backoff > DBUS_BACKOFF_CAP_US) current_backoff = DBUS_BACKOFF_CAP_US; 
     }
     
-    if (total_waited >= DBUS_CONNECT_MAX_WAIT_US) {
+    if (total_waited >= g_dbus_timeout_us) {
         if (sock >= 0) close(sock);
         return -2; // Timeout
     }
