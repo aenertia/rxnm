@@ -168,13 +168,19 @@ _task_host_mode() {
     
     # Only write AP file for AP mode (Ad-Hoc doesn't use .ap files in IWD generally)
     if [ "$mode" != "adhoc" ]; then
+         # Prevent credential leak in logs
+         { set +x; } 2>/dev/null
          secure_write "$ap_conf" "$ap_data" "600"
+         set -x 2>/dev/null
     fi
     
     case "$mode" in
         adhoc)
              if [ -n "$pass" ]; then
+                # Prevent credential leak in logs
+                { set +x; } 2>/dev/null
                 printf "%s" "$pass" | timeout 10s iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
+                set -x 2>/dev/null
              else
                 timeout 10s iwctl ad-hoc "$iface" start "$ssid" 2>&1
              fi
@@ -219,7 +225,11 @@ _task_save_wifi_creds() {
     local pass="$2"
     ensure_dirs
     # IWD stores PSKs in /var/lib/iwd/<SSID>.psk
+    
+    # Prevent credential leak in logs
+    { set +x; } 2>/dev/null
     secure_write "${STATE_DIR}/iwd/${ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
+    set -x 2>/dev/null
 }
 
 _task_set_country() {
@@ -624,7 +634,10 @@ action_connect() {
     
     while [ $attempts -lt $max_attempts ]; do
         if [ "${EPHEMERAL_CREDS:-false}" == "true" ] && [ -n "${pass:-}" ]; then
+             # Prevent credential leak in logs
+             { set +x; } 2>/dev/null
              out=$(printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
+             set -x 2>/dev/null
         else
              out=$(timeout 15s iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
         fi

@@ -3,8 +3,10 @@
 
 # -----------------------------------------------------------------------------
 # FILE: rxnm-pppoe.sh
-# PURPOSE: PPPoE Broadband Management (Stub)
+# PURPOSE: PPPoE Broadband Management (Experimental)
 # ARCHITECTURE: SOA / PPPoE
+#
+# Stub implementation to ensure API compliance for planned features.
 # -----------------------------------------------------------------------------
 
 action_pppoe_dispatch() {

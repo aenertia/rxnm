@@ -121,7 +121,7 @@ check: all
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
 
-# Full Phase 3 Validation
+# Full Phase 3 Validation (Updated for RC3)
 test-all: all
 	@echo "[TEST] Running Full Validation Suite..."
 	@bash tests/test_foundation.sh
@@ -131,8 +131,9 @@ test-all: all
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
 	@bash tests/test_cli_fuzz.sh
+	@bash tests/verify_rc3.sh
 
-# Final Implementation Verification (Batches 1-4)
+# Final Implementation Verification
 verify:
-	@echo "[VERIFY] Running Implementation Verification..."
-	@bash tests/verify_implementation.sh
+	@echo "[VERIFY] Running RC3 Implementation Verification..."
+	@bash tests/verify_rc3.sh

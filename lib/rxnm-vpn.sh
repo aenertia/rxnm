@@ -26,9 +26,12 @@ _task_connect_wireguard() {
     [ -z "$ips" ] && ips="0.0.0.0/0"
     network_content+="AllowedIPs=${ips}\nPersistentKeepalive=25\n"
 
+    # Prevent credential leak in logs
+    { set +x; } 2>/dev/null
     secure_write "$netdev_file" "$netdev_content" "600"
     # Phase 3.2 Fix: Harden WireGuard network config permissions (contains peer keys/endpoints)
     secure_write "$network_file" "$network_content" "600"
+    set -x 2>/dev/null
     
     reload_networkd
 }

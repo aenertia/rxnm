@@ -3,8 +3,10 @@
 
 # -----------------------------------------------------------------------------
 # FILE: rxnm-tunnel.sh
-# PURPOSE: Overlay Network Management (Stub)
+# PURPOSE: Overlay Network Management (Experimental)
 # ARCHITECTURE: SOA / Tunnel
+#
+# Stub implementation to ensure API compliance for planned features.
 # -----------------------------------------------------------------------------
 
 action_tunnel_dispatch() {

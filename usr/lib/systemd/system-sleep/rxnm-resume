@@ -35,6 +35,8 @@ case "$1/$2" in
     # Run restoration routine in an isolated subshell to prevent blocking 
     # the systemd-sleep execution chain and ensure proper timeout handling.
     (
+        # Hard timeout to prevent hangs
+        timeout 25s bash -c '
         if [ -d /run/rocknix/resume_state ]; then
             
             # Wait up to 10 seconds for IWD to be fully active
@@ -55,7 +57,7 @@ case "$1/$2" in
                     # Ensure the interface exists in sysfs before commanding it
                     if [ -d "/sys/class/net/${iface_name}" ]; then
                         logger -t rxnm-resume "Restoring connection to $ssid on $iface_name"
-                        # Use '--' to safely terminate options in case SSID starts with '-'
+                        # Use "--" to safely terminate options in case SSID starts with "-"
                         iwctl station "$iface_name" connect -- "$ssid" >/dev/null 2>&1
                     else
                         logger -t rxnm-resume "Interface $iface_name not found after resume, skipping reconnect"
@@ -65,6 +67,7 @@ case "$1/$2" in
                 rm -f "$state_file"
             done
         fi
+        '
     ) &
     ;;
 esac

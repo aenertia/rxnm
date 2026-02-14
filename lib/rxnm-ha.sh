@@ -3,8 +3,10 @@
 
 # -----------------------------------------------------------------------------
 # FILE: rxnm-ha.sh
-# PURPOSE: High Availability (BFD/VRRP) (Stub)
+# PURPOSE: High Availability (BFD/VRRP) (Experimental)
 # ARCHITECTURE: SOA / HA
+#
+# Stub implementation to ensure API compliance for planned features.
 # -----------------------------------------------------------------------------
 
 action_ha_dispatch() {

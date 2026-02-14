@@ -3,8 +3,10 @@
 
 # -----------------------------------------------------------------------------
 # FILE: rxnm-mpls.sh
-# PURPOSE: MPLS Label Switching (Stub)
+# PURPOSE: MPLS Label Switching (Experimental)
 # ARCHITECTURE: SOA / MPLS
+#
+# Stub implementation to ensure API compliance for planned features.
 # -----------------------------------------------------------------------------
 
 action_mpls_dispatch() {

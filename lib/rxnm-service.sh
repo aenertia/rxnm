@@ -25,8 +25,9 @@ action_service_create() {
     [ -z "$name" ] && { json_error "Service name required"; exit 1; }
     
     # Try accelerated creation first (avoids fork overhead of ip netns add)
+    # Suppress stderr to prevent "open: No such file" leak on fallback
     if [ -x "$RXNM_AGENT_BIN" ]; then
-        if "$RXNM_AGENT_BIN" --ns-create "$name"; then
+        if "$RXNM_AGENT_BIN" --ns-create "$name" 2>/dev/null; then
             # Bring up loopback (still requires iproute2 inside namespace context)
             if command -v ip >/dev/null; then
                 ip netns exec "$name" ip link set lo up 2>/dev/null
@@ -54,8 +55,9 @@ action_service_delete() {
     _check_service_prereqs
     [ -z "$name" ] && { json_error "Service name required"; exit 1; }
     
+    # Suppress stderr to clean up logs on fallback
     if [ -x "$RXNM_AGENT_BIN" ]; then
-        if "$RXNM_AGENT_BIN" --ns-delete "$name"; then
+        if "$RXNM_AGENT_BIN" --ns-delete "$name" 2>/dev/null; then
             json_success '{"action": "service_delete", "name": "'"$name"'", "status": "deleted"}'
             return 0
         fi
@@ -77,7 +79,7 @@ action_service_list() {
     
     if [ -x "$RXNM_AGENT_BIN" ]; then
         local out
-        if out=$("$RXNM_AGENT_BIN" --ns-list); then
+        if out=$("$RXNM_AGENT_BIN" --ns-list 2>/dev/null); then
             # Inject success key into agent output
             echo "$out" | "$JQ_BIN" '. + {success: true}'
             return 0
@@ -142,14 +144,15 @@ action_service_detach() {
 action_service_exec() {
     local service="$1"
     shift
-    local cmd="$@"
+    # Do not capture cmd="$@" here to prevent flattening of quoted arguments
     _check_service_prereqs
     
     [ -z "$service" ] && { json_error "Service name required"; exit 1; }
-    [ -z "$cmd" ] && { json_error "Command required"; exit 1; }
+    [ $# -eq 0 ] && { json_error "Command required"; exit 1; }
     
     if command -v ip >/dev/null; then
-        ip netns exec "$service" $cmd
+        # Use "$@" directly to preserve argument boundaries
+        ip netns exec "$service" "$@"
     else
         json_error "iproute2 required for exec"
     fi

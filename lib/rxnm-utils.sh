@@ -61,6 +61,22 @@ cleanup() {
 
 # --- Locking Mechanisms ---
 
+# Description: Executes a command with xtrace disabled to prevent credential leakage in logs.
+# Arguments: Command and arguments...
+secure_exec() {
+    local was_x=0
+    # Check if xtrace is currently enabled
+    if [[ $- == *x* ]]; then was_x=1; set +x; fi
+    
+    # Execute the command
+    "$@"
+    local ret=$?
+    
+    # Restore xtrace if it was enabled
+    if [ $was_x -eq 1 ]; then set -x; fi
+    return $ret
+}
+
 # Description: Acquires the global singleton lock for the RXNM process.
 # Arguments: $1 = Timeout (seconds)
 # Returns: 0 on success, 1 on failure.

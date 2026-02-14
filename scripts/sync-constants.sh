@@ -15,7 +15,7 @@ set -euo pipefail
 
 # Paths
 CONSTANTS_SH="lib/rxnm-constants.sh"
-SCHEMA_JSON="api-schema.json"
+SCHEMA_JSON="./api-schema.json" # Ensure local path resolution
 HEADER_FILE="src/rxnm_generated.h"
 
 # Validate Source

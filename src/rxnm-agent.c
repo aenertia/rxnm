@@ -13,7 +13,7 @@
  * 2. Atomic Writes: Implements safe config writing (write-tmp-and-rename).
  * 3. IPC: Talks directly to systemd-networkd & IWD via DBus socket.
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
- * 5. Namespace/Service: Native containerization primitives (unshare/mount).
+ * 5. Namespace/Service: Native containerization primitives (unshare/mount/setns).
  *
  * DESIGN PHILOSOPHY:
  * - No external dependencies (glibc/musl only).
@@ -616,19 +616,20 @@ int dbus_trigger_reload() {
 
 /* Helper to check if a Variant String Signature exists before current position */
 int check_variant_sig_string(const char *buf, int pos) {
-    /* RC1 FIX: Check if pos < 2 to prevent negative indexing */
+    /* RC3 FIX: Stricter lower bound check to prevent underflow reads */
     if (pos < 2) return 0;
     
     int i = pos - 1;
     /* Skip alignment padding */
     while (i > 0 && buf[i] == 0) i--;
     
-    /* RC1 FIX: Boundary check after decrement */
-    if (i < 2) return 0;
+    /* Ensure we have space for sig len and char */
+    if (i < 1) return 0;
     
     /* Now we should see the signature string "s" (null terminated) */
+    /* Expect 0 (null term), 's', 1 (len) */
+    /* Check pattern: [1]['s'][0] */
     if (i >= 2) {
-        /* Expect 0 (null term), 's', 1 (len) */
         if (buf[i] == 0 && buf[i-1] == 's' && buf[i-2] == 1) {
             return 1;
         }
@@ -709,8 +710,8 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
      */
     int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
     
-    /* RC1 FIX: Check upper bound to avoid overrun during loop */
-    int loop_limit = total_msg_size - 4;
+    /* RC3 FIX: Explicit upper bound check */
+    int loop_limit = total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
     
     for (int i = start_offset; i < loop_limit; i += 4) {
         
@@ -719,8 +720,8 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
         /* Sanity Check Length */
         if (len > 255 || len == 0) continue;
         
-        /* Fix: compare unsigned len with signed expression properly */
-        if (i + 4 + len > (uint32_t)total_msg_size) continue;
+        /* RC3 FIX: Boundary check for the string content itself */
+        if (i + 4 + len >= (uint32_t)total_msg_size) continue;
         
         /* Is this an Object Path? */
         if (len > 15 && strncmp(&buf[i+4], "/net/connman/iwd", 16) == 0) {
@@ -1794,6 +1795,36 @@ int cmd_ns_delete(const char *name) {
     return 0;
 }
 
+/**
+ * @brief Executes a command inside a named network namespace.
+ * Replaces the need for 'ip netns exec'.
+ */
+int cmd_ns_exec(const char *name, int argc, char **argv) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", NETNS_RUN_DIR, name);
+    
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("open netns");
+        return 1;
+    }
+    
+    if (setns(fd, CLONE_NEWNET) < 0) {
+        perror("setns");
+        close(fd);
+        return 1;
+    }
+    close(fd);
+    
+    if (argc > 0) {
+        execvp(argv[0], argv);
+        perror("execvp");
+        return 1;
+    }
+    
+    return 0;
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -1824,6 +1855,7 @@ char *g_connect_iface = NULL;
 char *g_nullify_cmd = NULL;
 char *g_ns_create = NULL;
 char *g_ns_delete = NULL;
+char *g_ns_exec_name = NULL;
 char *g_route_table = NULL;
 
 int main(int argc, char *argv[]) {
@@ -1854,6 +1886,7 @@ int main(int argc, char *argv[]) {
         {"ns-delete", required_argument, 0, 1002},
         {"ns-list", no_argument, 0, 1003},
         {"route-dump", required_argument, 0, 1004},
+        {"ns-exec", required_argument, 0, 1005},
         {0, 0, 0, 0}
     };
     
@@ -1883,8 +1916,19 @@ int main(int argc, char *argv[]) {
             case 1002: g_ns_delete = optarg; break;
             case 1003: cmd_ns_list(); return 0;
             case 1004: g_route_table = optarg; break;
+            case 1005: 
+                g_ns_exec_name = optarg;
+                // Stop option parsing here to pass remaining args to execvp
+                goto end_args;
             default: return 1;
         }
+    }
+
+end_args:
+    // Handle ns-exec immediately if invoked
+    if (g_ns_exec_name) {
+        // optind points to the next argument after --ns-exec <name>
+        return cmd_ns_exec(g_ns_exec_name, argc - optind, argv + optind);
     }
     
     if (g_atomic_path) { cmd_atomic_write(g_atomic_path, g_perm_str); return 0; }
