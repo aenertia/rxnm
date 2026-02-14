@@ -15,9 +15,13 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.0.0-rc1}"
+: "${RXNM_VERSION:=1.0.0-rc2}"
 : "${RXNM_API_VERSION:=1.0}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
+
+# Feature Flags
+# Set to 'true' to enable SOA/Experimental features (Service, Tunnel, MPLS)
+: "${RXNM_EXPERIMENTAL:=false}"
 
 # Connectivity Probes (Used for Internet Checks)
 # Target 1: Microsoft NCSI (Anycast, highly available, not a DNS resolver)

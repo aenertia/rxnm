@@ -39,7 +39,13 @@
             "tun",
             "tap",
             "config",
-            "api"
+            "api",
+            "service",
+            "route",
+            "tunnel",
+            "mpls",
+            "pppoe",
+            "ha"
           ]
         },
         "action": {
@@ -71,783 +77,300 @@
         }
       },
       "allOf": [
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "wifi"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/WifiInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "interface"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/InterfaceInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "bluetooth"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/BluetoothInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "system"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/SystemInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "vpn"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/VpnInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "enum": [
-                  "bridge",
-                  "bond",
-                  "vlan",
-                  "vrf",
-                  "macvlan",
-                  "ipvlan",
-                  "veth",
-                  "tun",
-                  "tap"
-                ]
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/VirtualInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "profile"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/ProfileInput"
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "category": {
-                "const": "api"
-              }
-            }
-          },
-          "then": {
-            "$ref": "#/definitions/ApiInput"
-          }
-        }
+        { "if": { "properties": { "category": { "const": "wifi" } } }, "then": { "$ref": "#/definitions/WifiInput" } },
+        { "if": { "properties": { "category": { "const": "interface" } } }, "then": { "$ref": "#/definitions/InterfaceInput" } },
+        { "if": { "properties": { "category": { "const": "bluetooth" } } }, "then": { "$ref": "#/definitions/BluetoothInput" } },
+        { "if": { "properties": { "category": { "const": "system" } } }, "then": { "$ref": "#/definitions/SystemInput" } },
+        { "if": { "properties": { "category": { "const": "vpn" } } }, "then": { "$ref": "#/definitions/VpnInput" } },
+        { "if": { "properties": { "category": { "enum": [ "bridge", "bond", "vlan", "vrf", "macvlan", "ipvlan", "veth", "tun", "tap" ] } } }, "then": { "$ref": "#/definitions/VirtualInput" } },
+        { "if": { "properties": { "category": { "const": "profile" } } }, "then": { "$ref": "#/definitions/ProfileInput" } },
+        { "if": { "properties": { "category": { "const": "api" } } }, "then": { "$ref": "#/definitions/ApiInput" } },
+        { "if": { "properties": { "category": { "const": "service" } } }, "then": { "$ref": "#/definitions/ServiceInput" } },
+        { "if": { "properties": { "category": { "const": "route" } } }, "then": { "$ref": "#/definitions/RouteInput" } },
+        { "if": { "properties": { "category": { "const": "tunnel" } } }, "then": { "$ref": "#/definitions/TunnelInput" } },
+        { "if": { "properties": { "category": { "const": "mpls" } } }, "then": { "$ref": "#/definitions/MplsInput" } },
+        { "if": { "properties": { "category": { "const": "pppoe" } } }, "then": { "$ref": "#/definitions/PppoeInput" } },
+        { "if": { "properties": { "category": { "const": "ha" } } }, "then": { "$ref": "#/definitions/HaInput" } }
       ]
+    },
+    "ServiceInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "create", "delete", "list", "show", "attach", "detach", "exec", "export", "import" ] },
+        "name": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$", "minLength": 1, "maxLength": 15 },
+        "interface": { "type": "string" },
+        "command": { "type": "string" },
+        "isolated": { "type": "boolean", "default": true },
+        "router_id": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["action"],
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "create" } } }, "then": { "required": ["name"] } },
+        { "if": { "properties": { "action": { "enum": ["attach", "detach"] } } }, "then": { "required": ["name", "interface"] } },
+        { "if": { "properties": { "action": { "const": "exec" } } }, "then": { "required": ["name", "command"] } }
+      ]
+    },
+    "RouteInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "add", "del", "replace", "change", "append", "list", "show", "flush", "get", "save", "restore" ] },
+        "destination": { "type": "string" },
+        "gateway": { "type": "string" },
+        "interface": { "type": "string" },
+        "metric": { "type": "integer" },
+        "table": { "oneOf": [ { "type": "integer" }, { "type": "string" } ] },
+        "service": { "type": "string" },
+        "protocol": { "type": "string" },
+        "scope": { "type": "string" },
+        "src": { "type": "string" }
+      },
+      "required": ["action"]
+    },
+    "TunnelInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "create", "delete", "list", "show", "modify" ] },
+        "name": { "type": "string" },
+        "type": { "enum": [ "vxlan", "geneve", "gre", "gretap", "ip6gre", "ipip", "sit", "fou", "wireguard" ] },
+        "local": { "type": "string" },
+        "remote": { "type": "string" },
+        "vni": { "type": "integer" },
+        "port": { "type": "integer" },
+        "service": { "type": "string" }
+      },
+      "required": ["action", "type"]
+    },
+    "MplsInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "route-add", "route-del", "route-list", "enable", "disable" ] },
+        "label": { "type": "integer" },
+        "interface": { "type": "string" },
+        "operation": { "enum": [ "push", "pop", "swap", "forward" ] },
+        "new_label": { "type": "integer" }
+      },
+      "required": ["action"]
+    },
+    "PppoeInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "connect", "disconnect", "status", "list" ] },
+        "interface": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" }
+      },
+      "required": ["action"]
+    },
+    "HaInput": {
+      "type": "object",
+      "properties": {
+        "action": { "enum": [ "bfd-create", "bfd-delete", "bfd-list", "vrrp-create", "vrrp-delete", "vrrp-list" ] },
+        "name": { "type": "string" },
+        "interface": { "type": "string" },
+        "peer": { "type": "string" },
+        "vrid": { "type": "integer" },
+        "vip": { "type": "string" }
+      },
+      "required": ["action"]
     },
     "WifiInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "scan",
-            "connect",
-            "disconnect",
-            "ap",
-            "wps",
-            "list",
-            "networks",
-            "forget",
-            "country",
-            "p2p",
-            "dpp",
-            "roaming"
-          ]
-        },
-        "ssid": {
-          "type": "string"
-        },
-        "password": {
-          "type": "string"
-        },
-        "hidden": {
-          "type": "boolean"
-        },
-        "interface": {
-          "type": "string"
-        },
-        "mode": {
-          "enum": [
-            "ap",
-            "adhoc"
-          ]
-        },
-        "share": {
-          "type": "boolean"
-        },
-        "ip": {
-          "type": "string"
-        },
-        "ipv6_pd": {
-          "enum": [
-            "yes",
-            "no"
-          ]
-        },
-        "uri": {
-          "type": "string"
-        },
-        "peer": {
-          "type": "string"
-        },
-        "threshold": {
-          "type": "integer",
-          "description": "Signal threshold for roaming nudge"
-        },
-        "channel": {
-          "type": "integer",
-          "description": "WiFi channel for AP mode"
-        },
-        "subcommand": {
-          "type": "string"
-        }
+        "action": { "enum": [ "scan", "connect", "disconnect", "ap", "wps", "list", "networks", "forget", "country", "p2p", "dpp", "roaming" ] },
+        "ssid": { "type": "string" },
+        "password": { "type": "string" },
+        "hidden": { "type": "boolean" },
+        "interface": { "type": "string" },
+        "mode": { "enum": [ "ap", "adhoc" ] },
+        "share": { "type": "boolean" },
+        "ip": { "type": "string" },
+        "ipv6_pd": { "enum": [ "yes", "no" ] },
+        "uri": { "type": "string" },
+        "peer": { "type": "string" },
+        "threshold": { "type": "integer" },
+        "channel": { "type": "integer" },
+        "subcommand": { "type": "string" }
       }
     },
     "InterfaceInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "show",
-            "set",
-            "enable",
-            "disable",
-            "list",
-            "hotplug"
-          ]
-        },
-        "target": {
-          "type": "string"
-        },
-        "subcommand": {
-          "enum": [
-            "dhcp",
-            "static",
-            "hardware"
-          ]
-        },
-        "ip": {
-          "type": "string"
-        },
-        "gateway": {
-          "type": "string"
-        },
-        "dns": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ]
-        },
-        "domains": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ]
-        },
-        "routes": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ]
-        },
-        "mtu": {
-          "type": "integer"
-        },
-        "metric": {
-          "type": "integer"
-        },
-        "mac": {
-          "type": "string"
-        },
-        "ipv6_privacy": {
-          "type": "string"
-        },
-        "dhcp_id": {
-          "type": "string"
-        },
-        "speed": {
-          "type": "string"
-        },
-        "duplex": {
-          "type": "string"
-        },
-        "autoneg": {
-          "type": "string"
-        },
-        "wol": {
-          "type": "string"
-        },
-        "mac_policy": {
-          "type": "string"
-        },
-        "name_policy": {
-          "type": "string"
-        }
+        "action": { "enum": [ "show", "set", "enable", "disable", "list", "hotplug" ] },
+        "target": { "type": "string" },
+        "subcommand": { "enum": [ "dhcp", "static", "hardware" ] },
+        "ip": { "type": "string" },
+        "gateway": { "type": "string" },
+        "dns": { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" } } ] },
+        "routes": { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" } } ] },
+        "mtu": { "type": "integer" },
+        "metric": { "type": "integer" },
+        "mac": { "type": "string" },
+        "ipv6_privacy": { "type": "string" },
+        "dhcp_id": { "type": "string" },
+        "speed": { "type": "string" },
+        "duplex": { "type": "string" },
+        "autoneg": { "type": "string" },
+        "wol": { "type": "string" },
+        "mac_policy": { "type": "string" },
+        "name_policy": { "type": "string" }
       }
     },
     "BluetoothInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "scan",
-            "pair",
-            "unpair",
-            "pan"
-          ]
-        },
-        "mac": {
-          "type": "string"
-        },
-        "subcommand": {
-          "enum": [
-            "enable",
-            "disable"
-          ]
-        },
-        "mode": {
-          "enum": [
-            "client",
-            "host"
-          ]
-        },
-        "share": {
-          "type": "boolean"
-        },
-        "ip": {
-          "type": "string"
-        }
+        "action": { "enum": [ "scan", "pair", "unpair", "pan" ] },
+        "mac": { "type": "string" },
+        "subcommand": { "enum": [ "enable", "disable" ] },
+        "mode": { "enum": [ "client", "host" ] },
+        "share": { "type": "boolean" },
+        "ip": { "type": "string" }
       }
     },
     "SystemInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "status",
-            "check",
-            "proxy",
-            "reload",
-            "setup",
-            "start",
-            "stop",
-            "nullify"
-          ]
-        },
-        "subcommand": {
-          "type": "string"
-        },
-        "http": {
-          "type": "string"
-        },
-        "https": {
-          "type": "string"
-        },
-        "noproxy": {
-          "type": "string"
-        },
-        "interface": {
-          "type": "string"
-        },
-        "dry_run": {
-          "type": "boolean"
-        }
+        "action": { "enum": [ "status", "check", "proxy", "reload", "setup", "start", "stop", "nullify" ] },
+        "subcommand": { "type": "string" },
+        "http": { "type": "string" },
+        "https": { "type": "string" },
+        "noproxy": { "type": "string" },
+        "interface": { "type": "string" },
+        "dry_run": { "type": "boolean" }
       }
     },
     "VpnInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "connect",
-            "disconnect",
-            "delete",
-            "create"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "private_key": {
-          "type": "string"
-        },
-        "peer_key": {
-          "type": "string"
-        },
-        "endpoint": {
-          "type": "string"
-        },
-        "allowed_ips": {
-          "type": "string"
-        },
-        "address": {
-          "type": "string"
-        },
-        "user": {
-          "type": "string"
-        },
-        "group": {
-          "type": "string"
-        }
+        "action": { "enum": [ "connect", "disconnect", "delete", "create" ] },
+        "name": { "type": "string" },
+        "private_key": { "type": "string" },
+        "peer_key": { "type": "string" },
+        "endpoint": { "type": "string" },
+        "allowed_ips": { "type": "string" },
+        "address": { "type": "string" },
+        "user": { "type": "string" },
+        "group": { "type": "string" }
       }
     },
     "VirtualInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "create",
-            "delete",
-            "add-member",
-            "add-slave",
-            "list"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "parent": {
-          "type": "string"
-        },
-        "id": {
-          "type": "integer"
-        },
-        "mode": {
-          "type": "string"
-        },
-        "table": {
-          "type": "integer"
-        },
-        "peer": {
-          "type": "string"
-        },
-        "bridge": {
-          "type": "string"
-        },
-        "bond": {
-          "type": "string"
-        },
-        "vrf": {
-          "type": "string"
-        },
-        "stp": {
-          "type": "boolean"
-        }
+        "action": { "enum": [ "create", "delete", "add-member", "add-slave", "list" ] },
+        "name": { "type": "string" },
+        "parent": { "type": "string" },
+        "id": { "type": "integer" },
+        "mode": { "type": "string" },
+        "table": { "type": "integer" },
+        "peer": { "type": "string" },
+        "bridge": { "type": "string" },
+        "bond": { "type": "string" },
+        "vrf": { "type": "string" },
+        "stp": { "type": "boolean" },
+        "vlan_protocol": { "type": "string", "enum": ["802.1q", "802.1ad"] },
+        "s_vlan": { "type": "integer" },
+        "c_vlan": { "type": "integer" },
+        "lacp_rate": { "type": "string" },
+        "xmit_hash_policy": { "type": "string" },
+        "miimon": { "type": "integer" }
       }
     },
     "ProfileInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "list",
-            "save",
-            "load",
-            "delete",
-            "export",
-            "import"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "interface": {
-          "type": "string"
-        },
-        "file": {
-          "type": "string"
-        }
+        "action": { "enum": [ "list", "save", "load", "delete", "export", "import" ] },
+        "name": { "type": "string" },
+        "interface": { "type": "string" },
+        "file": { "type": "string" }
       }
     },
     "ApiInput": {
       "properties": {
-        "action": {
-          "enum": [
-            "schema",
-            "version"
-          ]
-        }
+        "action": { "enum": [ "schema", "version", "capabilities" ] }
       }
     },
     "OutputResponse": {
       "type": "object",
-      "required": [
-        "success"
-      ],
+      "required": [ "success" ],
       "properties": {
-        "success": {
-          "type": "boolean",
-          "description": "Global success indicator."
-        },
-        "error": {
-          "type": "string",
-          "description": "Error message if success is false."
-        },
-        "hint": {
-          "type": "string",
-          "description": "User-friendly suggestion for resolving the error."
-        },
-        "exit_code": {
-          "type": "integer",
-          "description": "Process exit code if success is false."
-        },
-        "agent_version": {
-          "type": "string",
-          "description": "Version of the native agent."
-        },
-        "api_version": {
-          "type": "string",
-          "description": "API Version (e.g., '1.0')."
-        }
+        "success": { "type": "boolean" },
+        "error": { "type": "string" },
+        "hint": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "agent_version": { "type": "string" },
+        "api_version": { "type": "string" }
       },
       "oneOf": [
-        {
-          "$ref": "#/definitions/SystemStatusResponse"
-        },
-        {
-          "$ref": "#/definitions/WifiScanResponse"
-        },
-        {
-          "$ref": "#/definitions/WifiKnownResponse"
-        },
-        {
-          "$ref": "#/definitions/WifiP2PPeersResponse"
-        },
-        {
-          "$ref": "#/definitions/WifiP2PStatusResponse"
-        },
-        {
-          "$ref": "#/definitions/BluetoothScanResponse"
-        },
-        {
-          "$ref": "#/definitions/ProfileListResponse"
-        },
-        {
-          "$ref": "#/definitions/DiagnosticResponse"
-        },
-        {
-          "$ref": "#/definitions/ActionResponse"
-        }
+        { "$ref": "#/definitions/SystemStatusResponse" },
+        { "$ref": "#/definitions/WifiScanResponse" },
+        { "$ref": "#/definitions/WifiKnownResponse" },
+        { "$ref": "#/definitions/WifiP2PPeersResponse" },
+        { "$ref": "#/definitions/WifiP2PStatusResponse" },
+        { "$ref": "#/definitions/BluetoothScanResponse" },
+        { "$ref": "#/definitions/ProfileListResponse" },
+        { "$ref": "#/definitions/DiagnosticResponse" },
+        { "$ref": "#/definitions/ActionResponse" },
+        { "$ref": "#/definitions/ServiceListResponse" },
+        { "$ref": "#/definitions/ApiCapabilitiesResponse" }
       ]
     },
     "SystemStatusResponse": {
       "type": "object",
-      "required": [
-        "hostname",
-        "interfaces"
-      ],
+      "required": [ "hostname", "interfaces" ],
       "properties": {
-        "hostname": {
-          "type": "string"
-        },
-        "global_proxy": {
-          "$ref": "#/definitions/ProxyConfig"
-        },
-        "interfaces": {
-          "type": "object",
-          "description": "Map of interface names to details",
-          "additionalProperties": {
-            "$ref": "#/definitions/InterfaceDetails"
-          }
-        }
+        "hostname": { "type": "string" },
+        "global_proxy": { "$ref": "#/definitions/ProxyConfig" },
+        "interfaces": { "type": "object", "additionalProperties": { "$ref": "#/definitions/InterfaceDetails" } }
       }
     },
     "InterfaceDetails": {
       "type": "object",
-      "required": [
-        "name",
-        "type",
-        "state"
-      ],
+      "required": [ "name", "type", "state" ],
       "properties": {
-        "name": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string",
-          "enum": [
-            "ethernet",
-            "wifi",
-            "wifi_ap",
-            "bridge",
-            "bond",
-            "vlan",
-            "vrf",
-            "macvlan",
-            "ipvlan",
-            "veth",
-            "wireguard",
-            "tun",
-            "tap",
-            "loopback",
-            "gadget",
-            "unknown",
-            "virtual"
-          ]
-        },
-        "state": {
-          "type": "string",
-          "description": "Operational state (routable, no-carrier, etc)"
-        },
-        "connected": {
-          "type": "boolean"
-        },
-        "ip": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Primary IPv4 Address"
-        },
-        "ipv4": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "List of all IPv4 addresses"
-        },
-        "ipv6": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "List of all IPv6 addresses"
-        },
-        "gateway": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "metric": {
-          "type": "integer"
-        },
-        "mac": {
-          "type": "string"
-        },
-        "mtu": {
-          "type": "integer"
-        },
-        "speed": {
-          "type": "integer",
-          "description": "Link speed in Mbps"
-        },
-        "vendor": {
-          "type": "string",
-          "description": "Hardware vendor from udev"
-        },
-        "model": {
-          "type": "string",
-          "description": "Hardware model from udev"
-        },
-        "driver": {
-          "type": "string",
-          "description": "Kernel driver in use"
-        },
-        "bus_info": {
-          "type": "string",
-          "description": "Bus location (e.g. usb-0:1)"
-        },
-        "gwmac": {
-          "type": "string",
-          "description": "MAC address of the gateway (ARP)"
-        },
-        "stats": {
-          "type": "object",
-          "properties": {
-            "rx_bytes": {
-              "type": "integer"
-            },
-            "tx_bytes": {
-              "type": "integer"
-            }
-          }
-        },
-        "wifi": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/definitions/WifiStatusDetails"
-            }
-          ]
-        },
-        "proxy": {
-          "$ref": "#/definitions/ProxyConfig"
-        },
-        "members": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Comma-separated list of bridge members"
-        },
-        "routes": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "dst": {
-                "type": "string",
-                "description": "Destination subnet"
-              },
-              "gw": {
-                "type": "string"
-              },
-              "metric": {
-                "type": "integer"
-              }
-            }
-          }
-        }
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "state": { "type": "string" },
+        "connected": { "type": "boolean" },
+        "ip": { "type": ["string", "null"] },
+        "ipv4": { "type": "array", "items": { "type": "string" } },
+        "ipv6": { "type": "array", "items": { "type": "string" } },
+        "gateway": { "type": ["string", "null"] },
+        "metric": { "type": "integer" },
+        "mac": { "type": "string" },
+        "mtu": { "type": "integer" },
+        "speed": { "type": "integer" },
+        "vendor": { "type": "string" },
+        "model": { "type": "string" },
+        "driver": { "type": "string" },
+        "bus_info": { "type": "string" },
+        "stats": { "type": "object", "properties": { "rx_bytes": { "type": "integer" }, "tx_bytes": { "type": "integer" } } },
+        "wifi": { "oneOf": [ { "type": "null" }, { "$ref": "#/definitions/WifiStatusDetails" } ] },
+        "proxy": { "$ref": "#/definitions/ProxyConfig" },
+        "members": { "type": ["string", "null"] },
+        "routes": { "type": "array", "items": { "type": "object", "properties": { "dst": { "type": "string" }, "gw": { "type": "string" }, "metric": { "type": "integer" } } } }
       }
     },
     "WifiStatusDetails": {
       "type": "object",
       "properties": {
-        "ssid": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "rssi": {
-          "type": "integer",
-          "description": "Signal strength in dBm"
-        },
-        "frequency": {
-          "type": "integer",
-          "description": "Frequency in MHz"
-        },
-        "state": {
-          "type": "string"
-        },
-        "bssid": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "MAC address of the connected Access Point"
-        }
+        "ssid": { "type": ["string", "null"] },
+        "rssi": { "type": "integer" },
+        "frequency": { "type": "integer" },
+        "state": { "type": "string" },
+        "bssid": { "type": ["string", "null"] }
       }
     },
     "WifiScanResponse": {
       "type": "object",
-      "required": [
-        "results"
-      ],
+      "required": [ "results" ],
       "properties": {
         "results": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "ssid",
-              "security",
-              "strength_pct"
-            ],
+            "required": [ "ssid", "security", "strength_pct" ],
             "properties": {
-              "ssid": {
-                "type": "string"
-              },
-              "security": {
-                "type": "string"
-              },
-              "connected": {
-                "type": "boolean"
-              },
-              "known": {
-                "type": "boolean"
-              },
-              "signal": {
-                "type": "integer",
-                "description": "Raw dBm"
-              },
-              "frequency": {
-                "type": "integer",
-                "description": "Frequency in MHz"
-              },
-              "strength_pct": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 100
-              },
-              "bssids": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "bssid": {
-                      "type": "string"
-                    },
-                    "signal": {
-                      "type": "integer"
-                    },
-                    "freq": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
+              "ssid": { "type": "string" },
+              "security": { "type": "string" },
+              "connected": { "type": "boolean" },
+              "known": { "type": "boolean" },
+              "signal": { "type": "integer" },
+              "frequency": { "type": "integer" },
+              "strength_pct": { "type": "integer" },
+              "bssids": { "type": "array", "items": { "type": "object", "properties": { "bssid": { "type": "string" }, "signal": { "type": "integer" }, "freq": { "type": "integer" } } } }
             }
           }
         }
@@ -855,30 +378,18 @@
     },
     "WifiKnownResponse": {
       "type": "object",
-      "required": [
-        "networks"
-      ],
+      "required": [ "networks" ],
       "properties": {
         "networks": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "ssid"
-            ],
+            "required": [ "ssid" ],
             "properties": {
-              "ssid": {
-                "type": "string"
-              },
-              "security": {
-                "type": "string"
-              },
-              "hidden": {
-                "type": "boolean"
-              },
-              "last_connected": {
-                "type": "string"
-              }
+              "ssid": { "type": "string" },
+              "security": { "type": "string" },
+              "hidden": { "type": "boolean" },
+              "last_connected": { "type": "string" }
             }
           }
         }
@@ -886,31 +397,18 @@
     },
     "WifiP2PPeersResponse": {
       "type": "object",
-      "required": [
-        "peers"
-      ],
+      "required": [ "peers" ],
       "properties": {
         "peers": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "name",
-              "mac"
-            ],
+            "required": [ "name", "mac" ],
             "properties": {
-              "name": {
-                "type": "string"
-              },
-              "mac": {
-                "type": "string"
-              },
-              "category": {
-                "type": "string"
-              },
-              "connected": {
-                "type": "boolean"
-              }
+              "name": { "type": "string" },
+              "mac": { "type": "string" },
+              "category": { "type": "string" },
+              "connected": { "type": "boolean" }
             }
           }
         }
@@ -918,71 +416,29 @@
     },
     "WifiP2PStatusResponse": {
       "type": "object",
-      "required": [
-        "peers",
-        "interfaces",
-        "is_go"
-      ],
+      "required": [ "peers", "interfaces", "is_go" ],
       "properties": {
-        "is_go": {
-          "type": "boolean",
-          "description": "True if acting as Group Owner"
-        },
-        "peers": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string"
-              },
-              "mac": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        "interfaces": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/InterfaceDetails"
-          }
-        }
+        "is_go": { "type": "boolean" },
+        "peers": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "mac": { "type": "string" } } } },
+        "interfaces": { "type": "array", "items": { "$ref": "#/definitions/InterfaceDetails" } }
       }
     },
     "BluetoothScanResponse": {
       "type": "object",
-      "required": [
-        "devices"
-      ],
+      "required": [ "devices" ],
       "properties": {
         "devices": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": [
-              "mac",
-              "name"
-            ],
+            "required": [ "mac", "name" ],
             "properties": {
-              "mac": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              },
-              "rssi": {
-                "type": "integer"
-              },
-              "connected": {
-                "type": "boolean"
-              },
-              "paired": {
-                "type": "boolean"
-              },
-              "adapter": {
-                "type": "string"
-              }
+              "mac": { "type": "string" },
+              "name": { "type": "string" },
+              "rssi": { "type": "integer" },
+              "connected": { "type": "boolean" },
+              "paired": { "type": "boolean" },
+              "adapter": { "type": "string" }
             }
           }
         }
@@ -990,221 +446,105 @@
     },
     "ProfileListResponse": {
       "type": "object",
-      "required": [
-        "profiles"
-      ],
+      "required": [ "profiles" ],
       "properties": {
-        "scope": {
-          "type": "string",
-          "description": "'global' or interface name"
-        },
-        "profiles": {
+        "scope": { "type": "string" },
+        "profiles": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ServiceListResponse": {
+      "type": "object",
+      "properties": {
+        "services": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "namespace": { "type": "string" },
+              "isolated": { "type": "boolean" },
+              "interfaces": { "type": "array", "items": { "type": "string" } }
+            }
           }
         }
+      }
+    },
+    "ApiCapabilitiesResponse": {
+      "type": "object",
+      "properties": {
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": { "type": "string" },
+              "since_version": { "type": "string" }
+            }
+          }
+        },
+        "systemd_networkd_version": { "type": "integer" },
+        "agent_available": { "type": "boolean" }
       }
     },
     "DiagnosticResponse": {
       "type": "object",
       "properties": {
-        "portal_detected": {
-          "type": "boolean"
-        },
-        "ipv4": {
-          "type": "boolean"
-        },
-        "ipv6": {
-          "type": "boolean"
-        },
-        "connected": {
-          "type": "boolean"
-        },
-        "target": {
-          "type": "string",
-          "description": "Redirect URL if portal detected"
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "online",
-            "offline",
-            "portal_locked"
-          ]
-        },
-        "method": {
-          "type": "string"
-        },
-        "auto_ack": {
-          "type": "boolean",
-          "description": "Auto-acknowledged portal"
-        },
-        "hijacked": {
-          "type": "boolean",
-          "description": "True if unusual portal behavior detected"
-        },
-        "http_code": {
-          "type": "string"
-        },
-        "reason": {
-          "type": "string"
-        },
-        "state": {
-          "type": "string"
-        },
-        "note": {
-          "type": "string"
-        },
-        "host": {
-          "type": "string",
-          "description": "Host reached in fallback mode"
-        }
+        "portal_detected": { "type": "boolean" },
+        "ipv4": { "type": "boolean" },
+        "ipv6": { "type": "boolean" },
+        "connected": { "type": "boolean" },
+        "target": { "type": "string" },
+        "status": { "type": "string" },
+        "method": { "type": "string" },
+        "auto_ack": { "type": "boolean" },
+        "hijacked": { "type": "boolean" },
+        "http_code": { "type": "string" },
+        "reason": { "type": "string" },
+        "host": { "type": "string" }
       }
     },
     "ActionResponse": {
       "type": "object",
-      "description": "Flexible object for command acknowledgments",
       "properties": {
-        "action": {
-          "type": "string"
-        },
-        "status": {
-          "type": "string"
-        },
-        "message": {
-          "type": "string"
-        },
-        "note": {
-          "type": "string"
-        },
-        "type": {
-          "type": "string"
-        },
-        "mode": {
-          "type": "string"
-        },
-        "iface": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "ssid": {
-          "type": "string"
-        },
-        "mac": {
-          "type": "string"
-        },
-        "ip": {
-          "type": "string"
-        },
-        "gateway": {
-          "type": "string"
-        },
-        "metric": {
-          "type": "string"
-        },
-        "mtu": {
-          "type": "string"
-        },
-        "ipv6_privacy": {
-          "type": "string"
-        },
-        "ipv6_pd": {
-          "type": "string"
-        },
-        "dhcp_id": {
-          "type": "string"
-        },
-        "table": {
-          "type": "integer"
-        },
-        "id": {
-          "type": "integer"
-        },
-        "parent": {
-          "type": "string"
-        },
-        "peer": {
-          "type": "string"
-        },
-        "user": {
-          "type": "string"
-        },
-        "group": {
-          "type": "string"
-        },
-        "file": {
-          "type": "string"
-        },
-        "profile": {
-          "type": "string"
-        },
-        "scope": {
-          "type": "string"
-        },
-        "connected": {
-          "type": "boolean"
-        },
-        "open": {
-          "type": "boolean"
-        },
-        "removed_configs": {
-          "type": "integer"
-        },
-        "country": {
-          "type": "string"
-        },
-        "method": {
-          "type": "string"
-        },
-        "bridge": {
-          "type": "string"
-        },
-        "bond": {
-          "type": "string"
-        },
-        "vrf": {
-          "type": "string"
-        },
-        "adapter": {
-          "type": "string"
-        },
-        "paired": {
-          "type": "boolean"
-        }
+        "action": { "type": "string" },
+        "status": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string" },
+        "mode": { "type": "string" },
+        "iface": { "type": "string" },
+        "name": { "type": "string" },
+        "ssid": { "type": "string" },
+        "mac": { "type": "string" },
+        "ip": { "type": "string" },
+        "gateway": { "type": "string" },
+        "metric": { "type": "string" },
+        "mtu": { "type": "string" },
+        "ipv6_privacy": { "type": "string" },
+        "ipv6_pd": { "type": "string" },
+        "dhcp_id": { "type": "string" },
+        "table": { "type": "integer" },
+        "id": { "type": "integer" },
+        "parent": { "type": "string" },
+        "peer": { "type": "string" },
+        "user": { "type": "string" },
+        "group": { "type": "string" },
+        "file": { "type": "string" },
+        "profile": { "type": "string" },
+        "scope": { "type": "string" },
+        "connected": { "type": "boolean" },
+        "open": { "type": "boolean" },
+        "removed_configs": { "type": "integer" },
+        "country": { "type": "string" },
+        "method": { "type": "string" },
+        "bridge": { "type": "string" },
+        "bond": { "type": "string" },
+        "vrf": { "type": "string" },
+        "adapter": { "type": "string" },
+        "paired": { "type": "boolean" }
       }
     },
     "ProxyConfig": {
-      "oneOf": [
-        {
-          "type": "null"
-        },
-        {
-          "type": "object",
-          "properties": {
-            "http": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "https": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "noproxy": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        }
-      ]
+      "oneOf": [ { "type": "null" }, { "type": "object", "properties": { "http": { "type": ["string", "null"] }, "https": { "type": ["string", "null"] }, "noproxy": { "type": ["string", "null"] } } } ]
     }
   }
 }

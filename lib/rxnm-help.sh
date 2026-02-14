@@ -18,6 +18,7 @@ Usage: rxnm <category> [target] <action> [options]
 Categories:
   wifi          Manage Wireless connections
   interface     Configure interfaces (IP, DHCP, State)
+  route         Manage Routing Table (Static routes, Gateways)
   system        Status, diagnostics, global settings
   profile       Manage configuration profiles
   bluetooth     Bluetooth Tethering (PAN/NAP)
@@ -27,6 +28,10 @@ Categories:
   vlan          Manage VLANs
   vrf           Manage Virtual Routing Functions
   api           Schema and Versioning
+  
+  Service Architecture (Experimental):
+  service       Namespace Isolation
+  tunnel        Overlay Networks (VXLAN, Geneve)
 
 Global Options:
   --format <fmt>  Output format: human (default), json, table, simple
@@ -41,9 +46,8 @@ Global Options:
 Examples:
   rxnm wifi connect "MyNetwork"
   rxnm interface wlan0 set dhcp
+  rxnm route add default --gateway 192.168.1.1
   rxnm system status --format table
-  rxnm interface wlan0 show --get ip
-  rxnm bridge create br0
 
 Use 'rxnm <category> --help' for specific commands.
 EOF
@@ -145,6 +149,37 @@ Examples:
 
   # Change MAC address
   rxnm interface wlan0 set hardware --mac 00:11:22:33:44:55
+EOF
+            ;;
+        route)
+            cat <<'EOF'
+Usage: rxnm route <action> [destination] [options]
+
+Actions:
+  list                  List routing table
+  add <dest>            Add new route
+  del <dest>            Delete route
+  get <dest>            Simulate routing decision (get route to host)
+  flush cache           Flush routing cache
+
+Options:
+  --destination <cidr>  Destination network (e.g. 10.0.0.0/24)
+  --gateway <ip>        Next hop gateway
+  --interface <iface>   Output interface
+  --metric <int>        Route priority
+  --table <id>          Routing table ID (default: main)
+  --scope <scope>       Scope (global, link, host)
+  --proto <proto>       Protocol (static, boot, etc)
+
+Examples:
+  # Add default gateway
+  rxnm route add default --gateway 192.168.1.1 --interface eth0
+
+  # Add static route to subnet
+  rxnm route add 10.10.0.0/16 --gateway 10.0.0.2
+
+  # Check which interface handles a specific IP
+  rxnm route get 8.8.8.8
 EOF
             ;;
         profile)
@@ -293,14 +328,14 @@ EOF
         api)
             cat <<'EOF'
 Usage: rxnm api <action>
-Actions: schema, version
+Actions: schema, version, capabilities
 
 Examples:
   # Get API Version
   rxnm api version
 
-  # Dump JSON Schema for validation
-  rxnm api schema
+  # Check feature status (Stable/Experimental)
+  rxnm api capabilities
 EOF
             ;;
         bluetooth)
@@ -327,6 +362,26 @@ Examples:
 
   # Enable Tethering Client (Connect to phone hotspot)
   rxnm bluetooth pan enable --mode client
+EOF
+            ;;
+        service)
+            cat <<'EOF'
+Usage: rxnm service <action> [name] [options] (Experimental)
+
+Actions:
+  create <name>         Create new namespace service
+  delete <name>         Delete service
+  list                  List services
+  attach <service>      Move interface to service
+  detach <service>      Return interface to root
+  exec <service> <cmd>  Execute command in service context
+
+Options:
+  --interface <iface>   Target interface for attach/detach
+
+Note:
+  This feature requires RXNM_EXPERIMENTAL=true in environment.
+  Services use 'ip netns' isolation.
 EOF
             ;;
         *)

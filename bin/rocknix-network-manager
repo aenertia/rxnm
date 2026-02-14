@@ -230,7 +230,8 @@ fi
 # --- HIERARCHY DISPATCHER ---
 
 # List of Built-in Categories
-CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config" "api")
+# Added SOA categories: service, route, tunnel, mpls, pppoe, ha
+CATS=("wifi" "interface" "bluetooth" "bridge" "bond" "vrf" "vlan" "macvlan" "ipvlan" "veth" "vpn" "tun" "tap" "profile" "system" "config" "api" "service" "route" "tunnel" "mpls" "pppoe" "ha")
 
 # Determine Category from first argument
 RAW_CMD="${1:-}"
@@ -261,6 +262,7 @@ case "$CATEGORY" in
     bt) CATEGORY="bluetooth" ;;
     sys) CATEGORY="system" ;;
     virt) CATEGORY="bridge" ;; # Or generic virt handling
+    svc) CATEGORY="service" ;;
 esac
 
 # 1. Plugin Dispatch (Highest Priority)
@@ -316,10 +318,8 @@ case "$CATEGORY" in
     wifi) 
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
-        # NEW: Load Roaming Engine
         source "${LIB_DIR}/rxnm-roaming.sh"
         ;;
-    # FIX: interface and bridge need diagnostics for action_status
     interface|bridge) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-diagnostics.sh"
@@ -328,7 +328,6 @@ case "$CATEGORY" in
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-vpn.sh" 
         ;;
-    # FIX: Virtual interfaces also need diagnostics for list/status
     bond|vlan|vrf|macvlan|ipvlan|veth) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-virt.sh" 
@@ -340,9 +339,14 @@ case "$CATEGORY" in
         source "${LIB_DIR}/rxnm-diagnostics.sh" 
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-nullify.sh"
-        # FIX: Missing interface library for proxy operations
         source "${LIB_DIR}/rxnm-interfaces.sh"
         ;;
+    service) source "${LIB_DIR}/rxnm-service.sh" ;;
+    route) source "${LIB_DIR}/rxnm-routes.sh" ;;
+    tunnel) source "${LIB_DIR}/rxnm-tunnel.sh" ;;
+    mpls) source "${LIB_DIR}/rxnm-mpls.sh" ;;
+    pppoe) source "${LIB_DIR}/rxnm-pppoe.sh" ;;
+    ha) source "${LIB_DIR}/rxnm-ha.sh" ;;
     api) ;;
 esac
 
@@ -392,6 +396,31 @@ case "$CATEGORY" in
                 ;;
             version)
                 json_success "{\"version\": \"${RXNM_VERSION}\", \"api\": \"${RXNM_API_VERSION:-1.0}\"}"
+                ;;
+            capabilities)
+                # Introspection of available features/stubs
+                netd_ver=$(networkctl --version 2>/dev/null | grep -oP 'systemd \K\d+' || echo 0)
+                agent_active="false"
+                if [ -x "${RXNM_AGENT_BIN}" ]; then agent_active="true"; fi
+                
+                "$JQ_BIN" -n \
+                    --arg netd "$netd_ver" \
+                    --argjson agent "$agent_active" \
+                    '{
+                        success: true,
+                        systemd_networkd_version: ($netd | tonumber),
+                        agent_available: $agent,
+                        features: {
+                            wifi: {status: "stable", since_version: "1.0"},
+                            interface: {status: "stable", since_version: "1.0"},
+                            service: {status: "experimental", since_version: "1.0"},
+                            route: {status: "experimental", since_version: "1.0"},
+                            tunnel: {status: "experimental", since_version: "1.0"},
+                            mpls: {status: "planned", since_version: "1.1"},
+                            pppoe: {status: "planned", since_version: "1.1"},
+                            ha: {status: "planned", since_version: "1.1"}
+                        }
+                    }'
                 ;;
         esac
         ;;
@@ -855,6 +884,56 @@ case "$CATEGORY" in
         done
         if [ "$ACTION" == "import" ] && [ -z "$FILE" ] && [ -f "$NAME" ]; then FILE="$NAME"; fi
         action_profile "$ACTION" "$NAME" "$IFACE" "$FILE"
+        ;;
+    
+    # --- SERVICE ORIENTED ARCHITECTURE (v1.0 Hybrid) ---
+    service)
+        ACTION="${1:-list}"; shift
+        NAME="${1:-}"; [ -n "$NAME" ] && [[ "$NAME" != --* ]] && shift
+        
+        case "$ACTION" in
+            create) action_service_create "$NAME" ;;
+            delete) action_service_delete "$NAME" ;;
+            list) action_service_list ;;
+            attach)
+                IFACE=""; while [[ $# -gt 0 ]]; do case "$1" in --interface) IFACE="$2"; shift 2;; *) shift ;; esac; done
+                [ -z "$IFACE" ] && { IFACE="$NAME"; NAME=""; }
+                action_service_attach "$NAME" "$IFACE"
+                ;;
+            detach)
+                IFACE=""; while [[ $# -gt 0 ]]; do case "$1" in --interface) IFACE="$2"; shift 2;; *) shift ;; esac; done
+                [ -z "$IFACE" ] && { IFACE="$NAME"; NAME=""; }
+                action_service_detach "$NAME" "$IFACE"
+                ;;
+            exec)
+                action_service_exec "$NAME" "$@"
+                ;;
+        esac
+        ;;
+        
+    route)
+        ACTION="${1:-list}"; shift
+        action_route_dispatch "$ACTION" "$@"
+        ;;
+        
+    tunnel)
+        ACTION="${1:-list}"; shift
+        action_tunnel_dispatch "$ACTION" "$@"
+        ;;
+        
+    mpls)
+        ACTION="${1:-list}"; shift
+        action_mpls_dispatch "$ACTION" "$@"
+        ;;
+        
+    pppoe)
+        ACTION="${1:-list}"; shift
+        action_pppoe_dispatch "$ACTION" "$@"
+        ;;
+        
+    ha)
+        ACTION="${1:-list}"; shift
+        action_ha_dispatch "$ACTION" "$@"
         ;;
         
     *)

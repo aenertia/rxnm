@@ -13,15 +13,12 @@
  * 2. Atomic Writes: Implements safe config writing (write-tmp-and-rename).
  * 3. IPC: Talks directly to systemd-networkd & IWD via DBus socket.
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
+ * 5. Namespace/Service: Native containerization primitives (unshare/mount).
  *
  * DESIGN PHILOSOPHY:
  * - No external dependencies (glibc/musl only).
  * - Static linking preferred for portability across distros.
  * - Configuration logic is derived strictly from rxnm_generated.h (SSoT).
- * * AUDIT NOTES (RC1):
- * - Hardened DBus parser against boundary overruns.
- * - Dynamic buffer allocation for probe targets.
- * - Signal-safe process reaping.
  */
 
 #define _GNU_SOURCE
@@ -41,6 +38,8 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
+#include <sched.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/netlink.h>
@@ -90,10 +89,15 @@ char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 /* Configurable DBus Timeout (Default 5s) */
 long g_dbus_timeout_us = 5000000;
 
+/* Routing Table Filter (Default: Main) */
+uint32_t g_target_table = RT_TABLE_MAIN;
+bool g_filter_table = true; /* If false, dump all tables */
+
 /* --- Internal Limits --- */
 #define BUF_SIZE 32768
 #define IPV4_CIDR_LEN (INET_ADDRSTRLEN + 4)
 #define IPV6_CIDR_LEN (INET6_ADDRSTRLEN + 5)
+#define NETNS_RUN_DIR "/var/run/netns"
 
 /* --- Timeout & Backoff Configuration --- */
 /* Optimized for SG2002/RK3326: Start slow to allow CPU yield, cap lower for responsiveness */
@@ -121,6 +125,7 @@ typedef struct {
     char dst[IPV6_CIDR_LEN];
     char gw[INET6_ADDRSTRLEN];
     uint32_t metric;
+    uint32_t table;
     bool is_default;
 } route_entry_t;
 
@@ -891,8 +896,8 @@ void process_route_msg(struct nlmsghdr *nh) {
     struct rtmsg *rt = NLMSG_DATA(nh);
     struct rtattr *tb[RTA_MAX + 1];
     
-    /* Only care about main table */
-    if (rt->rtm_table != RT_TABLE_MAIN) return;
+    /* Route Filtering Logic (SOA Update) */
+    if (g_filter_table && rt->rtm_table != g_target_table) return;
     
     parse_rtattr(tb, RTA_MAX, RTM_RTA(rt), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*rt)));
     
@@ -915,6 +920,7 @@ void process_route_msg(struct nlmsghdr *nh) {
     route_entry_t *route = &entry->routes[entry->route_count];
     memset(route, 0, sizeof(route_entry_t));
     
+    route->table = rt->rtm_table;
     if (tb[RTA_PRIORITY]) route->metric = *(uint32_t *)RTA_DATA(tb[RTA_PRIORITY]);
     
     if (tb[RTA_GATEWAY]) {
@@ -1347,6 +1353,26 @@ void print_json_status() {
     printf("\n  }\n}\n");
 }
 
+/* --- Route Listing (Optimized for JSON) --- */
+void print_json_routes() {
+    printf("{\n  \"%s\": true,\n  \"routes\": [\n", KEY_SUCCESS);
+    
+    bool first = true;
+    for (size_t i = 0; i < ifaces_count; i++) {
+        iface_entry_t *entry = ifaces[i];
+        for (size_t k = 0; k < entry->route_count; k++) {
+            if (!first) printf(",\n");
+            route_entry_t *r = &entry->routes[k];
+            printf("    { \"destination\": \"%s\", \"interface\": \"%s\", \"table\": %u", r->dst, entry->name, r->table);
+            if (r->gw[0]) printf(", \"gateway\": \"%s\"", r->gw);
+            if (r->metric > 0) printf(", \"metric\": %u", r->metric);
+            printf(" }");
+            first = false;
+        }
+    }
+    printf("\n  ]\n}\n");
+}
+
 void cmd_get_value(char *key) {
     collect_network_state();
     char *segment = strtok(key, ".");
@@ -1495,8 +1521,6 @@ void cmd_nullify(const char *action) {
 
 /**
  * @brief Atomically writes stdin to a file.
- * Implementation: Dynamically allocates buffer to handle >64KB input.
- * Writes to ${path}.tmp.${pid}, then fsyncs and renames.
  */
 void cmd_atomic_write(char *path, char *perm_str) {
     size_t capacity = 65536; // Start with 64KB
@@ -1507,7 +1531,6 @@ void cmd_atomic_write(char *path, char *perm_str) {
         exit(1);
     }
 
-    /* 1. Read entire input into dynamically resizing buffer */
     while (1) {
         size_t bytes_read = fread(buf + total_len, 1, capacity - total_len, stdin);
         total_len += bytes_read;
@@ -1537,8 +1560,6 @@ void cmd_atomic_write(char *path, char *perm_str) {
         }
     }
 
-    /* 2. Optimization: Don't write if content is identical (reduce flash wear) */
-    /* Memory efficient chunked comparison against existing file */
     bool changed = true;
     struct stat st;
     if (stat(path, &st) == 0 && (size_t)st.st_size == total_len) {
@@ -1568,7 +1589,6 @@ void cmd_atomic_write(char *path, char *perm_str) {
         return;
     }
 
-    /* 3. Write temp file and atomically rename */
     char tmp_path[PATH_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, getpid());
 
@@ -1627,7 +1647,6 @@ void cmd_append_config(char *path, char *line) {
         exit(1);
     }
     
-    // Check if line already exists
     char file_buf[32768];
     ssize_t read_len = 0;
     bool found = false;
@@ -1651,20 +1670,13 @@ void cmd_append_config(char *path, char *line) {
     close(fd);
 }
 
-/**
- * @brief Triggers external roaming logic safely via fork/exec to prevent Shell Injection.
- */
 static void trigger_roaming_event(const char *iface) {
     pid_t pid = fork();
     if (pid == 0) {
-        // Child Process: Execute roaming trigger logic safely
         execlp("rxnm", "rxnm", "wifi", "roaming", "trigger", iface, NULL);
-        // Fallback if 'rxnm' is not in standard PATH
         execlp("/usr/bin/rxnm", "rxnm", "wifi", "roaming", "trigger", iface, NULL);
         exit(1);
     } else if (pid > 0) {
-        // Parent Process: Wait to reap zombie
-        /* RC1 FIX: Check for errors on waitpid */
         int status;
         while (waitpid(pid, &status, 0) == -1) {
             if (errno != EINTR) break; 
@@ -1672,16 +1684,11 @@ static void trigger_roaming_event(const char *iface) {
     }
 }
 
-/**
- * @brief Efficient roaming monitor loop using Netlink events.
- * Triggers external shell script when events occur.
- */
 void cmd_monitor_roam(char *iface, char *threshold_str) {
-    (void)threshold_str; // Silence unused parameter warning
+    (void)threshold_str;
     int sock = open_netlink_rt();
     if (sock < 0) exit(1);
     
-    // Initial check
     trigger_roaming_event(iface);
     
     while (1) {
@@ -1698,16 +1705,93 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                     if (tb[IFLA_IFNAME]) {
                         char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
                         if (strcmp(name, iface) == 0) {
-                            // Link state changed, trigger check safely
                             trigger_roaming_event(iface);
                         }
                     }
                 }
             }
         }
-        sleep(2); // Simple pacing to avoid storming
+        sleep(2);
     }
     close(sock);
+}
+
+/* --- Namespace Management (Accelerated) --- */
+
+void cmd_ns_list() {
+    DIR *d = opendir(NETNS_RUN_DIR);
+    if (!d) {
+        printf("{\"services\": []}\n");
+        return;
+    }
+    
+    printf("{\"services\": [");
+    bool first = true;
+    struct dirent *dir;
+    while ((dir = readdir(d)) != NULL) {
+        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
+        if (!first) printf(", ");
+        printf("\"%s\"", dir->d_name);
+        first = false;
+    }
+    printf("]}\n");
+    closedir(d);
+}
+
+int cmd_ns_create(const char *name) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", NETNS_RUN_DIR, name);
+    
+    /* Ensure directory exists */
+    mkdir(NETNS_RUN_DIR, 0755);
+    
+    /* Create mount point file */
+    int fd = open(path, O_RDONLY | O_CREAT | O_EXCL, 0000);
+    if (fd < 0) {
+        if (errno == EEXIST) {
+            fprintf(stderr, "Namespace '%s' already exists\n", name);
+            return 1;
+        }
+        perror("open");
+        return 1;
+    }
+    close(fd);
+    
+    /* Unshare network namespace */
+    if (unshare(CLONE_NEWNET) < 0) {
+        perror("unshare");
+        unlink(path);
+        return 1;
+    }
+    
+    /* Bind mount new namespace to file */
+    if (mount("/proc/self/ns/net", path, "none", MS_BIND, NULL) < 0) {
+        perror("mount");
+        unlink(path);
+        return 1;
+    }
+    
+    return 0;
+}
+
+int cmd_ns_delete(const char *name) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", NETNS_RUN_DIR, name);
+    
+    if (umount2(path, MNT_DETACH) < 0) {
+        if (errno != EINVAL && errno != ENOENT) {
+            perror("umount");
+            return 1;
+        }
+    }
+    
+    if (unlink(path) < 0) {
+        if (errno != ENOENT) {
+            perror("unlink");
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
@@ -1715,10 +1799,8 @@ void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
 
 void cmd_is_low_power() {
-    const char *socs[] = LOW_POWER_SOCS; // Defined in generated header
+    const char *socs[] = LOW_POWER_SOCS;
     bool is_lp = false;
-    
-    // Check if LOW_POWER_SOCS is defined/valid
     if (socs[0] != NULL) {
         for (int i = 0; socs[i] != NULL; i++) {
             if (file_contains("/proc/cpuinfo", socs[i])) { 
@@ -1730,6 +1812,7 @@ void cmd_is_low_power() {
     printf("%s\n", is_lp ? "true" : "false");
 }
 
+/* CLI Globals */
 char *g_atomic_path = NULL;
 char *g_perm_str = NULL;
 char *g_append_path = NULL;
@@ -1739,11 +1822,12 @@ char *g_monitor_thresh = NULL;
 char *g_connect_ssid = NULL;
 char *g_connect_iface = NULL;
 char *g_nullify_cmd = NULL;
+char *g_ns_create = NULL;
+char *g_ns_delete = NULL;
+char *g_route_table = NULL;
 
 int main(int argc, char *argv[]) {
-    /* Register cleanup to satisfy Valgrind zero-leak checks */
     atexit(cleanup_ifaces);
-    
     load_runtime_config();
     
     static struct option long_options[] = {
@@ -1766,6 +1850,10 @@ int main(int argc, char *argv[]) {
         {"monitor-roam", required_argument, 0, 'M'},
         {"threshold", required_argument, 0, 'S'},
         {"nullify", required_argument, 0, 'N'},
+        {"ns-create", required_argument, 0, 1001},
+        {"ns-delete", required_argument, 0, 1002},
+        {"ns-list", no_argument, 0, 1003},
+        {"route-dump", required_argument, 0, 1004},
         {0, 0, 0, 0}
     };
     
@@ -1773,7 +1861,7 @@ int main(int argc, char *argv[]) {
     while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--get <key>  Get specific value\n--reload  Trigger networkd reload\n--connect <ssid> --iface <iface> Connect to wifi\n--atomic-write <path>  Write stdin to path\n--perm <mode> Permissions for atomic write (octal)\n--tune <profile>  Optimize sysctl\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -1791,37 +1879,29 @@ int main(int argc, char *argv[]) {
             case 'C': g_connect_ssid = optarg; break;
             case 'i': g_connect_iface = optarg; break;
             case 'N': g_nullify_cmd = optarg; break;
+            case 1001: g_ns_create = optarg; break;
+            case 1002: g_ns_delete = optarg; break;
+            case 1003: cmd_ns_list(); return 0;
+            case 1004: g_route_table = optarg; break;
             default: return 1;
         }
     }
     
-    /* Handle atomic write logic (piped input) */
-    if (g_atomic_path) {
-        cmd_atomic_write(g_atomic_path, g_perm_str);
-        return 0;
-    }
-    
-    if (g_append_path && g_append_line) {
-        cmd_append_config(g_append_path, g_append_line);
-        return 0;
-    }
-    
-    if (g_monitor_iface) {
-        cmd_monitor_roam(g_monitor_iface, g_monitor_thresh);
-        return 0;
-    }
-    
-    if (g_connect_ssid) {
-        return cmd_connect(g_connect_ssid, g_connect_iface);
-    }
-    
-    if (g_nullify_cmd) {
-        cmd_nullify(g_nullify_cmd);
+    if (g_atomic_path) { cmd_atomic_write(g_atomic_path, g_perm_str); return 0; }
+    if (g_append_path && g_append_line) { cmd_append_config(g_append_path, g_append_line); return 0; }
+    if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }
+    if (g_connect_ssid) { return cmd_connect(g_connect_ssid, g_connect_iface); }
+    if (g_nullify_cmd) { cmd_nullify(g_nullify_cmd); return 0; }
+    if (g_ns_create) { return cmd_ns_create(g_ns_create); }
+    if (g_ns_delete) { return cmd_ns_delete(g_ns_delete); }
+    if (g_route_table) {
+        g_target_table = atoi(g_route_table);
+        g_filter_table = true;
+        collect_network_state();
+        print_json_routes();
         return 0;
     }
 
-    /* Default Action: Dump status if run with args but none matched */
     if (optind == 1) { collect_network_state(); print_json_status(); return 0; }
-    
     return 1;
 }

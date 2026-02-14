@@ -28,7 +28,7 @@ _rxnm_completion() {
     local RUN_DIR="/run/rocknix"
     local STATUS_CACHE="${RUN_DIR}/status.json"
     local GLOBAL_OPTS="--json --format --simple --get --yes --force --debug --help"
-    local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
+    local TOP_CATS="wifi interface route bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help service tunnel mpls pppoe ha api"
 
     # --- LIVE QUERY HELPERS ---
 
@@ -73,8 +73,6 @@ _rxnm_completion() {
 
     # Helper: Get Profiles via Tool Query
     _rxnm_live_profiles() {
-        # 'rxnm profile list --json' is fast enough, but direct directory listing is safer for completion
-        # logic if the tool is broken. We stick to directory listing for raw speed (0ms latency).
         local p_dir="/storage/.config/network/profiles/global"
         local profiles="default"
         if [ -d "$p_dir" ]; then
@@ -85,17 +83,16 @@ _rxnm_completion() {
 
     # Helper: Get Known SSIDs
     _rxnm_live_ssids() {
-        # Use iwctl known-networks if available (most accurate source of truth)
         if command -v iwctl >/dev/null; then
              iwctl known-networks list 2>/dev/null | sed -r 's/\x1B\[[0-9;]*[mK]//g' | awk 'NR>4 {print $1}'
         fi
     }
     
-    # Helper: Get Bluetooth Devices (From DBus/Tool)
-    _rxnm_live_bt_devices() {
-        # This is speculative/interactive. We try to read recent scan results if available, 
-        # but don't block. For now, return nothing to avoid blocking.
-        return
+    # Helper: Get Services (Namespaces)
+    _rxnm_live_services() {
+        if command -v ip >/dev/null; then
+            ip netns list 2>/dev/null | awk '{print $1}'
+        fi
     }
 
     # --- COMPLETION LOGIC ---
@@ -126,7 +123,6 @@ _rxnm_completion() {
                     if [[ "$cur" == -* ]]; then
                          COMPREPLY=( $(compgen -W "--ssid --password --password-stdin --hidden --interface" -- "$cur") )
                     else
-                         # Auto-populate with Known SSIDs
                          COMPREPLY=( $(compgen -W "$(_rxnm_live_ssids)" -- "$cur") )
                     fi
                     ;;
@@ -134,7 +130,6 @@ _rxnm_completion() {
                     if [[ "$cur" == -* ]]; then
                         COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
                     else
-                        # Context Aware: Only show WiFi interfaces
                         COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wifi)" -- "$cur") )
                     fi
                     ;;
@@ -166,9 +161,8 @@ _rxnm_completion() {
         interface)
             local cmds="show set enable disable list hotplug"
             
-            # Smart Detection: `rxnm interface [IFACE]` vs `rxnm interface [CMD]`
             local is_iface=0
-            local available_ifaces=$(_rxnm_live_interfaces) # All interfaces
+            local available_ifaces=$(_rxnm_live_interfaces) 
             
             for i in $available_ifaces; do
                 if [[ "$i" == "${words[2]}" ]]; then is_iface=1; break; fi
@@ -177,30 +171,24 @@ _rxnm_completion() {
             if [[ $cword -eq 2 ]]; then
                  COMPREPLY=( $(compgen -W "$cmds $available_ifaces" -- "$cur") )
             elif [[ $is_iface -eq 1 ]]; then
-                 # Format: rxnm interface wlan0 [action]
                  if [[ "$cur" == -* ]]; then
                      COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
                  else
                      COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
                  fi
-                 
-                 # Handle flags after action: rxnm interface wlan0 show [flags]
                  if [[ $cword -ge 4 ]]; then
                      local action="${words[3]}"
-                     # Allow global opts for show/list/hotplug
                      if [[ "$action" == "show" || "$action" == "list" || "$action" == "hotplug" ]]; then
                          COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
                      fi
                  fi
             else
-                 # Format: rxnm interface [action] ...
                  local subaction="${words[2]}"
                  case "$subaction" in
                     set)
                         if [[ $cword -eq 3 ]]; then
                             COMPREPLY=( $(compgen -W "dhcp static" -- "$cur") )
                         fi
-                        # Flags for set dhcp/static
                         if [[ "${words[3]}" == "dhcp" || "${words[3]}" == "static" ]]; then
                              local opts="--metric --mtu --mac --ipv6-privacy --dhcp-id --ipv6-pd"
                              if [[ "${words[3]}" == "static" ]]; then
@@ -213,7 +201,6 @@ _rxnm_completion() {
                         if [[ "$cur" == -* ]]; then
                              COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
                         else
-                             # Suggest all interfaces
                              COMPREPLY=( $(compgen -W "$available_ifaces" -- "$cur") )
                         fi
                         ;;
@@ -221,41 +208,41 @@ _rxnm_completion() {
             fi
             ;;
 
-        bluetooth)
-             local cmds="scan pair unpair pan"
-             if [[ $cword -eq 2 ]]; then
-                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
-             fi
-             
-             local action="${words[2]}"
-             if [[ "$action" == "pan" ]]; then
-                  if [[ $cword -eq 3 ]]; then
-                      COMPREPLY=( $(compgen -W "enable disable" -- "$cur") )
-                  elif [[ "${words[3]}" == "enable" ]]; then
-                      COMPREPLY=( $(compgen -W "--mode --share --ip" -- "$cur") )
-                  fi
-             fi
-             ;;
+        route)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "list add del get flush" -- "$cur") )
+            else
+                local subaction="${words[2]}"
+                case "$subaction" in
+                    add|del|replace)
+                        COMPREPLY=( $(compgen -W "--destination --gateway --interface --metric --table --scope --proto" -- "$cur") )
+                        ;;
+                    get)
+                        COMPREPLY=( $(compgen -W "--destination" -- "$cur") )
+                        ;;
+                    flush)
+                        if [[ $cword -eq 3 ]]; then
+                            COMPREPLY=( $(compgen -W "cache table" -- "$cur") )
+                        fi
+                        ;;
+                esac
+                if [[ "$cur" == --interface* ]] || [[ "$prev" == "--interface" ]]; then
+                     COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces)" -- "$cur") )
+                fi
+            fi
+            ;;
 
         system)
             local cmds="status check proxy reload setup start stop nullify"
             if [[ $cword -eq 2 ]]; then
                  COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
             fi
-            
             local action="${words[2]}"
             case "$action" in
-                status)
-                    if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi
-                    ;;
+                status) if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi ;;
                 check) COMPREPLY=( $(compgen -W "internet portal" -- "$cur") ) ;;
-                proxy) 
-                    if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "set" -- "$cur") ); fi
-                    if [[ "${words[3]}" == "set" ]]; then COMPREPLY=( $(compgen -W "--http --https --noproxy --interface" -- "$cur") ); fi
-                    ;;
-                nullify)
-                    if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "enable disable" -- "$cur") ); fi
-                    ;;
+                proxy) if [[ "${words[3]}" == "set" ]]; then COMPREPLY=( $(compgen -W "--http --https --noproxy --interface" -- "$cur") ); fi ;;
+                nullify) if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "enable disable" -- "$cur") ); fi ;;
             esac
             ;;
             
@@ -270,13 +257,10 @@ _rxnm_completion() {
                         if [[ "$cur" == -* ]]; then
                             COMPREPLY=( $(compgen -W "--interface --file" -- "$cur") )
                         else
-                            # Suggest existing profiles
                             COMPREPLY=( $(compgen -W "$(_rxnm_live_profiles)" -- "$cur") )
                         fi
                         ;;
-                    import)
-                        COMPREPLY=( $(compgen -W "--file" -- "$cur") )
-                        ;;
+                    import) COMPREPLY=( $(compgen -W "--file" -- "$cur") ) ;;
                 esac
             fi
             ;;
@@ -286,79 +270,33 @@ _rxnm_completion() {
              if [[ "$category" == "bridge" || "$category" == "vrf" ]]; then cmds="$cmds add-member"; fi
              if [[ "$category" == "bond" ]]; then cmds="$cmds add-slave"; fi
              
-             if [[ $cword -eq 2 ]]; then
-                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
-             else
-                 local subaction="${words[2]}"
-                 if [[ "$subaction" == "create" ]]; then
-                      # Context-aware creation flags
-                      case "$category" in
-                        vlan) COMPREPLY=( $(compgen -W "--parent --id" -- "$cur") ) ;;
-                        macvlan|ipvlan) COMPREPLY=( $(compgen -W "--parent --mode" -- "$cur") ) ;;
-                        vrf) COMPREPLY=( $(compgen -W "--table" -- "$cur") ) ;;
-                        bond) COMPREPLY=( $(compgen -W "--mode" -- "$cur") ) ;;
-                        veth) COMPREPLY=( $(compgen -W "--peer" -- "$cur") ) ;;
-                      esac
-                 elif [[ "$subaction" == "add-member" ]]; then
-                      case "$category" in
-                        # Only show Bridges when asked for a bridge
-                        bridge) 
-                             if [[ "$cur" == --bridge* ]] || [[ "$prev" == "--bridge" ]]; then
-                                COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces bridge)" -- "$cur") )
-                             else
-                                COMPREPLY=( $(compgen -W "--bridge" -- "$cur") )
-                             fi
-                             ;;
-                        vrf) 
-                             if [[ "$cur" == --vrf* ]] || [[ "$prev" == "--vrf" ]]; then
-                                COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces vrf)" -- "$cur") )
-                             else
-                                COMPREPLY=( $(compgen -W "--vrf" -- "$cur") )
-                             fi
-                             ;;
-                      esac
-                 elif [[ "$subaction" == "add-slave" ]]; then
-                      if [[ "$cur" == --bond* ]] || [[ "$prev" == "--bond" ]]; then
-                         COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces bond)" -- "$cur") )
-                      else
-                         COMPREPLY=( $(compgen -W "--bond" -- "$cur") )
-                      fi
-                 elif [[ "$subaction" == "delete" ]]; then
-                      # Smart Deletion: Only show interfaces of the matching type!
-                      COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces $category)" -- "$cur") )
-                 elif [[ "$subaction" == "list" ]]; then
-                      if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi
-                 fi
-             fi
+             if [[ $cword -eq 2 ]]; then COMPREPLY=( $(compgen -W "$cmds" -- "$cur") ); fi
              ;;
              
         vpn)
-            if [[ $cword -eq 2 ]]; then
-                 COMPREPLY=( $(compgen -W "wireguard" -- "$cur") )
-            elif [[ "${words[2]}" == "wireguard" ]]; then
-                 if [[ $cword -eq 3 ]]; then
-                      COMPREPLY=( $(compgen -W "connect disconnect delete" -- "$cur") )
-                 elif [[ "${words[3]}" == "connect" ]]; then
-                      COMPREPLY=( $(compgen -W "--private-key --peer-key --endpoint --allowed-ips --address" -- "$cur") )
-                 elif [[ "${words[3]}" == "disconnect" || "${words[3]}" == "delete" ]]; then
-                      # Show only WireGuard interfaces
-                      COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces wireguard)" -- "$cur") )
-                 fi
-            fi
+            if [[ $cword -eq 2 ]]; then COMPREPLY=( $(compgen -W "wireguard" -- "$cur") ); fi
             ;;
             
         tun|tap)
-             if [[ $cword -eq 2 ]]; then
-                 COMPREPLY=( $(compgen -W "create delete" -- "$cur") )
-             else
-                 local subaction="${words[2]}"
-                 if [[ "$subaction" == "delete" ]]; then
-                     COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces $category)" -- "$cur") )
-                 else
-                     COMPREPLY=( $(compgen -W "--user --group" -- "$cur") )
-                 fi
-             fi
+             if [[ $cword -eq 2 ]]; then COMPREPLY=( $(compgen -W "create delete" -- "$cur") ); fi
              ;;
+             
+        # New SOA Categories
+        service)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "create delete list attach detach exec" -- "$cur") )
+            else
+                local subaction="${words[2]}"
+                case "$subaction" in
+                    delete|attach|detach|exec) COMPREPLY=( $(compgen -W "$(_rxnm_live_services)" -- "$cur") ) ;;
+                esac
+                if [[ "$cur" == --interface* ]] || [[ "$prev" == "--interface" ]]; then
+                     COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces)" -- "$cur") )
+                fi
+            fi
+            ;;
+            
+        api) COMPREPLY=( $(compgen -W "schema version capabilities" -- "$cur") ) ;;
 
     esac
 }
