@@ -27,7 +27,7 @@ _rxnm_completion() {
     # --- CONSTANTS ---
     local RUN_DIR="/run/rocknix"
     local STATUS_CACHE="${RUN_DIR}/status.json"
-    local GLOBAL_OPTS="--json --format --yes --force --debug --help"
+    local GLOBAL_OPTS="--json --format --simple --get --yes --force --debug --help"
     local TOP_CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config help"
 
     # --- LIVE QUERY HELPERS ---
@@ -164,7 +164,7 @@ _rxnm_completion() {
             ;;
 
         interface)
-            local cmds="show set enable disable list"
+            local cmds="show set enable disable list hotplug"
             
             # Smart Detection: `rxnm interface [IFACE]` vs `rxnm interface [CMD]`
             local is_iface=0
@@ -178,7 +178,20 @@ _rxnm_completion() {
                  COMPREPLY=( $(compgen -W "$cmds $available_ifaces" -- "$cur") )
             elif [[ $is_iface -eq 1 ]]; then
                  # Format: rxnm interface wlan0 [action]
-                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+                 if [[ "$cur" == -* ]]; then
+                     COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
+                 else
+                     COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+                 fi
+                 
+                 # Handle flags after action: rxnm interface wlan0 show [flags]
+                 if [[ $cword -ge 4 ]]; then
+                     local action="${words[3]}"
+                     # Allow global opts for show/list/hotplug
+                     if [[ "$action" == "show" || "$action" == "list" || "$action" == "hotplug" ]]; then
+                         COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
+                     fi
+                 fi
             else
                  # Format: rxnm interface [action] ...
                  local subaction="${words[2]}"
@@ -196,9 +209,13 @@ _rxnm_completion() {
                              COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
                         fi
                         ;;
-                    enable|disable|show)
-                        # Suggest all interfaces
-                        COMPREPLY=( $(compgen -W "$available_ifaces" -- "$cur") )
+                    enable|disable|show|list|hotplug)
+                        if [[ "$cur" == -* ]]; then
+                             COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
+                        else
+                             # Suggest all interfaces
+                             COMPREPLY=( $(compgen -W "$available_ifaces" -- "$cur") )
+                        fi
                         ;;
                  esac
             fi
@@ -228,6 +245,9 @@ _rxnm_completion() {
             
             local action="${words[2]}"
             case "$action" in
+                status)
+                    if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi
+                    ;;
                 check) COMPREPLY=( $(compgen -W "internet portal" -- "$cur") ) ;;
                 proxy) 
                     if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "set" -- "$cur") ); fi
@@ -306,6 +326,8 @@ _rxnm_completion() {
                  elif [[ "$subaction" == "delete" ]]; then
                       # Smart Deletion: Only show interfaces of the matching type!
                       COMPREPLY=( $(compgen -W "$(_rxnm_live_interfaces $category)" -- "$cur") )
+                 elif [[ "$subaction" == "list" ]]; then
+                      if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi
                  fi
              fi
              ;;

@@ -56,12 +56,17 @@
           "type": "boolean",
           "const": true
         },
+        "get": {
+          "type": "string",
+          "description": "Specific value to extract (dot notation supported). Equivalent to --get."
+        },
         "format": {
           "type": "string",
           "enum": [
             "json",
             "human",
-            "table"
+            "table",
+            "simple"
           ]
         }
       },
@@ -1122,8 +1127,7 @@
           "type": "string"
         },
         "peer": {
-          "type": "string",
-          "description": "Peer name for P2P or veth"
+          "type": "string"
         },
         "user": {
           "type": "string"

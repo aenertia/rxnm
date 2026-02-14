@@ -233,6 +233,39 @@ json_success() {
         json)
             echo "$full_json"
             ;;
+        simple)
+            if [ -n "${RXNM_GET_KEY:-}" ]; then
+                # Use jq to extract specific path
+                local query="${RXNM_GET_KEY}"
+                
+                # If the key provided doesn't look like a path, try direct top-level access
+                if [[ "$query" != .* ]]; then query=".${query}"; fi
+                
+                local val
+                val=$(echo "$full_json" | "$JQ_BIN" -r "$query // empty")
+                
+                # If extraction failed but user looked for typical interface props, search inside interfaces map
+                if [ -z "$val" ]; then
+                     val=$(echo "$full_json" | "$JQ_BIN" -r ".interfaces[]? | $query // empty" | head -n1)
+                fi
+                
+                echo "$val"
+            else
+                # Heuristic fallback for --simple without --get
+                # Returns IP (v4), SSID, Status or Message if found
+                # Prioritizes clean single-line output for scripting (IP only)
+                echo "$full_json" | "$JQ_BIN" -r '
+                    if .interfaces and (.interfaces | length == 1) then
+                        (.interfaces | to_entries[0].value | (.ip // .ipv4[0] // .state))
+                    elif .ip and .ip != null then .ip
+                    elif .ssid and .ssid != null then .ssid
+                    elif .status and .status != null then .status
+                    elif .result and .result != null then .result
+                    elif .message then .message
+                    else "OK" end
+                '
+            fi
+            ;;
         table)
             # Detect data type to format table correctly
             local type_detect
@@ -305,7 +338,9 @@ json_success() {
                      ;;
                 interfaces)
                      echo "--- Network Status ---"
-                     echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  Details: \(.ssid // .members // "-")\n"'
+                     # Force output of IPv6 and Routes if available
+                     # Uses string interpolation to ensure fields are printed even if empty/null
+                     echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  IPv6: \((.ipv6 // []) | join(", "))\n  Routes: \((.routes // []) | map(.dst + " via " + (.gw // "on-link")) | join(", "))\n  Details: \(.ssid // .members // "-")\n"'
                      ;;
                 *)
                     echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'

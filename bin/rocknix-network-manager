@@ -84,6 +84,7 @@ source "${LIB_DIR}/rxnm-templates.sh"
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
 export FORCE_ACTION="false"
+export RXNM_GET_KEY=""
 CATEGORY=""
 ACTION=""
 
@@ -156,7 +157,9 @@ EOF
     cat <<EOF
 
 Global Options:
-  --format <fmt>  Output format: human (default), json, table
+  --format <fmt>  Output format: human (default), json, table, simple
+  --simple        Shortcut for '--format simple' (Bash friendly)
+  --get <key>     Extract specific value (implies --simple)
   --yes, -y       Skip confirmation prompts
   --stdin         Read configuration from JSON on stdin
   --help, -h      Show help
@@ -166,6 +169,7 @@ Examples:
   rxnm wifi connect "MyNetwork"
   rxnm interface wlan0 set dhcp
   rxnm system status --format table
+  rxnm interface wlan0 show --get ip
   rxnm bridge create br0
 
 Use 'rxnm <category> --help' for specific commands.
@@ -251,6 +255,7 @@ Options:
   --ipv6-privacy <opt>  Set IPv6 Privacy (yes|no|prefer-public|kernel)
   --dhcp-id <opt>       Set DHCP Client ID (mac|duid)
   --ipv6-pd <yes|no>    Enable/Disable IPv6 Prefix Delegation (Default: yes)
+  --get <key>           Get single value (e.g. 'ip', 'mac', 'state')
   
   --speed <mbps>        Link speed (e.g. 100, 1000)
   --duplex <mode>       Duplex mode (half, full)
@@ -361,6 +366,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --json) RXNM_FORMAT="json"; shift ;;
         --format) RXNM_FORMAT="$2"; shift 2 ;;
+        --simple) RXNM_FORMAT="simple"; shift ;;
+        --get) RXNM_FORMAT="simple"; RXNM_GET_KEY="$2"; shift 2 ;;
         --yes|-y|--force) FORCE_ACTION="true"; shift ;;
         --debug) export RXNM_DEBUG=1; set -x; shift ;;
         --help|-h) SHOW_HELP="true"; shift ;;
@@ -504,14 +511,20 @@ case "$CATEGORY" in
         # NEW: Load Roaming Engine
         source "${LIB_DIR}/rxnm-roaming.sh"
         ;;
-    interface|bridge) source "${LIB_DIR}/rxnm-interfaces.sh" ;;
+    # FIX: interface and bridge need diagnostics for action_status
+    interface|bridge) 
+        source "${LIB_DIR}/rxnm-interfaces.sh" 
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
+        ;;
     vpn|tun|tap) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-vpn.sh" 
         ;;
+    # FIX: Virtual interfaces also need diagnostics for list/status
     bond|vlan|vrf|macvlan|ipvlan|veth) 
         source "${LIB_DIR}/rxnm-interfaces.sh" 
         source "${LIB_DIR}/rxnm-virt.sh" 
+        source "${LIB_DIR}/rxnm-diagnostics.sh"
         ;;
     bluetooth) source "${LIB_DIR}/rxnm-bluetooth.sh" ;;
     profile) source "${LIB_DIR}/rxnm-profiles.sh" ;;
@@ -524,6 +537,7 @@ case "$CATEGORY" in
 esac
 
 # Check for category-specific help
+# This must happen AFTER shifting the category but BEFORE dispatching action
 if [ "$SHOW_HELP" == "true" ]; then
     print_category_help "$CATEGORY"
     exit 0
@@ -902,6 +916,12 @@ case "$CATEGORY" in
          if [ "$ACTION" == "delete" ]; then
              [ -z "$NAME" ] && { json_error "Name required"; exit 1; }
              action_delete_netdev "$NAME"
+             exit 0
+         fi
+         
+         # Enable generic listing for these categories
+         if [ "$ACTION" == "list" ]; then
+             action_status ""
              exit 0
          fi
          
