@@ -6,7 +6,7 @@ By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory 
 
 | **Version** | **API Specification** | **Architecture** | **License** |
 | :--- | :--- | :--- | :--- |
-| `1.0.0-rc2` | `v1.0` (Frozen) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
+| `1.0.0-rc3` | `v1.0` (Frozen) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
 
 ---
 
