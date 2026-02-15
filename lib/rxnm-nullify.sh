@@ -186,6 +186,13 @@ action_system_nullify() {
     local cmd="$1"
     local dry_run="$2"
     
+    # --- EXPERIMENTAL FEATURE GUARD ---
+    if [ "${RXNM_EXPERIMENTAL:-false}" != "true" ]; then
+        json_error "Feature 'nullify' is experimental. Set RXNM_EXPERIMENTAL=true to enable." "501" \
+            "This feature is destructive and experimental. See 'rxnm api capabilities' for status."
+        exit 1
+    fi
+
     if [ "$dry_run" == "--dry-run" ]; then
         _nullify_dry_run "$cmd"
         return 0
