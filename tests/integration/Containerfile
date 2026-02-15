@@ -1,20 +1,19 @@
 # Use Fedora Latest Stable
-FROM registry.fedoraproject.org/fedora:latest
+FROM registry.fedoraproject.org/fedora:41
 
 # --- Systemd Container Standards ---
 ENV container=docker
 STOPSIGNAL SIGRTMIN+3
 
 # --- Build & Runtime Dependency Installation ---
-# - gcc/make/binutils: Standard compilation
-# - glibc-static: Required for 'make tiny' (static linking) on Fedora
-# - systemd-networkd/iwd: RXNM core backends
-# - NetworkManager/firewalld: Installed just to be masked (prevents interference)
+# Note: dbus-daemon is CRITICAL for systemd-networkd/machinectl interaction
 RUN dnf -y install \
     gcc \
     make \
     binutils \
     glibc-static \
+    valgrind \
+    diffutils \
     systemd \
     systemd-networkd \
     systemd-resolved \
@@ -27,11 +26,15 @@ RUN dnf -y install \
     bash \
     kmod \
     dbus \
+    dbus-daemon \
     iwd \
     hostname \
+    ethtool \
+    tcpdump \
     && dnf clean all
 
 # --- Service Hygiene ---
+# Remove systemd units that might conflict in a container
 RUN cd /lib/systemd/system/sysinit.target.wants/ && \
     for i in *; do [ $i == systemd-tmpfiles-setup.service ] || rm -f $i; done && \
     rm -f /lib/systemd/system/multi-user.target.wants/* && \

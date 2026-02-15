@@ -1,24 +1,27 @@
 # 70-usb-gadget.network
+# Single standalone configuration for USB Gadgets (NCM/ECM/RNDIS)
+# Replaces legacy bridge setups.
+
 [Match]
-Name=usb*
+Name=usb* rndis*
 Type=gadget
 
 [Link]
-# Consistent "ROCKNX" MAC for standalone mode
+# Consistent "ROCKNX" MAC for host-side recognition consistency
 MACAddress=52:4F:43:4B:4E:58
 
 [Network]
-Description=Rocknix Gadget Network (Link-Local Host)
-# Consistent RXNM default
-Address=169.254.10.2/24
+Description=Rocknix USB Gadget Host
+# High RFC1918 to avoid local subnet conflicts
+Address=192.168.213.1/24
 DHCPServer=yes
 LinkLocalAddressing=yes
 MulticastDNS=no
 LLMNR=yes
 
 [DHCPServer]
-PoolOffset=1
-PoolSize=2
+PoolOffset=10
+PoolSize=50
 EmitDNS=no
-# Required for Windows to classify network as Private/Trusted
+# Required for Windows to classify network as Private/Trusted without a gateway
 EmitRouter=yes

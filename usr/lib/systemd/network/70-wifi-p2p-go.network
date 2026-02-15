@@ -8,7 +8,7 @@ Description=Rocknix Wi-Fi P2P Group Owner
 Address=192.168.49.1/24
 DHCPServer=yes
 IPMasquerade=ipv4
-IPForwarding=yes
+IPv4Forwarding=yes
 # Ensure local name resolution works for the group(either on or avahi seperately running)
 MulticastDNS=no
 LLMNR=yes

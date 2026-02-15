@@ -130,7 +130,8 @@ _task_profile_load_global() {
 }
 
 action_profile() {
-    local cmd="$1"; local name="$2"; local iface="$3"; local file_path="$4"
+    # Fix: Initialize local variables with defaults to prevent 'unbound variable' errors under set -u
+    local cmd="${1:-}"; local name="${2:-}"; local iface="${3:-}"; local file_path="${4:-}"
     
     if [[ "$cmd" == "save" || "$cmd" == "load" ]] && [ -z "$name" ]; then
         name="default"

@@ -1662,8 +1662,12 @@ void cmd_append_config(char *path, char *line) {
     
     if (!found) {
         lseek(fd, 0, SEEK_END);
-        write(fd, line, strlen(line));
-        write(fd, "\n", 1);
+        if (write(fd, line, strlen(line)) < 0) {
+            fprintf(stderr, "Error appending to file\n");
+        }
+        if (write(fd, "\n", 1) < 0) {
+            fprintf(stderr, "Error appending newline\n");
+        }
         fsync(fd);
     }
     

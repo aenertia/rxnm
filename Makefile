@@ -101,7 +101,8 @@ install: all
 	@echo "[INSTALL] Systemd network templates..."
 	@mkdir -p $(SYSTEMD_NET_DIR)
 	@cp -f usr/lib/systemd/network/* $(SYSTEMD_NET_DIR)/
-	@chmod 644 $(SYSTEMD_NET_DIR)/*.network $(SYSTEMD_NET_DIR)/*.netdev
+	# Fixed: Chmod everything in target dir instead of specific extensions that might not exist
+	@chmod 644 $(SYSTEMD_NET_DIR)/*
 
 	@echo "[INSTALL] System sleep hooks..."
 	@mkdir -p $(SYSTEMD_SLEEP_DIR)

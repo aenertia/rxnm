@@ -234,11 +234,12 @@ print_table() {
 # Description: Outputs success data in the requested format (JSON, Table, or Human).
 # Arguments: $1 = JSON payload (string)
 json_success() {
-    local data
-    if [ -p /dev/stdin ]; then
+    local data="${1:-}"
+    
+    # Prioritize argument if provided. Only check stdin if arg is empty.
+    # This prevents accidental consumption of stdin pipes in CI environments.
+    if [ -z "$data" ] && [ -p /dev/stdin ]; then
         data=$(cat)
-    else
-        data="${1:-}"
     fi
     if [ -z "$data" ]; then data="{}"; fi
     
@@ -584,12 +585,10 @@ validate_ip() {
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
     fi
-    if command -v ip >/dev/null; then
-        if ! ip route get "$clean_ip" >/dev/null 2>&1; then
-             json_error "Invalid IP address: $clean_ip" "1"
-             return 1
-        fi
-    fi
+    # REMOVED: ip route get check.
+    # In isolated namespaces (like during tests or early boot), routing tables are empty.
+    # 'ip route get' fails with 'Network is unreachable', preventing valid static IP assignment.
+    # We rely on regex validation above.
     return 0
 }
 

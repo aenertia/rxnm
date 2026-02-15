@@ -82,9 +82,17 @@ build_network_config() {
     [ -n "$vlan" ] && config+="VLAN=${vlan}\n"
     
     # Routing / Resolution
-    [ -n "$metric" ] && config+="RouteMetric=${metric}\n"
+    # NOTE: RouteMetric in [Network] is only supported in newer systemd versions.
+    # For maximum compatibility (and to avoid log errors), we skip it for static configs.
+    # Users must use specific routes if they need weighted routing in static mode.
+    # if [ "$dhcp" == "no" ] && [ -n "$metric" ]; then
+    #    config+="RouteMetric=${metric}\n"
+    # fi
+    
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
-    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nIPMasquerade=no\n"
+    # IPMasquerade removed (defaults to no, deprecated in some versions)
+    # ConfigureWithoutCarrier helps with virtual/flaky links in tests/boot
+    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ -n "$ipv6_privacy" ]; then
         config+="IPv6PrivacyExtensions=${ipv6_privacy}\n"
@@ -111,8 +119,11 @@ build_network_config() {
     fi
     
     # DHCP Client Options
-    if [ -n "$dhcp_client_id" ]; then
-         config+="\n[DHCPv4]\nClientIdentifier=${dhcp_client_id}\n"
+    if [ "$dhcp" != "no" ] || [ -n "$dhcp_client_id" ]; then
+         config+="\n[DHCPv4]\n"
+         [ -n "$dhcp_client_id" ] && config+="ClientIdentifier=${dhcp_client_id}\n"
+         # Fix: Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
+         [ "$dhcp" != "no" ] && [ -n "$metric" ] && config+="RouteMetric=${metric}\n"
     fi
     
     if [ "$ipv6_pd" == "no" ]; then
@@ -129,7 +140,8 @@ build_network_config() {
             [ -n "$r_gw" ] && config+="Gateway=${r_gw}\n"
             if [ -n "$r_metric" ]; then 
                 config+="Metric=${r_metric}\n"
-            elif [ -n "$metric" ]; then 
+            elif [ -n "$metric" ] && [ "$dhcp" == "no" ]; then 
+                # Explicitly inherit base metric for manual static routes
                 config+="Metric=${metric}\n"
             fi
         done
@@ -165,9 +177,9 @@ build_gateway_config() {
     # Auto-detect IP if missing (useful for usb gadgets)
     if [ -z "$ip" ]; then
         local detected_ip=""
+        # REFACTOR: Removed check for legacy bridge template
         if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
              detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
-             [ -z "$detected_ip" ] && detected_ip=$(_get_system_template_val "70-br-usb-host.network" "Address")
         elif [[ "$iface" == wlan* ]] && [ "$share" == "true" ]; then
              detected_ip=$(_get_system_template_val "71-wifi-ap.network" "Address")
         fi
@@ -176,8 +188,8 @@ build_gateway_config() {
         else
             if [ "$share" == "true" ]; then ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
             else
-                 # Link-Local default for gadgets
-                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then ip="169.254.10.2/24"
+                 # Default for gadgets match templates (High RFC1918)
+                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then ip="192.168.213.1/24"
                  else ip="169.254.1.1/16" ; fi
             fi
         fi
@@ -186,7 +198,7 @@ build_gateway_config() {
     local config="[Match]\nName=${iface}\n\n[Network]\nDescription=${desc}\n"
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     [ -n "$ip" ] && config+="Address=${ip}\n"
-    config+="LinkLocalAddressing=yes\n"
+    config+="LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ "$share" == "true" ]; then
         # Router Mode: Forwarding + RA

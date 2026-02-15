@@ -2,145 +2,239 @@
 set -e
 
 # ==============================================================================
-# RXNM LIVE INTEROPERABILITY TEST SUITE
+# RXNM LIVE INTEROPERABILITY TEST SUITE (Systemd-nspawn)
 # ==============================================================================
-# Orchestrates two systemd containers connected via a private bridge.
-# Node A (Server): Creates a bridge (br-usb) and serves DHCP.
-# Node B (Client): Connects via eth0 and requests DHCP.
+# Uses systemd-nspawn "machines" connected via a native Linux bridge.
+# Bootstraps Fedora rootfs via Docker if host DNF is missing.
 #
-# ARCHITECTURE MIMICRY:
-# - /run, /tmp: tmpfs (RAM) - Wiped on boot/restart (Standard Systemd Req)
-# - /storage:   Volume (Disk) - Persists across reboots (Rocknix specific)
+# HARNESS DESIGN:
+# - Host: Creates unmanaged bridge 'rxnm-br'
+# - Server (rxnm-server): Static IP 192.168.213.1, DHCP Server enabled
+# - Client (rxnm-client): DHCP Client
 # ==============================================================================
 
-# Cleanup function to ensure no zombie containers/volumes are left
+# Constants
+BRIDGE="rxnm-br"
+ROOTFS="/var/lib/machines/fedora-rxnm"
+SERVER="rxnm-server"
+CLIENT="rxnm-client"
+PCAP_FILE="/tmp/rxnm_bridge.pcap"
+TCPDUMP_PID=""
+
+# Helper for colored output
+info() { echo -e "\033[0;36m[TEST]\033[0m $1"; }
+err() { echo -e "\033[0;31m[FAIL]\033[0m $1"; }
+
+# CI-friendly execution helper
+# Uses systemd-run -M which is the standard for non-interactive execution in containers
+m_exec() {
+    local machine=$1
+    shift
+    # --setenv is critical to avoid Exit 203 (command not found) in transient units
+    # --wait --pipe ensures we get output and wait for completion
+    # --property=CollectMode=inactive ensures clean unit teardown in polling loops
+    timeout 40s systemd-run -M "$machine" \
+        --quiet --wait --pipe \
+        --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --property=After=dbus.service \
+        --property=CollectMode=inactive \
+        -- "$@"
+}
+
 cleanup() {
-    echo "--- Teardown ---"
-    podman rm -f rxnm-server rxnm-client 2>/dev/null || true
-    podman volume rm -f rxnm-server-storage rxnm-client-storage 2>/dev/null || true
-    podman network rm rxnm-net 2>/dev/null || true
+    EXIT_CODE=$?
+    echo "--- Teardown (Exit Code: $EXIT_CODE) ---"
+    
+    if [ -n "$TCPDUMP_PID" ]; then
+        kill "$TCPDUMP_PID" 2>/dev/null || true
+        wait "$TCPDUMP_PID" 2>/dev/null || true
+    fi
+    
+    if [ $EXIT_CODE -ne 0 ] && [ ! -f /tmp/rxnm_success ]; then
+        err "TEST FAILED - DUMPING LOGS"
+        
+        echo ">>> NETWORK TRAFFIC (TCPDUMP) <<<"
+        if [ -f "$PCAP_FILE" ] && command -v tcpdump >/dev/null; then
+            tcpdump -n -e -vv -r "$PCAP_FILE" || echo "Error parsing pcap"
+        fi
+        
+        [ -f "/tmp/$SERVER.log" ] && { echo ">>> SERVER CONSOLE <<<"; cat "/tmp/$SERVER.log"; }
+        [ -f "/tmp/$CLIENT.log" ] && { echo ">>> CLIENT CONSOLE <<<"; cat "/tmp/$CLIENT.log"; }
+
+        echo ">>> SERVER JOURNAL <<<"
+        journalctl -M $SERVER -u systemd-networkd -n 100 --no-pager || true
+        
+        echo ">>> SERVER NETWORK CONFIGURATION <<<"
+        m_exec $SERVER cat /run/systemd/network/75-static-host0.network || true
+        
+        echo ">>> CLIENT JOURNAL <<<"
+        journalctl -M $CLIENT -u systemd-networkd -n 100 --no-pager || true
+        
+        echo ">>> FINAL STATUS CHECK <<<"
+        m_exec $SERVER networkctl status host0 || true
+        m_exec $SERVER ip addr show host0 || true
+        m_exec $CLIENT ip addr show host0 || true
+    fi
+
+    machinectl terminate $SERVER 2>/dev/null || true
+    machinectl terminate $CLIENT 2>/dev/null || true
+    
+    ip link delete $BRIDGE 2>/dev/null || true
+    rm -f /tmp/rxnm_success
+    rm -f "$PCAP_FILE" 2>/dev/null
 }
 trap cleanup EXIT
 
-echo "--- Booting Test Environment ---"
+# Ensure host environment is ready for machine management
+sudo systemctl start systemd-machined || true
 
-# Create persistent storage volumes (Simulating SD Card/Internal Flash)
-podman volume create rxnm-server-storage
-podman volume create rxnm-client-storage
-
-# Start Server Node
-# --privileged: Required for network stack manipulation, namespaces, and cgroups
-# --mount type=tmpfs: Ensures /run is volatile (Mandatory for systemd)
-# -v ...:/storage: Simulates the persistent partition
-podman run -d --privileged --name rxnm-server \
-    --network rxnm-net \
-    --hostname server \
-    --mount type=tmpfs,destination=/run \
-    --mount type=tmpfs,destination=/tmp \
-    -v rxnm-server-storage:/storage \
-    -v $(pwd):/usr/src/rxnm \
-    rxnm-test-node
-
-# Start Client Node
-podman run -d --privileged --name rxnm-client \
-    --network rxnm-net \
-    --hostname client \
-    --mount type=tmpfs,destination=/run \
-    --mount type=tmpfs,destination=/tmp \
-    -v rxnm-client-storage:/storage \
-    -v $(pwd):/usr/src/rxnm \
-    rxnm-test-node
-
-echo "Waiting for systemd initialization (5s)..."
-sleep 5
-
-# Validate services are actually running and masked ones are dead
-echo "[Health] Checking for interference..."
-if podman exec rxnm-server systemctl is-active --quiet NetworkManager; then
-    echo "FAIL: NetworkManager is active! Masking failed."
-    exit 1
-fi
-echo "PASS: NetworkManager is dead. networkd is free to operate."
-
-echo "--- Deploying RXNM Stack ---"
-# Compile and install RXNM from the mounted source inside both containers
-podman exec rxnm-server bash -c "cd /usr/src/rxnm && make install"
-podman exec rxnm-client bash -c "cd /usr/src/rxnm && make install"
-
-echo "--- Scenario: USB Gadget Bridge (Server) <-> DHCP Client (Client) ---"
-
-# ==============================================================================
-# SERVER CONFIGURATION (The "Device")
-# We simulate the device acting as a USB Host/Gadget Router
-# ==============================================================================
-echo "[Server] Configuring Bridge with DHCP Server..."
-
-# 1. Create the bridge 'br-usb'. 
-# Note: Creating 'br-usb' triggers the default system template 
-# '70-br-usb-host.network' (installed by rxnm) which enables DHCPServer=yes.
-podman exec rxnm-server rxnm bridge create br-usb
-
-# 2. Add eth0 (link to client) to the bridge
-# This generates a config that enslaves eth0 to br-usb, effectively making
-# eth0 the "cable" connecting the client to our DHCP server.
-podman exec rxnm-server rxnm bridge add-member eth0 --bridge br-usb
-
-# ==============================================================================
-# CLIENT CONFIGURATION (The "PC" or "Peer")
-# We simulate a standard client connecting to the device
-# ==============================================================================
-echo "[Client] Configuring eth0 as DHCP Client..."
-# This generates a standard DHCP client config for eth0
-podman exec rxnm-client rxnm interface eth0 set dhcp
-
-echo "Waiting for DHCP negotiation and Link Training (10s)..."
-sleep 10
-
-# ==============================================================================
-# VERIFICATION
-# ==============================================================================
-echo "--- Verifying State ---"
-
-# 1. Check Server State
-echo "[Server] Interface Status (br-usb):"
-podman exec rxnm-server rxnm interface br-usb show --simple
-# Expecting: 169.254.10.2 (defined in 70-br-usb-host.network)
-
-# 2. Check Client State
-echo "[Client] Interface Status (eth0):"
-podman exec rxnm-client rxnm interface eth0 show --simple
-
-# Extract IPs for validation
-SERVER_IP=$(podman exec rxnm-server ip -j addr show br-usb | jq -r '.[0].addr_info[0].local')
-CLIENT_IP=$(podman exec rxnm-client ip -j addr show eth0 | jq -r '.[0].addr_info[0].local')
-
-echo "Server IP: $SERVER_IP"
-echo "Client IP: $CLIENT_IP"
-
-# Validate Client IP Range (Should be 169.254.10.x based on RXNM template)
-if [[ "$CLIENT_IP" != "169.254.10."* ]]; then
-    echo "FAIL: Client IP ($CLIENT_IP) is not in the expected range (169.254.10.x)."
-    echo "This implies the default template was not applied or DHCP failed."
-    echo "--- Server Logs (networkd) ---"
-    podman exec rxnm-server journalctl -u systemd-networkd --no-pager | tail -n 20
-    exit 1
+info "Setting up Host Bridge..."
+if ! ip link show $BRIDGE >/dev/null 2>&1; then
+    ip link add $BRIDGE type bridge
+    ip link set $BRIDGE up
+    sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+    sysctl -w net.ipv6.conf.$BRIDGE.disable_ipv6=1 2>/dev/null || true
+    sysctl -w net.ipv4.conf.$BRIDGE.forwarding=1 2>/dev/null || true
 fi
 
-# 3. Connectivity Test (Bidirectional Traffic)
-echo "[Test] Pinging Server ($SERVER_IP) from Client..."
-if podman exec rxnm-client ping -c 3 "$SERVER_IP"; then
-    echo "PASS: Client -> Server traffic OK."
-else
-    echo "FAIL: Client cannot reach Server."
-    exit 1
+if command -v tcpdump >/dev/null; then
+    info "Starting packet capture on $BRIDGE..."
+    tcpdump -U -i "$BRIDGE" -w "$PCAP_FILE" -s 0 >/dev/null 2>&1 &
+    TCPDUMP_PID=$!
 fi
 
-echo "[Test] Pinging Client ($CLIENT_IP) from Server..."
-if podman exec rxnm-server ping -c 3 "$CLIENT_IP"; then
-    echo "PASS: Server -> Client traffic OK."
-else
-    echo "FAIL: Server cannot reach Client."
-    exit 1
+info "Building Test RootFS..."
+if [ ! -d "$ROOTFS" ]; then
+    mkdir -p "$ROOTFS"
+    
+    if command -v dnf >/dev/null 2>&1; then
+        echo "Using host DNF to bootstrap..."
+        dnf -y --installroot="$ROOTFS" --releasever=41 install \
+            systemd systemd-networkd systemd-resolved iwd dbus-daemon \
+            iproute iputils procps-ng \
+            NetworkManager firewalld \
+            ethtool tcpdump hostname \
+            bash jq sed coreutils \
+            --setopt=install_weak_deps=False
+    elif command -v docker >/dev/null 2>&1; then
+        echo "Using Docker to bootstrap Fedora rootfs..."
+        docker build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
+        CID=$(docker create rxnm-test-base)
+        docker export "$CID" | tar -x -C "$ROOTFS"
+        docker rm "$CID"
+        cp /etc/resolv.conf "$ROOTFS/etc/"
+    else
+        err "No bootstrap tool found."
+        exit 1
+    fi
+        
+    ln -sf /dev/null "$ROOTFS/etc/systemd/system/NetworkManager.service"
+    ln -sf /dev/null "$ROOTFS/etc/systemd/system/firewalld.service"
+    ln -sf /dev/null "$ROOTFS/etc/systemd/system/systemd-update-utmp.service"
+    ln -sf /dev/null "$ROOTFS/usr/lib/systemd/network/80-container-host0.network"
+    
+    mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
+    ln -sf /usr/lib/systemd/system/systemd-networkd.service "$ROOTFS/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+    ln -sf /usr/lib/systemd/system/systemd-resolved.service "$ROOTFS/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+    
+    # MOCKING HARDENING
+    cat <<'MOCK' > "$ROOTFS/usr/bin/sysctl"
+#!/bin/bash
+exit 0
+MOCK
+    chmod +x "$ROOTFS/usr/bin/sysctl"
+    cp "$ROOTFS/usr/bin/sysctl" "$ROOTFS/usr/bin/rfkill"
+
+    mkdir -p "$ROOTFS/storage/.config/network"
+    mkdir -p "$ROOTFS/var/lib/iwd"
+    mkdir -p "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network"
+    
+    rm -rf "$ROOTFS/etc/systemd/network"
+    ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
 fi
 
-echo "--- Scenario Complete: SUCCESS ---"
+info "Installing RXNM into RootFS..."
+mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
+mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/lib"
+cp -f bin/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
+cp -f lib/*.sh "$ROOTFS/usr/lib/rocknix-network-manager/lib/"
+cp -f bin/rocknix-network-manager "$ROOTFS/usr/bin/rocknix-network-manager"
+cp -f bin/rxnm "$ROOTFS/usr/bin/rxnm"
+chmod +x "$ROOTFS/usr/bin/rocknix-network-manager" "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
+mkdir -p "$ROOTFS/usr/lib/systemd/network"
+cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/"
+
+info "Booting Machines..."
+COMMON_ARGS="--network-bridge=$BRIDGE --boot --capability=all --private-users=no --system-call-filter=add_key:keyctl:bpf --ephemeral"
+
+systemd-nspawn -D "$ROOTFS" -M $SERVER $COMMON_ARGS > /tmp/$SERVER.log 2>&1 &
+systemd-nspawn -D "$ROOTFS" -M $CLIENT $COMMON_ARGS > /tmp/$CLIENT.log 2>&1 &
+
+info "Waiting for systemd initialization..."
+for i in {1..30}; do
+    if machinectl status $SERVER >/dev/null 2>&1 && machinectl status $CLIENT >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+check_ready() {
+    local machine=$1
+    info "Waiting for $machine readiness..."
+    for i in {1..60}; do
+        if m_exec "$machine" systemctl is-active systemd-networkd 2>/dev/null | grep -q "active"; then
+            info "$machine networkd is active."
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+if ! check_ready $SERVER; then err "$SERVER failed"; exit 1; fi
+if ! check_ready $CLIENT; then err "$CLIENT failed"; exit 1; fi
+
+info "Configuring VETH Checksums..."
+m_exec $SERVER ethtool -K host0 tx off || true
+m_exec $CLIENT ethtool -K host0 tx off || true
+
+info "Initializing RXNM..."
+m_exec $SERVER rxnm system setup
+m_exec $CLIENT rxnm system setup
+
+info "Applying Configurations..."
+info "[Server] Setting Static IP..."
+m_exec $SERVER rxnm interface host0 set static 192.168.213.1/24
+
+info "[Server] Injecting DHCP Server logic..."
+m_exec $SERVER /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
+
+m_exec $SERVER networkctl reload
+m_exec $SERVER networkctl reconfigure host0
+
+info "[Client] Requesting DHCP..."
+m_exec $CLIENT rxnm interface host0 set dhcp
+m_exec $CLIENT networkctl reload
+m_exec $CLIENT networkctl reconfigure host0
+
+info "Waiting for DHCP Convergence..."
+for ((i=1; i<=30; i++)); do
+    # Extract IP using jq from ip command JSON output - filter specifically for family inet (IPv4)
+    IP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty')
+    
+    if [[ "$IP" == "192.168.213."* ]]; then
+        info "✓ IP Acquired: $IP"
+        if m_exec $CLIENT ping -c 1 192.168.213.1 >/dev/null; then
+            info "✓ Bidirectional Link Verified"
+            touch /tmp/rxnm_success
+            exit 0
+        fi
+    fi
+    
+    STATE=$(m_exec $CLIENT networkctl --json=short status host0 2>/dev/null | jq -r '.OperationalState // "unknown"' || echo "unreachable")
+    echo -n "($STATE)."
+    sleep 2
+done
+
+err "Convergence timeout."
+exit 1

@@ -22,6 +22,7 @@ AGENT_BIN="$BIN_DIR/rxnm-agent"
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 pass() { echo -e "${GREEN}✓ PASS:${NC} $1"; }
@@ -41,9 +42,9 @@ export STATE_DIR="$TEST_ROOT/var/lib"
 export RUN_DIR="$TEST_ROOT/run"
 mkdir -p "$CONF_DIR" "$STATE_DIR" "$RUN_DIR"
 
-# Mock required system tools if not root/available
-if [ "$EUID" -ne 0 ]; then
-    warn "Running as non-root: mocking 'ip' command for Service tests"
+# Mock required system tools if not root/available OR if running in CI where namespaces are restricted
+if [ "$EUID" -ne 0 ] || [ "${GITHUB_ACTIONS}" == "true" ]; then
+    warn "Running in restricted mode (Non-root or CI): mocking 'ip' command for Service tests"
     mkdir -p "$TEST_ROOT/bin"
     cat <<'EOF' > "$TEST_ROOT/bin/ip"
 #!/bin/bash
@@ -68,6 +69,7 @@ SERVICE_NAME="rc3_test_ns"
 
 # Create (Use --json for deterministic grep)
 out=$("$RXNM" service create "$SERVICE_NAME" --json)
+# Loose check: Look for "created" string anywhere in the output
 if echo "$out" | grep -q "created"; then
     pass "Service creation (mocked/real)"
 else
@@ -85,6 +87,7 @@ fi
 
 # Delete (Use --json for deterministic grep)
 out=$("$RXNM" service delete "$SERVICE_NAME" --json)
+# Loose check: Look for "deleted" string anywhere in the output
 if echo "$out" | grep -q "deleted"; then
     pass "Service deletion"
 else

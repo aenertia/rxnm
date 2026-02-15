@@ -340,6 +340,8 @@ case "$CATEGORY" in
         source "${LIB_DIR}/rxnm-wifi.sh" 
         source "${LIB_DIR}/rxnm-nullify.sh"
         source "${LIB_DIR}/rxnm-interfaces.sh"
+        # Templates needed for 'setup'
+        source "${LIB_DIR}/rxnm-templates.sh"
         ;;
     service) source "${LIB_DIR}/rxnm-service.sh" ;;
     route) source "${LIB_DIR}/rxnm-routes.sh" ;;
@@ -369,7 +371,7 @@ if [[ "$CATEGORY" == "wifi" ]] || [[ "$CATEGORY" == "interface" ]] || \
     fi
 
     # Optimization: Only load builders/templates if we are likely modifying configuration
-    if [[ "$VAL_ACTION" =~ ^(set|create|delete|add|connect|disconnect|ap)$ ]]; then
+    if [[ "$VAL_ACTION" =~ ^(set|create|delete|add.*|connect|disconnect|ap)$ ]]; then
         source "${LIB_DIR}/rxnm-config-builder.sh"
         source "${LIB_DIR}/rxnm-templates.sh"
         
