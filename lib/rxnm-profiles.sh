@@ -39,7 +39,8 @@ _task_profile_save_global() {
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    rm -rf "$profile_dir"
+    # Safety Check: SC2115 - Prevent expansion to root if vars empty
+    rm -rf "${profile_dir:?}/"
     mkdir -p "$profile_dir"
     
     # Save Networkd state
@@ -131,7 +132,8 @@ _task_profile_load_global() {
 
 action_profile() {
     # Fix: Initialize local variables with defaults to prevent 'unbound variable' errors under set -u
-    local cmd="${1:-}"; local name="${2:-}"; local iface="${3:-}"; local file_path="${4:-}"
+    local cmd="${1:-}"; local name="${2:-}"; local iface="${3:-}";
+    # SC2034: file_path unused fixed by removal (it was indeed unused in previous logic)
     
     if [[ "$cmd" == "save" || "$cmd" == "load" ]] && [ -z "$name" ]; then
         name="default"

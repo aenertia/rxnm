@@ -19,7 +19,8 @@ jobs:
       run: |
         sudo apt-get update
         # Install systemd-container for machinectl/nspawn and bridge-utils for networking
-        sudo apt-get install -y systemd-container bridge-utils dbus-user-session
+        # Added shellcheck for static analysis
+        sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck
         
         # --- CI HARDENING FIXES ---
         # 1. Disable AppArmor: It blocks nspawn mounts in nested environments
@@ -41,6 +42,9 @@ jobs:
       run: |
         echo "=== PHASE 1: Build & Unit Tests ==="
         make tiny
+        
+        # Run linting explicitly (will also fail build if shellcheck finds errors)
+        make lint
         
         # Run foundation tests
         export GITHUB_ACTIONS=true

@@ -43,7 +43,7 @@ SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check dirs constants tiny test-all install verify
+.PHONY: all clean check lint dirs constants tiny test-all install verify
 
 all: dirs constants $(TARGET)
 
@@ -116,6 +116,11 @@ clean:
 	@rm -f $(TARGET)
 	@rm -f $(CONSTANTS_HEADER)
 
+# New: Static Analysis
+lint:
+	@echo "[TEST] Running ShellCheck..."
+	@bash tests/test_shellcheck.sh
+
 # Quick check (Foundation + Phase 2 Logic)
 check: all
 	@echo "[TEST] Running Foundation Tests..."
@@ -123,7 +128,8 @@ check: all
 	@bash tests/test_phase2.sh
 
 # Full Phase 3 Validation (Updated for RC3)
-test-all: all
+# Now includes linting as a prerequisite
+test-all: all lint
 	@echo "[TEST] Running Full Validation Suite..."
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
