@@ -70,8 +70,12 @@ info "Scanning ${#SOURCES[@]} shell scripts with ShellCheck..."
 # SC2053: Quote rhs of == (Style).
 # SC2181: Check exit code directly (Style).
 # SC2046: Quote $(...) (Word splitting intended for lists).
+# SC2002: Useless cat (Style preference for pipelines).
+# SC2120: Function references arguments but none passed (Optional args).
+# SC2119: Use foo "$@" if function's $1 should mean script's $1 (Optional args).
+# SC2317: Command appears unreachable (False positive on trap functions).
 
-EXCLUDES="SC1090,SC1091,SC2148,SC2034,SC2153,SC2329,SC2155,SC2016,SC2164,SC2188,SC2086,SC2129,SC2001,SC2015,SC2295,SC2053,SC2181,SC2046"
+EXCLUDES="SC1090,SC1091,SC2148,SC2034,SC2153,SC2329,SC2155,SC2016,SC2164,SC2188,SC2086,SC2129,SC2001,SC2015,SC2295,SC2053,SC2181,SC2046,SC2002,SC2120,SC2119,SC2317"
 
 # Run check
 if shellcheck -e "$EXCLUDES" --format=tty --color=always "${SOURCES[@]}"; then
