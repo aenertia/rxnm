@@ -119,6 +119,25 @@ else
     echo "// Warning: Could not extract LOW_POWER_SOCS regex" >> "$HEADER_FILE"
     echo "#define LOW_POWER_SOCS { NULL }" >> "$HEADER_FILE"
 fi
+echo "" >> "$HEADER_FILE"
+
+echo "// --- Kernel Header Sync (Drift Guard) ---" >> "$HEADER_FILE"
+# Check standard header path for IFLA_XDP_FLAGS definition
+# This helps us avoid the magic number '3' if the build env has valid headers
+# We use grep to find the define and extract the value (usually 3)
+HEADER_VAL=""
+if [ -f "/usr/include/linux/if_link.h" ]; then
+    HEADER_VAL=$(grep -E "^\s*#define\s+IFLA_XDP_FLAGS\s+[0-9]+" /usr/include/linux/if_link.h | head -n1 | awk '{print $3}')
+fi
+
+if [ -n "$HEADER_VAL" ]; then
+    echo "#define SYNC_IFLA_XDP_FLAGS $HEADER_VAL" >> "$HEADER_FILE"
+    echo "// Synced from /usr/include/linux/if_link.h" >> "$HEADER_FILE"
+else
+    # Fallback to known stable value (3) if not found in build env
+    echo "#define SYNC_IFLA_XDP_FLAGS 3" >> "$HEADER_FILE"
+    echo "// Fallback: Header definition not found" >> "$HEADER_FILE"
+fi
 
 cat <<EOF >> "$HEADER_FILE"
 

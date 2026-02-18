@@ -137,6 +137,16 @@ bool g_filter_table = true; /* If false, dump all tables */
 #define IFLA_XDP_FD 1
 #endif
 
+// Guard against missing IFLA_XDP_FLAGS (Usually type 3)
+// Use SYNC_IFLA_XDP_FLAGS if generated, else fallback to 3
+#ifndef IFLA_XDP_FLAGS
+#ifdef SYNC_IFLA_XDP_FLAGS
+#define IFLA_XDP_FLAGS SYNC_IFLA_XDP_FLAGS
+#else
+#define IFLA_XDP_FLAGS 3
+#endif
+#endif
+
 // BPF syscall wrapper
 static int bpf(int cmd, union bpf_attr *attr, unsigned int size) {
     return syscall(__NR_bpf, cmd, attr, size);
@@ -1523,8 +1533,8 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     // 2. Add IFLA_XDP_FLAGS (if non-zero)
     if (flags != 0) {
         struct rtattr *flags_attr = (struct rtattr *)((char *)xdp_attr + xdp_len);
-        // Note: IFLA_XDP_FLAGS is usually type 3 inside IFLA_XDP
-        flags_attr->rta_type = 3; 
+        // Using IFLA_XDP_FLAGS from header or fallback define
+        flags_attr->rta_type = IFLA_XDP_FLAGS; 
         flags_attr->rta_len = RTA_LENGTH(sizeof(int));
         memcpy(RTA_DATA(flags_attr), &flags, sizeof(int));
         xdp_len += RTA_ALIGN(flags_attr->rta_len);
@@ -1601,80 +1611,6 @@ void cmd_nullify_xdp(char *iface, char *action) {
             exit(1);
         }
         printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"disabled\", \"iface\": \"%s\"}\n", iface);
-    }
-}
-
-/**
- * @brief Nullify network stack (zero-stack state)
- */
-void cmd_nullify(const char *action) {
-    if (strcmp(action, "enable") == 0) {
-        write_sysctl("/proc/sys/net/ipv4/conf/all/disable_ipv4", "1");
-        write_sysctl("/proc/sys/net/ipv6/conf/all/disable_ipv6", "1");
-        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh1", "0");
-        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh2", "0");
-        write_sysctl("/proc/sys/net/ipv4/neigh/default/gc_thresh3", "0");
-        write_sysctl("/proc/sys/net/core/rmem_default", "4096");
-        write_sysctl("/proc/sys/net/core/wmem_default", "4096");
-        write_sysctl("/proc/sys/net/ipv4/tcp_congestion_control", "reno");
-        write_sysctl("/proc/sys/net/core/default_qdisc", "pfifo_fast");
-        write_sysctl("/proc/sys/net/ipv4/tcp_timestamps", "0");
-        write_sysctl("/proc/sys/net/ipv4/tcp_sack", "0");
-        write_sysctl("/proc/sys/net/core/netdev_max_backlog", "1");
-        write_sysctl("/proc/sys/net/core/bpf_jit_enable", "0");
-        
-        const char *buses[] = {"pci", "sdio"};
-        for (int i = 0; i < 2; i++) {
-            char path[512];
-            snprintf(path, sizeof(path), "/sys/bus/%s/devices", buses[i]);
-            DIR *dir = opendir(path);
-            if (dir) {
-                struct dirent *ent;
-                while ((ent = readdir(dir)) != NULL) {
-                    if (ent->d_name[0] == '.') continue;
-                    
-                    int is_net = 0;
-                    char dev_path[1024];
-                    snprintf(dev_path, sizeof(dev_path), "%s/%s", path, ent->d_name);
-                    
-                    char net_path[1048];
-                    snprintf(net_path, sizeof(net_path), "%s/net", dev_path);
-                    struct stat st;
-                    if (stat(net_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-                        is_net = 1;
-                    } else {
-                        char class_path[1048];
-                        snprintf(class_path, sizeof(class_path), "%s/class", dev_path);
-                        FILE *f = fopen(class_path, "r");
-                        if (f) {
-                            char class_val[32] = {0};
-                            if (fgets(class_val, sizeof(class_val), f)) {
-                                if (strncmp(class_val, "0x02", 4) == 0) is_net = 1;
-                            }
-                            fclose(f);
-                        }
-                    }
-                    
-                    if (is_net) {
-                        char unbind_path[1048];
-                        snprintf(unbind_path, sizeof(unbind_path), "%s/driver/unbind", dev_path);
-                        FILE *f = fopen(unbind_path, "w");
-                        if (f) {
-                            fprintf(f, "%s", ent->d_name);
-                            fclose(f);
-                        }
-                    }
-                }
-                closedir(dir);
-            }
-        }
-    } else if (strcmp(action, "disable") == 0) {
-        write_sysctl("/proc/sys/net/ipv4/conf/all/disable_ipv4", "0");
-        write_sysctl("/proc/sys/net/ipv6/conf/all/disable_ipv6", "0");
-        write_sysctl("/proc/sys/net/core/rmem_default", "212992");
-        write_sysctl("/proc/sys/net/core/wmem_default", "212992");
-        write_sysctl("/proc/sys/net/core/default_qdisc", "fq_codel");
-        write_sysctl("/proc/sys/net/core/bpf_jit_enable", "1");
     }
 }
 
