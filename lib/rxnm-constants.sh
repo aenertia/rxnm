@@ -15,8 +15,8 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.0.0}"
-: "${RXNM_API_VERSION:=1.0}"
+: "${RXNM_VERSION:=1.1.0-dev}"
+: "${RXNM_API_VERSION:=1.1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
 # Feature Flags
@@ -137,6 +137,8 @@ STORAGE_PAN_NET_FILE="${PERSISTENT_NET_DIR}/70-bluetooth-pan.network"
 STORAGE_BT_PIN_FILE="${PERSISTENT_NET_DIR}/bluetooth.pin"
 GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
 GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
+# v1.1.0: State caching for robust nullify restoration
+NULLIFY_STATE_FILE="${RUN_DIR}/nullify.state"
 
 # --- JSON Processor Detection ---
 # Detects the fastest available JSON processor (jaq > gojq > jq).

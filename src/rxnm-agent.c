@@ -14,6 +14,7 @@
  * 3. IPC: Talks directly to systemd-networkd & IWD via DBus socket.
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
  * 5. Namespace/Service: Native containerization primitives (unshare/mount/setns).
+ * 6. XDP/eBPF: Fast-path packet dropping for Nullify Mode.
  *
  * DESIGN PHILOSOPHY:
  * - No external dependencies (glibc/musl only).
@@ -52,6 +53,9 @@
 #include <ctype.h>
 #include <limits.h>
 #include <dirent.h>
+// New headers for BPF/XDP
+#include <linux/bpf.h>
+#include <sys/syscall.h>
 
 /* Generated SSoT Constants */
 #include "rxnm_generated.h"
@@ -118,6 +122,31 @@ bool g_filter_table = true; /* If false, dump all tables */
 #define NL80211_ATTR_STATION_INFO   21
 #define NL80211_ATTR_PARSE_MAX      400
 #define NL80211_STA_INFO_SIGNAL     7
+
+/* --- XDP Constants (Fallback definitions) --- */
+#ifndef XDP_FLAGS_SKB_MODE
+#define XDP_FLAGS_SKB_MODE (1 << 1)
+#endif
+#ifndef XDP_FLAGS_DRV_MODE
+#define XDP_FLAGS_DRV_MODE (1 << 2)
+#endif
+#ifndef IFLA_XDP
+#define IFLA_XDP 43
+#endif
+#ifndef IFLA_XDP_FD
+#define IFLA_XDP_FD 1
+#endif
+
+// BPF syscall wrapper
+static int bpf(int cmd, union bpf_attr *attr, unsigned int size) {
+    return syscall(__NR_bpf, cmd, attr, size);
+}
+
+// XDP Drop Program: r0 = 1 (XDP_DROP), exit
+struct bpf_insn xdp_drop_prog[] = {
+    { 0xb7, 0, 0, 0, 1 },
+    { 0x95, 0, 0, 0, 0 },
+};
 
 /* --- Structures --- */
 
@@ -1446,6 +1475,135 @@ void cmd_tune(char *profile) {
     printf("{\"success\": true, \"action\": \"tune\", \"profile\": \"%s\"}\n", profile ? profile : "client");
 }
 
+/* --- XDP/eBPF Logic --- */
+
+int load_xdp_drop_prog() {
+    // Construct bpf_attr manually to avoid libbpf dependency
+    union bpf_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.prog_type = BPF_PROG_TYPE_XDP;
+    attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
+    attr.insns = (unsigned long)xdp_drop_prog;
+    attr.license = (unsigned long)"GPL";
+    
+    // Call syscall directly
+    return bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+}
+
+int attach_xdp_prog(int ifindex, int fd, int flags) {
+    int sock = open_netlink_rt();
+    if (sock < 0) return -1;
+    
+    struct {
+        struct nlmsghdr n;
+        struct ifinfomsg i;
+        char buf[256];
+    } req;
+    
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+    req.n.nlmsg_type = RTM_SETLINK;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.n.nlmsg_seq = time(NULL);
+    req.i.ifi_family = AF_UNSPEC;
+    req.i.ifi_index = ifindex;
+    
+    // Construct Nested IFLA_XDP attribute
+    struct rtattr *xdp_attr = (struct rtattr *)((char *)&req + req.n.nlmsg_len);
+    xdp_attr->rta_type = IFLA_XDP | NLA_F_NESTED;
+    int xdp_len = sizeof(struct rtattr); // Start with header size
+    
+    // 1. Add IFLA_XDP_FD
+    struct rtattr *fd_attr = (struct rtattr *)((char *)xdp_attr + sizeof(struct rtattr));
+    fd_attr->rta_type = IFLA_XDP_FD;
+    fd_attr->rta_len = RTA_LENGTH(sizeof(int));
+    memcpy(RTA_DATA(fd_attr), &fd, sizeof(int));
+    xdp_len += RTA_ALIGN(fd_attr->rta_len);
+    
+    // 2. Add IFLA_XDP_FLAGS (if non-zero)
+    if (flags != 0) {
+        struct rtattr *flags_attr = (struct rtattr *)((char *)xdp_attr + xdp_len);
+        // Note: IFLA_XDP_FLAGS is usually type 3 inside IFLA_XDP
+        flags_attr->rta_type = 3; 
+        flags_attr->rta_len = RTA_LENGTH(sizeof(int));
+        memcpy(RTA_DATA(flags_attr), &flags, sizeof(int));
+        xdp_len += RTA_ALIGN(flags_attr->rta_len);
+    }
+    
+    xdp_attr->rta_len = xdp_len;
+    req.n.nlmsg_len += RTA_ALIGN(xdp_len);
+    
+    if (send(sock, &req, req.n.nlmsg_len, 0) < 0) {
+        close(sock);
+        return -1;
+    }
+    
+    // Read ACK
+    char buf[1024];
+    int len = recv(sock, buf, sizeof(buf), 0);
+    close(sock);
+    
+    if (len > 0) {
+        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+        if (nh->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(nh);
+            if (err->error != 0) return err->error;
+        }
+    }
+    
+    return 0;
+}
+
+void cmd_nullify_xdp(char *iface, char *action) {
+    if (!iface || !action) {
+        fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|disable>\n");
+        exit(1);
+    }
+    
+    int ifindex = if_nametoindex(iface);
+    if (ifindex == 0) {
+        fprintf(stderr, "Interface %s not found\n", iface);
+        exit(1);
+    }
+    
+    if (strcmp(action, "enable") == 0) {
+        int fd = load_xdp_drop_prog();
+        if (fd < 0) {
+            perror("BPF_PROG_LOAD failed");
+            exit(1);
+        }
+        
+        // Try Native (Driver) Mode first (default 0)
+        int err = attach_xdp_prog(ifindex, fd, 0);
+        if (err != 0) {
+            // Fallback to SKB (Generic) Mode
+            err = attach_xdp_prog(ifindex, fd, XDP_FLAGS_SKB_MODE);
+        }
+        
+        // Close FD (Kernel holds reference via attachment)
+        close(fd);
+        
+        if (err != 0) {
+            fprintf(stderr, "Failed to attach XDP: %s\n", strerror(-err));
+            exit(1);
+        }
+        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"enabled\", \"iface\": \"%s\"}\n", iface);
+        
+    } else if (strcmp(action, "disable") == 0) {
+        // Attach FD -1 to detach
+        int err = attach_xdp_prog(ifindex, -1, 0);
+        if (err != 0) {
+             err = attach_xdp_prog(ifindex, -1, XDP_FLAGS_SKB_MODE);
+        }
+        
+        if (err != 0) {
+            fprintf(stderr, "Failed to detach XDP: %s\n", strerror(-err));
+            exit(1);
+        }
+        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"disabled\", \"iface\": \"%s\"}\n", iface);
+    }
+}
+
 /**
  * @brief Nullify network stack (zero-stack state)
  */
@@ -1857,6 +2015,8 @@ char *g_monitor_thresh = NULL;
 char *g_connect_ssid = NULL;
 char *g_connect_iface = NULL;
 char *g_nullify_cmd = NULL;
+char *g_nullify_xdp_iface = NULL;
+char *g_nullify_xdp_action = NULL;
 char *g_ns_create = NULL;
 char *g_ns_delete = NULL;
 char *g_ns_exec_name = NULL;
@@ -1886,6 +2046,7 @@ int main(int argc, char *argv[]) {
         {"monitor-roam", required_argument, 0, 'M'},
         {"threshold", required_argument, 0, 'S'},
         {"nullify", required_argument, 0, 'N'},
+        {"nullify-xdp", required_argument, 0, 'X'},
         {"ns-create", required_argument, 0, 1001},
         {"ns-delete", required_argument, 0, 1002},
         {"ns-list", no_argument, 0, 1003},
@@ -1895,10 +2056,10 @@ int main(int argc, char *argv[]) {
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -1916,6 +2077,7 @@ int main(int argc, char *argv[]) {
             case 'C': g_connect_ssid = optarg; break;
             case 'i': g_connect_iface = optarg; break;
             case 'N': g_nullify_cmd = optarg; break;
+            case 'X': g_nullify_xdp_iface = optarg; break;
             case 1001: g_ns_create = optarg; break;
             case 1002: g_ns_delete = optarg; break;
             case 1003: cmd_ns_list(); return 0;
@@ -1933,6 +2095,18 @@ end_args:
     if (g_ns_exec_name) {
         // optind points to the next argument after --ns-exec <name>
         return cmd_ns_exec(g_ns_exec_name, argc - optind, argv + optind);
+    }
+    
+    // XDP Command: requires --nullify-xdp <iface> AND a following "enable/disable"
+    if (g_nullify_xdp_iface) {
+        // Look for next arg as action
+        if (optind < argc) {
+            cmd_nullify_xdp(g_nullify_xdp_iface, argv[optind]);
+            return 0;
+        } else {
+            fprintf(stderr, "Missing action for --nullify-xdp (enable|disable)\n");
+            return 1;
+        }
     }
     
     if (g_atomic_path) { cmd_atomic_write(g_atomic_path, g_perm_str); return 0; }

@@ -6,253 +6,207 @@
 # PURPOSE: Zero-Stack Nullification Mode
 # ARCHITECTURE: Logic / Nullify
 #
-# Implements complete network stack teardown for offline gaming/resource saving.
+# Implements network stack teardown for offline gaming/resource saving.
+# v1.1.0 Update: Prioritizes eBPF/XDP hardware offload.
+#                Replaces destructive unbinding with robust state caching.
 # -----------------------------------------------------------------------------
 
-_nullify_sysctl_enable() {
-    sysctl -w net.ipv4.conf.all.disable_ipv4=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-    sysctl -w net.ipv4.neigh.default.gc_thresh1=0 2>/dev/null || true
-    sysctl -w net.ipv4.neigh.default.gc_thresh2=0 2>/dev/null || true
-    sysctl -w net.ipv4.neigh.default.gc_thresh3=0 2>/dev/null || true
-    sysctl -w net.core.rmem_default=4096 2>/dev/null || true
-    sysctl -w net.core.wmem_default=4096 2>/dev/null || true
-    sysctl -w net.ipv4.tcp_congestion_control=reno 2>/dev/null || true
-    sysctl -w net.core.default_qdisc=pfifo_fast 2>/dev/null || true
-    sysctl -w net.ipv4.tcp_timestamps=0 2>/dev/null || true
-    sysctl -w net.ipv4.tcp_sack=0 2>/dev/null || true
-    sysctl -w net.core.netdev_max_backlog=1 2>/dev/null || true
-    sysctl -w net.core.bpf_jit_enable=0 2>/dev/null || true
-}
+# List of sysctls to manage during fallback mode (Bash First)
+NULLIFY_SYSCTLS=(
+    "net.ipv4.conf.all.disable_ipv4"
+    "net.ipv6.conf.all.disable_ipv6"
+    "net.ipv4.neigh.default.gc_thresh1"
+    "net.ipv4.neigh.default.gc_thresh2"
+    "net.ipv4.neigh.default.gc_thresh3"
+    "net.core.rmem_default"
+    "net.core.wmem_default"
+    "net.ipv4.tcp_congestion_control"
+    "net.core.default_qdisc"
+    "net.ipv4.tcp_timestamps"
+    "net.ipv4.tcp_sack"
+    "net.core.netdev_max_backlog"
+    "net.core.bpf_jit_enable"
+)
 
-_nullify_sysctl_disable() {
-    sysctl -w net.ipv4.conf.all.disable_ipv4=0 2>/dev/null || true
-    sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
-    sysctl -w net.core.rmem_default=212992 2>/dev/null || true
-    sysctl -w net.core.wmem_default=212992 2>/dev/null || true
-    sysctl -w net.core.default_qdisc=fq_codel 2>/dev/null || true
-    sysctl -w net.core.bpf_jit_enable=1 2>/dev/null || true
-}
-
-_nullify_bus_unbind() {
-    for bus in pci sdio; do
-        local dev_dir="/sys/bus/$bus/devices"
-        if [ -d "$dev_dir" ]; then
-            for dev in "$dev_dir"/*; do
-                [ -e "$dev" ] || continue
-                local is_net=0
-                if [ -d "$dev/net" ]; then
-                    is_net=1
-                elif [ -f "$dev/class" ]; then
-                    local class_val
-                    read -r class_val < "$dev/class"
-                    if [[ "$class_val" == 0x02* ]]; then
-                        is_net=1
-                    fi
-                fi
-                if [ "$is_net" -eq 1 ]; then
-                    local dev_name
-                    dev_name=$(basename "$dev")
-                    if [ -e "$dev/driver/unbind" ]; then
-                        echo "$dev_name" > "$dev/driver/unbind" 2>/dev/null || true
-                    fi
-                fi
-            done
-        fi
-    done
-}
-
-_nullify_namespace_lockdown() {
-    ip netns add null_ns 2>/dev/null || true
-    for iface in /sys/class/net/*; do
-        [ -e "$iface" ] || continue
-        local name
-        name=$(basename "$iface")
-        if [ "$name" != "lo" ] && [ "$name" != "bonding_masters" ]; then
-            ip link set "$name" netns null_ns 2>/dev/null || true
-        fi
-    done
-    ip -n null_ns link set dev lo down 2>/dev/null || true
-}
-
-_nullify_namespace_restore() {
-    if ip netns list 2>/dev/null | grep -q null_ns; then
-        # 1.0.0 Fix: Explicitly restore to init namespace via procfs path
-        # Use /proc/1/ns/net to ensure we target the root namespace reliably
-        local target_ns="/proc/1/ns/net"
-        
-        ip -n null_ns link show | awk -F': ' '/^[0-9]+:/ {print $2}' | while read -r name; do
-            local clean_name="${name%%@*}"
-            [ -n "$clean_name" ] && ip -n null_ns link set "$clean_name" netns "$target_ns" 2>/dev/null || true
-        done
-        ip netns delete null_ns 2>/dev/null || true
+# Description: Saves current state of sysctls to file.
+# Protects against overwriting an existing state file (double-enable).
+_nullify_save_state() {
+    if [ -f "$NULLIFY_STATE_FILE" ]; then
+        log_debug "State file exists, skipping save to preserve original state."
+        return
     fi
-}
 
-_nullify_services_mask() {
-    local state_file="/run/rocknix/nullify-pre-state.txt"
-    > "$state_file"
-    for svc in $NULLIFY_SERVICES; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            echo "$svc:active" >> "$state_file"
-        elif systemctl is-enabled --quiet "$svc" 2>/dev/null; then
-            echo "$svc:enabled" >> "$state_file"
+    mkdir -p "$(dirname "$NULLIFY_STATE_FILE")"
+    : > "$NULLIFY_STATE_FILE"
+    
+    log_debug "Saving sysctl state to $NULLIFY_STATE_FILE..."
+    for key in "${NULLIFY_SYSCTLS[@]}"; do
+        if val=$(sysctl -n "$key" 2>/dev/null); then
+            echo "SYSCTL:${key}=${val}" >> "$NULLIFY_STATE_FILE"
         fi
-        systemctl mask --now "$svc" 2>/dev/null || true
     done
+    sync
 }
 
-_nullify_services_unmask() {
-    local state_file="/run/rocknix/nullify-pre-state.txt"
-    for svc in $NULLIFY_SERVICES; do
-        systemctl unmask "$svc" 2>/dev/null || true
+# Description: Restores state from file.
+_nullify_restore_state() {
+    if [ ! -f "$NULLIFY_STATE_FILE" ]; then
+        log_warn "Nullify state file not found. Skipping sysctl restore."
+        return
+    fi
+    
+    log_info "Restoring system tunables from cache..."
+    
+    while IFS= read -r line; do
+        if [[ "$line" == SYSCTL:* ]]; then
+            local content="${line#SYSCTL:}"
+            local key="${content%%=*}"
+            local val="${content#*=}"
+            sysctl -w "$key=$val" >/dev/null 2>&1 || true
+        fi
+    done < "$NULLIFY_STATE_FILE"
+    
+    # Clean up state file after successful restore
+    rm -f "$NULLIFY_STATE_FILE"
+}
+
+# Description: Applies aggressive power-saving sysctls (Fallback logic)
+_nullify_sysctl_enable() {
+    # 1. Save original values first
+    _nullify_save_state
+    
+    # 2. Apply silence
+    sysctl -w net.ipv4.conf.all.disable_ipv4=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+    # Zero out GC thresholds to drop neighbor table entries aggressively
+    sysctl -w net.ipv4.neigh.default.gc_thresh1=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.neigh.default.gc_thresh2=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.neigh.default.gc_thresh3=0 >/dev/null 2>&1 || true
+    # Minimize buffers
+    sysctl -w net.core.rmem_default=4096 >/dev/null 2>&1 || true
+    sysctl -w net.core.wmem_default=4096 >/dev/null 2>&1 || true
+    # Simplify TCP stack
+    sysctl -w net.ipv4.tcp_congestion_control=reno >/dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_sack=0 >/dev/null 2>&1 || true
+    # Drop queue depth
+    sysctl -w net.core.netdev_max_backlog=1 >/dev/null 2>&1 || true
+    # Disable BPF JIT to save memory/security surface during lockdown
+    sysctl -w net.core.bpf_jit_enable=0 >/dev/null 2>&1 || true
+}
+
+_apply_xdp_to_all() {
+    local action="$1" # enable|disable
+    
+    if [ ! -x "$RXNM_AGENT_BIN" ]; then
+        # This function returns failure if it can't run, prompting fallback
+        return 1
+    fi
+    
+    local success_count=0
+    
+    # Iterate physical interfaces
+    for iface_path in /sys/class/net/*; do
+        local iface
+        iface=$(basename "$iface_path")
+        
+        # Skip loopback
+        [ "$iface" == "lo" ] && continue
+        
+        # Apply only to physical devices (Wireless or Ethernet)
+        if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || \
+           [ -d "$iface_path/device" ]; then
+            
+            log_debug "Applying XDP $action to $iface..."
+            if "$RXNM_AGENT_BIN" --nullify-xdp "$iface" "$action" 2>/dev/null; then
+                success_count=$((success_count + 1))
+            else
+                log_warn "Failed to apply XDP to $iface (Driver may not support it)"
+            fi
+        fi
     done
     
-    if [ -f "$state_file" ]; then
-        while IFS=: read -r svc state; do
-            if [ "$state" == "active" ]; then
-                systemctl start "$svc" 2>/dev/null || true
-            fi
-        done < "$state_file"
-        rm -f "$state_file"
-    fi
-}
-
-_nullify_modules_purge() {
-    mkdir -p /run/modprobe.d
-    local conf="/run/modprobe.d/rxnm-null.conf"
-    > "$conf"
-    for mod in $NULLIFY_MODULES; do
-        echo "blacklist $mod" >> "$conf"
-        modprobe -rv "$mod" 2>/dev/null || true
-    done
-}
-
-_nullify_modules_restore() {
-    rm -f /run/modprobe.d/rxnm-null.conf
-}
-
-_nullify_dry_run() {
-    local cmd="$1"
-    echo "Dry-Run Mode: Nullify $cmd"
-    echo ""
-    if [ "$cmd" == "enable" ]; then
-        echo "Would mask services:"
-        for svc in $NULLIFY_SERVICES; do
-            echo "  $svc"
-        done
-        echo ""
-        echo "Would unbind devices:"
-        for bus in pci sdio; do
-            local dev_dir="/sys/bus/$bus/devices"
-            if [ -d "$dev_dir" ]; then
-                for dev in "$dev_dir"/*; do
-                    [ -e "$dev" ] || continue
-                    local is_net=0
-                    if [ -d "$dev/net" ]; then
-                        is_net=1
-                    elif [ -f "$dev/class" ]; then
-                        local class_val
-                        read -r class_val < "$dev/class" 2>/dev/null || class_val=""
-                        if [[ "$class_val" == 0x02* ]]; then
-                            is_net=1
-                        fi
-                    fi
-                    if [ "$is_net" -eq 1 ]; then
-                        local dev_name
-                        dev_name=$(basename "$dev")
-                        local driver="unknown"
-                        [ -L "$dev/driver" ] && driver=$(basename $(readlink "$dev/driver"))
-                        echo "  $dev ($driver)"
-                    fi
-                done
-            fi
-        done
-        echo ""
-        echo "Would disable sysctls:"
-        echo "  net.ipv4.conf.all.disable_ipv4 -> 1"
-        echo "  net.ipv6.conf.all.disable_ipv6 -> 1"
-    elif [ "$cmd" == "disable" ]; then
-        echo "Would unmask services:"
-        for svc in $NULLIFY_SERVICES; do
-            echo "  $svc"
-        done
-        echo ""
-        echo "Would enable sysctls:"
-        echo "  net.ipv4.conf.all.disable_ipv4 -> 0"
-        echo "  net.ipv6.conf.all.disable_ipv6 -> 0"
-        echo "  net.core.default_qdisc -> fq_codel"
-        echo "  net.core.bpf_jit_enable -> 1"
-    fi
+    if [ "$success_count" -eq 0 ]; then return 1; fi
+    return 0
 }
 
 action_system_nullify() {
-    local cmd="$1"
-    local dry_run="$2"
+    local cmd="${1:-}"
+    shift
     
-    # --- EXPERIMENTAL FEATURE GUARD ---
-    if [ "${RXNM_EXPERIMENTAL:-false}" != "true" ]; then
-        json_error "Feature 'nullify' is experimental. Set RXNM_EXPERIMENTAL=true to enable." "501" \
-            "This feature is destructive and experimental. See 'rxnm api capabilities' for status."
-        exit 1
-    fi
+    local dry_run="false"
+    local specific_iface=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run="true"; shift ;;
+            --interface) specific_iface="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    
+    # Feature promoted to Unguarded Beta in 1.1.0 (Guard removed)
 
-    if [ "$dry_run" == "--dry-run" ]; then
-        _nullify_dry_run "$cmd"
+    if [ "$dry_run" == "true" ]; then
+        echo "Dry-Run: Nullify $cmd"
+        [ -n "$specific_iface" ] && echo "Target: Interface $specific_iface (XDP Only)" || echo "Target: Global System"
+        echo "State File: $NULLIFY_STATE_FILE"
         return 0
     fi
     
     if [ "$cmd" == "enable" ]; then
         if [ "$FORCE_ACTION" != "true" ]; then
-            echo "!!! DANGER: NULLIFY MODE WILL DESTROY ALL NETWORK FUNCTIONALITY !!!" >&2
-            echo "This action is NON-DETERMINISTIC and will break system stability." >&2
-            echo "Wireless, Bluetooth, Ethernet, and all remote management (SSH/SMB)" >&2
-            echo "will be PERMANENTLY DISABLED for this session." >&2
-            echo "MANDATORY: This action requires the --yes flag to proceed." >&2
+            echo "!!! DANGER: NULLIFY MODE WILL SILENCE NETWORK TRAFFIC !!!" >&2
+            echo "Confirm with --yes" >&2
             exit 1
         fi
         
-        log_info "Executing Nullify Mode (Enable)..."
-        
-        if [ -x "$RXNM_AGENT_BIN" ]; then
-            "$RXNM_AGENT_BIN" --nullify enable
-        else
-            _nullify_sysctl_enable
-            _nullify_bus_unbind
+        if [ -n "$specific_iface" ]; then
+            log_info "Nullifying specific interface: $specific_iface (XDP Drop)"
+            if [ -x "$RXNM_AGENT_BIN" ]; then
+                "$RXNM_AGENT_BIN" --nullify-xdp "$specific_iface" "enable"
+                json_success '{"action": "nullify_iface", "iface": "'"$specific_iface"'", "status": "enabled"}'
+            else
+                json_error "Agent binary required for interface-specific nullify"
+                exit 1
+            fi
+            return 0
         fi
         
-        _nullify_namespace_lockdown
-        _nullify_services_mask
-        _nullify_modules_purge
+        log_info "Executing Global Nullify..."
         
-        json_success '{"action": "nullify", "status": "enabled"}'
+        # Strategy: Prefer XDP (Hardware Offload). Fallback to Sysctl (Kernel Drop).
+        local mode="xdp"
+        
+        if ! _apply_xdp_to_all "enable"; then
+            log_warn "XDP application failed or Agent missing. Falling back to Sysctl."
+            _nullify_sysctl_enable
+            mode="sysctl (fallback)"
+        fi
+        
+        # Note: We NO LONGER mask services or unbind drivers (Legacy behavior scrapped).
+        # This keeps the system responsive, just network-silent.
+        
+        json_success '{"action": "nullify", "status": "enabled", "mode": "'"$mode"'"}'
         
     elif [ "$cmd" == "disable" ]; then
-        echo "!!! WARNING: RESTORING NETWORK STACK AFTER NULLIFICATION IS EXPERIMENTAL !!!" >&2
-        echo "While RXNM will attempt to unmask services and restore the IP stack," >&2
-        echo "hardware bus unbinding and module purging often require a REBOOT to" >&2
-        echo "fully recover functionality." >&2
-        
-        if [ "$FORCE_ACTION" != "true" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
-            read -p "⚠ Proceed with restore? [y/N] " -n 1 -r
-            echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                echo "Cancelled."
-                exit 0
+        if [ -n "$specific_iface" ]; then
+            log_info "Restoring interface: $specific_iface"
+            if [ -x "$RXNM_AGENT_BIN" ]; then
+                "$RXNM_AGENT_BIN" --nullify-xdp "$specific_iface" "disable"
+                json_success '{"action": "nullify_iface", "iface": "'"$specific_iface"'", "status": "disabled"}'
             fi
+            return 0
         fi
         
-        log_info "Executing Nullify Mode (Disable)..."
+        log_info "Restoring Global Network..."
         
-        _nullify_services_unmask
-        _nullify_modules_restore
-        _nullify_namespace_restore
+        # Attempt to disable XDP on all interfaces
+        _apply_xdp_to_all "disable"
         
-        if [ -x "$RXNM_AGENT_BIN" ]; then
-            "$RXNM_AGENT_BIN" --nullify disable
-        else
-            _nullify_sysctl_disable
-        fi
+        # Restore sysctls if they were modified (State file determines this)
+        _nullify_restore_state
         
         json_success '{"action": "nullify", "status": "disabled"}'
     else
