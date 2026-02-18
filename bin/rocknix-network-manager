@@ -415,6 +415,7 @@ case "$CATEGORY" in
                         features: {
                             wifi: {status: "stable", since_version: "1.0"},
                             interface: {status: "stable", since_version: "1.0"},
+                            nullify: {status: "beta", since_version: "1.1"},
                             service: {status: "experimental", since_version: "1.0"},
                             route: {status: "experimental", since_version: "1.0"},
                             tunnel: {status: "experimental", since_version: "1.0"},
@@ -714,7 +715,10 @@ case "$CATEGORY" in
                 action_setup 
                 ;;
             stop) action_stop ;;
-            nullify) action_system_nullify "${1:-}" "${2:-}" ;;
+            nullify) 
+                # 1.1.0 Fix: Pass ALL arguments to handle flags like --interface
+                action_system_nullify "$@" 
+                ;;
         esac
         ;;
         
