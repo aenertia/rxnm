@@ -6,7 +6,7 @@ By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory 
 
 | **Version** | **API Specification** | **Architecture** | **License** |
 | :--- | :--- | :--- | :--- |
-| `1.0.0` | `v1.0` (Frozen) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
+| `1.1.0-dev` | `v1.1` (Draft) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
 
 ---
 
@@ -217,10 +217,9 @@ Global health checks and settings.
     rxnm system proxy set --http "http://proxy:8080" --noproxy "localhost"
     ```
 * **Nullify Mode (Battery Saver):**
-    *Experimental: Requires `RXNM_EXPERIMENTAL=true`*
+    *Beta: Drops packets via eBPF/XDP at the driver level*
     ```bash
-    export RXNM_EXPERIMENTAL=true
-    # Completely teardown network stack and unbind drivers
+    # Drops packets via eBPF/XDP at the driver level
     rxnm system nullify enable --yes
     ```
 
