@@ -2049,7 +2049,10 @@ end_args:
     if (g_append_path && g_append_line) { cmd_append_config(g_append_path, g_append_line); return 0; }
     if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }
     if (g_connect_ssid) { return cmd_connect(g_connect_ssid, g_connect_iface); }
-    if (g_nullify_cmd) { cmd_nullify(g_nullify_cmd); return 0; }
+    if (g_nullify_cmd) { 
+        fprintf(stderr, "Legacy nullify not supported. Use --nullify-xdp\n");
+        return 1;
+    }
     if (g_ns_create) { return cmd_ns_create(g_ns_create); }
     if (g_ns_delete) { return cmd_ns_delete(g_ns_delete); }
     if (g_route_table) {

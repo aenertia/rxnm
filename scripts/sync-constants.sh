@@ -127,7 +127,9 @@ echo "// --- Kernel Header Sync (Drift Guard) ---" >> "$HEADER_FILE"
 # We use grep to find the define and extract the value (usually 3)
 HEADER_VAL=""
 if [ -f "/usr/include/linux/if_link.h" ]; then
-    HEADER_VAL=$(grep -E "^\s*#define\s+IFLA_XDP_FLAGS\s+[0-9]+" /usr/include/linux/if_link.h | head -n1 | awk '{print $3}')
+    # Fix: Added '|| true' because grep returns exit code 1 if not found,
+    # which causes the script to abort under 'set -e'.
+    HEADER_VAL=$(grep -E "^\s*#define\s+IFLA_XDP_FLAGS\s+[0-9]+" /usr/include/linux/if_link.h | head -n1 | awk '{print $3}' || true)
 fi
 
 if [ -n "$HEADER_VAL" ]; then
