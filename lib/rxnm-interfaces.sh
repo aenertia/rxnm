@@ -18,7 +18,16 @@ _task_set_member() {
     ensure_dirs
     local cfg_file="${STORAGE_NET_DIR}/75-config-${iface}.network"
     local content
-    content=$(build_network_config "$iface" "" "no" "Bridge Member" "" "" "" "$bridge" "" "" "" "" "no" "no")
+    
+    # 1.0.0 Refactor: Use named parameters
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --dhcp "no" \
+        --description "Bridge Member" \
+        --bridge "$bridge" \
+        --mdns "no" \
+        --llmnr "no")
+        
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
     reconfigure_iface "$bridge"
@@ -43,6 +52,8 @@ _task_set_dhcp() {
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     
     ensure_dirs
+    
+    # Use helper wrapper that now uses named args internally
     set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
     reconfigure_iface "$iface"
 }
@@ -69,7 +80,26 @@ _task_set_static() {
     
     ensure_dirs
     local content
-    content=$(build_network_config "$iface" "$ssid" "no" "Static Configuration" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id")
+    
+    # 1.0.0 Refactor: Use named parameters
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --match-ssid "$ssid" \
+        --dhcp "no" \
+        --description "Static Configuration" \
+        --address "$ip" \
+        --gateway "$gw" \
+        --dns "$dns" \
+        --domains "$domains" \
+        --routes "$routes" \
+        --mdns "$mdns" \
+        --llmnr "$llmnr" \
+        --metric "$metric" \
+        --mtu "$mtu" \
+        --mac-addr "$mac" \
+        --ipv6-privacy "$ipv6_priv" \
+        --dhcp-client-id "$dhcp_id")
+        
     local filename="${STORAGE_NET_DIR}/75-static-${iface}.network"
     secure_write "$filename" "$content" "644"
     reconfigure_iface "$iface"
@@ -147,7 +177,27 @@ set_network_cfg() {
     [ -n "$ssid" ] && safe_ssid=$(sanitize_ssid "$ssid")
     
     local cfg
-    cfg=$(build_network_config "$iface" "$ssid" "$dhcp" "User Config" "$ip" "$gw" "$dns" "" "" "$domains" "" "$routes" "$mdns" "$llmnr" "" "$metric" "$vrf" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd")
+    
+    # 1.0.0 Refactor: Use named parameters
+    cfg=$(build_network_config \
+        --match-name "$iface" \
+        --match-ssid "$ssid" \
+        --dhcp "$dhcp" \
+        --description "User Config" \
+        --address "$ip" \
+        --gateway "$gw" \
+        --dns "$dns" \
+        --domains "$domains" \
+        --routes "$routes" \
+        --mdns "$mdns" \
+        --llmnr "$llmnr" \
+        --metric "$metric" \
+        --vrf "$vrf" \
+        --mtu "$mtu" \
+        --mac-addr "$mac" \
+        --ipv6-privacy "$ipv6_priv" \
+        --dhcp-client-id "$dhcp_id" \
+        --ipv6-pd "$ipv6_pd")
     
     local filename="${STORAGE_NET_DIR}/75-config-${iface}"
     if [ -n "$safe_ssid" ]; then

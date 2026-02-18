@@ -28,33 +28,67 @@ _get_system_template_val() {
 }
 
 # Description: Generates the content for a .network file
-# Arguments: Massive list of config options (see params)
+# Arguments: Named flags (e.g. --match-name eth0 --dhcp yes)
+# Refactored for RXNM 1.0.0 to replace positional arguments
 build_network_config() {
-    local match_iface="$1"
-    local match_ssid="$2"
-    local dhcp="${3:-yes}"
-    local desc="$4"
-    local addresses="$5"
-    local gateway="$6"
-    local dns_servers="$7"
-    local bridge="$8"
-    local vlan="$9"
-    local domains="${10}"
-    local mac_policy="${11}"
-    local routes="${12}"
-    local mdns="${13:-yes}"
-    local llmnr="${14:-yes}"
-    local bond="${15:-}"
-    local metric="${16:-}"
-    local vrf="${17:-}"
-    local mtu="${18:-}"
-    local mac_addr="${19:-}"
-    local ipv6_privacy="${20:-}"
-    local dhcp_client_id="${21:-}"
-    local ipv6_pd="${22:-yes}"
-    
+    # Defaults
+    local match_iface=""
+    local match_ssid=""
+    local dhcp="yes"
+    local desc=""
+    local addresses=""
+    local gateway=""
+    local dns_servers=""
+    local bridge=""
+    local vlan=""
+    local domains=""
+    local mac_policy=""
+    local routes=""
+    local mdns="yes"
+    local llmnr="yes"
+    local bond=""
+    local metric=""
+    local vrf=""
+    local mtu=""
+    local mac_addr=""
+    local ipv6_privacy=""
+    local dhcp_client_id=""
+    local ipv6_pd="yes"
+
+    # Argument Parsing
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --match-name) match_iface="$2"; shift 2 ;;
+            --match-ssid) match_ssid="$2"; shift 2 ;;
+            --dhcp) dhcp="$2"; shift 2 ;;
+            --description) desc="$2"; shift 2 ;;
+            --address) addresses="$2"; shift 2 ;;
+            --gateway) gateway="$2"; shift 2 ;;
+            --dns) dns_servers="$2"; shift 2 ;;
+            --bridge) bridge="$2"; shift 2 ;;
+            --vlan) vlan="$2"; shift 2 ;;
+            --domains) domains="$2"; shift 2 ;;
+            --mac-policy) mac_policy="$2"; shift 2 ;;
+            --routes) routes="$2"; shift 2 ;;
+            --mdns) mdns="$2"; shift 2 ;;
+            --llmnr) llmnr="$2"; shift 2 ;;
+            --bond) bond="$2"; shift 2 ;;
+            --metric) metric="$2"; shift 2 ;;
+            --vrf) vrf="$2"; shift 2 ;;
+            --mtu) mtu="$2"; shift 2 ;;
+            --mac-addr) mac_addr="$2"; shift 2 ;;
+            --ipv6-privacy) ipv6_privacy="$2"; shift 2 ;;
+            --dhcp-client-id) dhcp_client_id="$2"; shift 2 ;;
+            --ipv6-pd) ipv6_pd="$2"; shift 2 ;;
+            *) 
+                # Ignore unknown flags to allow future extension without breaking callers
+                shift 
+                ;;
+        esac
+    done
+
     # Conflict resolution: If Avahi is running, disable networkd's mdns
-    if [ "$mdns" == "yes" ] && is_avahi_running; then
+    if [ "$mdns" == "yes" ] && type is_avahi_running &>/dev/null && is_avahi_running; then
         mdns="no"
     fi
 
@@ -81,17 +115,8 @@ build_network_config() {
     [ -n "$vrf" ] && config+="VRF=${vrf}\n"
     [ -n "$vlan" ] && config+="VLAN=${vlan}\n"
     
-    # Routing / Resolution
-    # NOTE: RouteMetric in [Network] is only supported in newer systemd versions.
-    # For maximum compatibility (and to avoid log errors), we skip it for static configs.
-    # Users must use specific routes if they need weighted routing in static mode.
-    # if [ "$dhcp" == "no" ] && [ -n "$metric" ]; then
-    #    config+="RouteMetric=${metric}\n"
-    # fi
-    
     config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
-    # IPMasquerade removed (defaults to no, deprecated in some versions)
-    # ConfigureWithoutCarrier helps with virtual/flaky links in tests/boot
+    # ConfigureWithoutCarrier helps with virtual/flaky links
     config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ -n "$ipv6_privacy" ]; then
@@ -172,7 +197,7 @@ build_device_link_config() {
 build_gateway_config() {
     local iface="$1" ip="$2" share="$3" desc="$4" mdns="${5:-yes}" llmnr="${6:-yes}" ipv6_pd="${7:-yes}"
     
-    if [ "$mdns" == "yes" ] && is_avahi_running; then mdns="no"; fi
+    if [ "$mdns" == "yes" ] && type is_avahi_running &>/dev/null && is_avahi_running; then mdns="no"; fi
     
     # Auto-detect IP if missing (useful for usb gadgets)
     if [ -z "$ip" ]; then

@@ -6,7 +6,7 @@ By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory 
 
 | **Version** | **API Specification** | **Architecture** | **License** |
 | :--- | :--- | :--- | :--- |
-| `1.0.0-rc3` | `v1.0` (Frozen) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
+| `1.0.0` | `v1.0` (Frozen) | Hybrid (Interface + SOA) | GPL-2.0-or-later |
 
 ---
 
@@ -217,7 +217,9 @@ Global health checks and settings.
     rxnm system proxy set --http "http://proxy:8080" --noproxy "localhost"
     ```
 * **Nullify Mode (Battery Saver):**
+    *Experimental: Requires `RXNM_EXPERIMENTAL=true`*
     ```bash
+    export RXNM_EXPERIMENTAL=true
     # Completely teardown network stack and unbind drivers
     rxnm system nullify enable --yes
     ```
@@ -366,9 +368,20 @@ echo '{"category":"wifi", "action":"connect", "ssid":"MyNet", "password":"pass"}
 ## 📦 Installation
 
 ### Requirements
-* **Runtime:** `bash 4.4+`, `systemd-networkd`, `iproute2`.
-* **Wireless:** `iwd` (Recommended) or `wpa_supplicant` (Partial support via `networkd`).
-* **JSON Processor:** `jq`, `jaq`, or `gojq`.
+* **Core Runtime:**
+  * **Bash:** 4.4 or newer.
+  * **systemd:**
+    * **Minimum:** v249 (Required for `WLANInterfaceType` support in WiFi modes).
+    * **Recommended:** v252+ (Standard in modern embedded distros).
+    * **Advanced:** v254+ (Required for native `[PPPoE]` and `[Tunnel]` handling).
+  * **iproute2:** Standard suite (`ip`).
+
+* **Wireless Stack:**
+  * **Primary:** `iwd` (Tested on v3.x codebase only). Highly recommended for fast roaming and scanning.
+  * **Legacy:** `wpa_supplicant` (Supported via `systemd-networkd` backend, but slower).
+
+* **Dependencies:**
+  * **JSON Processor:** `jq` (Standard), `jaq`, or `gojq` (Faster).
 
 ### Build from Source
 ```bash

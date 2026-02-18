@@ -77,9 +77,13 @@ _nullify_namespace_lockdown() {
 
 _nullify_namespace_restore() {
     if ip netns list 2>/dev/null | grep -q null_ns; then
+        # 1.0.0 Fix: Explicitly restore to init namespace via procfs path
+        # Use /proc/1/ns/net to ensure we target the root namespace reliably
+        local target_ns="/proc/1/ns/net"
+        
         ip -n null_ns link show | awk -F': ' '/^[0-9]+:/ {print $2}' | while read -r name; do
             local clean_name="${name%%@*}"
-            [ -n "$clean_name" ] && ip -n null_ns link set "$clean_name" netns 1 2>/dev/null || true
+            [ -n "$clean_name" ] && ip -n null_ns link set "$clean_name" netns "$target_ns" 2>/dev/null || true
         done
         ip netns delete null_ns 2>/dev/null || true
     fi

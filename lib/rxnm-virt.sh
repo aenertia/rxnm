@@ -36,8 +36,16 @@ _task_set_vrf_member() {
     ensure_dirs
     local cfg_file="${STORAGE_NET_DIR}/75-config-${iface}.network"
     local content
-    # vrf arg is position 17 in build_network_config
-    content=$(build_network_config "$iface" "" "no" "VRF Member" "" "" "" "" "" "" "" "" "no" "no" "" "" "$vrf")
+    
+    # 1.0.0 Refactor: Use named parameters
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --dhcp "no" \
+        --description "VRF Member" \
+        --mdns "no" \
+        --llmnr "no" \
+        --vrf "$vrf")
+        
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
     reconfigure_iface "$vrf"
@@ -61,16 +69,27 @@ _task_create_macvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "MACVLAN=${name}"
         else
             if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-                # Fallback to appending if section structure allows or manual fix needed
-                # Relying on systemd-networkd's ability to parse keys in applicable sections
-                # Ideally, this should append to [Network] section
-                printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+                # Fallback: Correctly handle appending to [Network] section
+                if grep -q "\[Network\]" "$parent_cfg"; then
+                    # Section exists, just append property
+                    printf "MACVLAN=%s\n" "$name" >> "$parent_cfg"
+                else
+                    # Section missing, append header and property
+                    printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+                fi
             fi
         fi
     else
         # Create minimal parent config if none exists
         local content
-        content=$(build_network_config "$parent" "" "yes" "Parent for MACVLAN ${name}" "" "" "" "" "" "" "" "" "yes" "yes")
+        # 1.0.0 Refactor: Use named parameters
+        content=$(build_network_config \
+            --match-name "$parent" \
+            --dhcp "yes" \
+            --description "Parent for MACVLAN ${name}" \
+            --mdns "yes" \
+            --llmnr "yes")
+            
         content="${content/\[Network\]/[Network]\nMACVLAN=${name}}"
         secure_write "$parent_cfg" "$content" "644"
     fi
@@ -96,12 +115,23 @@ _task_create_ipvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "IPVLAN=${name}"
         else
             if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
-                 printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 if grep -q "\[Network\]" "$parent_cfg"; then
+                    printf "IPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 else
+                    printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 fi
             fi
         fi
     else
         local content
-        content=$(build_network_config "$parent" "" "yes" "Parent for IPVLAN ${name}" "" "" "" "" "" "" "" "" "yes" "yes")
+        # 1.0.0 Refactor: Use named parameters
+        content=$(build_network_config \
+            --match-name "$parent" \
+            --dhcp "yes" \
+            --description "Parent for IPVLAN ${name}" \
+            --mdns "yes" \
+            --llmnr "yes")
+            
         content="${content/\[Network\]/[Network]\nIPVLAN=${name}}"
         secure_write "$parent_cfg" "$content" "644"
     fi
@@ -141,7 +171,14 @@ _task_create_bond() {
     
     local network_file="${STORAGE_NET_DIR}/75-config-${name}.network"
     local content
-    content=$(build_network_config "$name" "" "yes" "Bond Interface ($mode)" "" "" "" "" "" "" "" "" "yes" "yes")
+    # 1.0.0 Refactor: Use named parameters
+    content=$(build_network_config \
+        --match-name "$name" \
+        --dhcp "yes" \
+        --description "Bond Interface ($mode)" \
+        --mdns "yes" \
+        --llmnr "yes")
+        
     secure_write "$network_file" "$content" "644"
     reload_networkd
 }
@@ -152,8 +189,16 @@ _task_set_bond_slave() {
     ensure_dirs
     local cfg_file="${STORAGE_NET_DIR}/75-config-${iface}.network"
     local content
-    # bond arg is position 15
-    content=$(build_network_config "$iface" "" "no" "Bond Slave" "" "" "" "" "" "" "" "" "no" "no" "$bond")
+    
+    # 1.0.0 Refactor: Use named parameters
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --dhcp "no" \
+        --description "Bond Slave" \
+        --bond "$bond" \
+        --mdns "no" \
+        --llmnr "no")
+        
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
     reconfigure_iface "$bond"
@@ -176,14 +221,25 @@ _task_create_vlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "VLAN=${name}"
         else
             if ! grep -q "VLAN=${name}" "$parent_cfg"; then
-                printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
+                if grep -q "\[Network\]" "$parent_cfg"; then
+                    printf "VLAN=%s\n" "$name" >> "$parent_cfg"
+                else
+                    printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
+                fi
             fi
         fi
     else
         # Create minimal parent config if none exists
         local content
-        # vlan arg is position 9
-        content=$(build_network_config "$parent" "" "yes" "Parent for VLAN ${name}" "" "" "" "" "$name" "" "" "" "yes" "yes")
+        # 1.0.0 Refactor: Use named parameters
+        content=$(build_network_config \
+            --match-name "$parent" \
+            --dhcp "yes" \
+            --description "Parent for VLAN ${name}" \
+            --vlan "$name" \
+            --mdns "yes" \
+            --llmnr "yes")
+            
         secure_write "$parent_cfg" "$content" "644"
     fi
 }

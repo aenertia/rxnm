@@ -102,7 +102,14 @@ _task_pan_net() {
             else
                 # Client Mode (Tethering from phone)
                 local content
-                content=$(build_network_config "bnep*" "" "yes" "Bluetooth PAN Client (PANU)" "" "" "" "" "" "" "" "" "yes" "yes")
+                # 1.0.0 Refactor: Use named parameters
+                content=$(build_network_config \
+                    --match-name "bnep*" \
+                    --dhcp "yes" \
+                    --description "Bluetooth PAN Client (PANU)" \
+                    --mdns "yes" \
+                    --llmnr "yes")
+                    
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 
                 tune_network_stack "client"
@@ -135,6 +142,8 @@ action_pan_net() {
 }
 
 action_bt_scan() {
+    local timeout_sec="${1:-4}"
+    
     if ! command -v busctl >/dev/null; then
         json_error "busctl required for DBus operations"
         return 1
@@ -154,7 +163,8 @@ action_bt_scan() {
         busctl --timeout=5s call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1
     done
     
-    sleep 4 # Scan duration
+    # Configurable scan duration (default 4s)
+    sleep "$timeout_sec"
     
     # Stop Discovery
     for adapter in $adapters; do
@@ -205,24 +215,34 @@ action_bt_pair() {
         return 1
     fi
     
-    # Check if trust/pair succeeded via DBus
+    # Check if trust/pair succeeded via DBus (Retry loop for robustness)
     local dev_path
     dev_path=$(_get_dbus_device_path "$mac")
     
-    if [ -z "$dev_path" ]; then
-        sleep 1
-        dev_path=$(_get_dbus_device_path "$mac")
-    fi
+    local retries=5
+    local success=false
     
-    if [ -n "$dev_path" ]; then
-        local paired
-        paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
-        
-        if [ "$paired" == "true" ]; then
-            timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1
-            json_success '{"action": "paired", "mac": "'"$mac"'"}'
-            return 0
+    for ((i=0; i<retries; i++)); do
+        if [ -z "$dev_path" ]; then
+            dev_path=$(_get_dbus_device_path "$mac")
         fi
+        
+        if [ -n "$dev_path" ]; then
+            local paired
+            paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
+            
+            if [ "$paired" == "true" ]; then
+                success=true
+                break
+            fi
+        fi
+        sleep 1
+    done
+    
+    if [ "$success" == "true" ]; then
+        timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1
+        json_success '{"action": "paired", "mac": "'"$mac"'"}'
+        return 0
     fi
     
     json_error "Pairing sequence finished but device not marked as Paired"
