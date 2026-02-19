@@ -144,7 +144,7 @@ _task_host_mode() {
     mkdir -p "${STATE_DIR}/iwd/ap"
     local ap_data="[General]\nChannel=${channel:-1}\n"
     if [ -n "$pass" ]; then
-        ap_data+="[Security]\nPassphrase=${pass}\n"
+        ap_data="${ap_data}[Security]\nPassphrase=${pass}\n"
     fi
     
     if [ "$mode" != "adhoc" ]; then

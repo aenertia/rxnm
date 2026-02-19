@@ -27,7 +27,7 @@ _apply_xdp_to_all() {
         iface=$(basename "$iface_path")
         
         # Skip loopback
-        [ "$iface" == "lo" ] && continue
+        [ "$iface" = "lo" ] && continue
         
         # Apply only to physical devices (Wireless or Ethernet)
         if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ] || \
@@ -53,7 +53,7 @@ action_system_nullify() {
     local dry_run="false"
     local specific_iface=""
     
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --dry-run) dry_run="true"; shift ;;
             --interface) specific_iface="$2"; shift 2 ;;
@@ -63,13 +63,13 @@ action_system_nullify() {
     
     # Feature promoted to Unguarded Beta in 1.1.0 (Guard removed)
 
-    if [ "$dry_run" == "true" ]; then
+    if [ "$dry_run" = "true" ]; then
         echo "Dry-Run: Nullify $cmd"
         [ -n "$specific_iface" ] && echo "Target: Interface $specific_iface (XDP Only)" || echo "Target: Global System (XDP)"
         return 0
     fi
     
-    if [ "$cmd" == "enable" ]; then
+    if [ "$cmd" = "enable" ]; then
         if [ "$FORCE_ACTION" != "true" ]; then
             echo "!!! DANGER: NULLIFY MODE WILL SILENCE NETWORK TRAFFIC !!!" >&2
             echo "Confirm with --yes" >&2
@@ -100,7 +100,7 @@ action_system_nullify() {
             exit 1
         fi
         
-    elif [ "$cmd" == "disable" ]; then
+    elif [ "$cmd" = "disable" ]; then
         if [ -n "$specific_iface" ]; then
             log_info "Restoring interface: $specific_iface"
             if [ -x "$RXNM_AGENT_BIN" ]; then
