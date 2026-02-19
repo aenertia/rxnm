@@ -16,47 +16,26 @@
 # Description: Caches sysfs reads to reduce I/O overhead in tight loops.
 # Arguments: $1 = Interface Name
 # Returns: String containing operstate:address:mtu
-
-# Optimization: Bash Associative Arrays (Hidden from POSIX parser via eval)
-if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-    eval 'declare -A _sysfs_cache'
-fi
-
+# Note: Caching removed for POSIX compliance (no associative arrays).
+# OS page cache handles sysfs read performance efficiently enough.
 get_iface_sysfs() {
     local iface=$1
     local data=""
-    
-    # Fast Path: Bash Cache
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-        # Use eval to prevent syntax error in Dash on ${arr[key]}
-        eval 'data="${_sysfs_cache['"$iface"']:-}"'
-        if [ -n "$data" ]; then
-             echo "$data"
-             return
-        fi
-    fi
-    
     if [ -d "/sys/class/net/$iface" ]; then
         if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
              data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
         fi
-    fi
-    
-    # Store in Cache (Bash only)
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$data" ]; then
-        eval '_sysfs_cache['"$iface"']="$data"'
     fi
     echo "$data"
 }
 
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
-    # Remove temp files safely without arrays
-    # Find is safer and works in POSIX sh
-    if [ -d "${STORAGE_NET_DIR}" ]; then
-        find "${STORAGE_NET_DIR}" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
+    # POSIX compliant cleanup using find instead of array globs
+    if [ -n "$STORAGE_NET_DIR" ] && [ -d "$STORAGE_NET_DIR" ]; then
+        find "$STORAGE_NET_DIR" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
     fi
-
+    
     # Release global lock if owned by this process
     if [ -f "$GLOBAL_PID_FILE" ]; then
         local pid
@@ -109,6 +88,8 @@ secure_exec() {
 acquire_global_lock() {
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
+    
+    # Use FD 200 for global lock
     exec 200>"$GLOBAL_LOCK_FILE"
     
     if ! flock -n 200; then
@@ -141,6 +122,7 @@ acquire_global_lock() {
 # Description: Acquires a fine-grained lock for a specific interface.
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
+# NOTE: Uses subshell redirection to avoid automatic FD allocation (Bashism).
 with_iface_lock() {
     local iface="$1"; shift
     local timeout="${TIMEOUT:-10}"
@@ -148,21 +130,17 @@ with_iface_lock() {
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Use a subshell to hold the lock FD (9)
-    # Use standalone 'exec' to open the FD. In strict POSIX, exec failure
-    # terminates the subshell immediately, so explicit error checking via
-    # 'if ! exec' is not required and causes syntax errors in Dash.
+    # Run in subshell with FD 201 redirected to lock file
     (
-        exec 9>"$lock_file"
-        
-        if flock -x -w "$timeout" 9; then
-            "$@"
-        else
-            # Fallback log if log_error isn't available in subshell context
-            echo "[ERROR] Failed to acquire lock for $iface after ${timeout}s" >&2
+        if ! flock -w "$timeout" 201; then
+            log_error "Failed to acquire lock for $iface after ${timeout}s"
             exit 1
         fi
-    )
+        
+        "$@"
+    ) 201>"$lock_file"
+    
+    return $?
 }
 
 # --- Logging ---
@@ -192,7 +170,8 @@ rxnm_json_get() {
     local _key="$2"
 
     if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
-        "$JQ_BIN" -r ".${_key} // empty" <<< "$_json"
+        # Use pipe instead of <<< to avoid Dash syntax errors during parse
+        echo "$_json" | "$JQ_BIN" -r ".${_key} // empty"
         return
     fi
 
@@ -232,9 +211,8 @@ rxnm_match() {
     local _str="$1"
     local _pat="$2"
 
-    # Optimization: Use Bash built-in regex if available
-    # Must use eval to hide the syntax from Dash parser
     if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
+        # Hide [[ =~ ]] syntax in eval to prevent Dash parse errors
         eval '[[ "$_str" =~ $_pat ]]'
         return
     fi
