@@ -124,13 +124,15 @@ acquire_global_lock() {
 # Returns: Exit code of the executed command.
 # NOTE: Uses subshell redirection to avoid automatic FD allocation (Bashism).
 with_iface_lock() {
-    local iface="$1"; shift
+    local iface="$1"
+    shift
     local timeout="${TIMEOUT:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
     # Run in subshell with FD 201 redirected to lock file
+    # Standardizing on FD 201 to avoid dynamic FD allocation which breaks Dash/Ash
     (
         if ! flock -w "$timeout" 201; then
             log_error "Failed to acquire lock for $iface after ${timeout}s"
