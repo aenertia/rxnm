@@ -148,16 +148,23 @@ with_iface_lock() {
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Use a subshell with a fixed FD (9) for the lock
-    # This avoids bash-specific {fd}> syntax and automatic allocation which breaks Dash/Ash
+    # Use a subshell to hold the lock FD (9)
+    # We use explicit 'exec' inside the subshell to open the file descriptor.
+    # This avoids "redirection unexpected" errors with compound commands in some shells.
     (
+        if ! exec 9> "$lock_file"; then
+             echo "Error: Failed to open lock file $lock_file" >&2
+             exit 1
+        fi
+        
         if flock -x -w "$timeout" 9; then
             "$@"
         else
-            log_error "Failed to acquire lock for $iface after ${timeout}s"
+            # Fallback log if log_error isn't available in subshell context (though it should be)
+            echo "[ERROR] Failed to acquire lock for $iface after ${timeout}s" >&2
             exit 1
         fi
-    ) 9>"$lock_file"
+    )
 }
 
 # --- Logging ---
