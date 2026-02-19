@@ -145,31 +145,19 @@ with_iface_lock() {
     local iface="$1"; shift
     local timeout="${TIMEOUT:-10}"
     local lock_file="${RUN_DIR}/${iface}.lock"
-    local lock_fd
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Open lock file descriptor
-    exec {lock_fd}>"$lock_file" || {
-        log_error "Failed to open lock file for $iface"
-        return 1
-    }
-    
-    # Attempt to acquire lock with timeout
-    if ! flock -w "$timeout" "$lock_fd"; then
-        log_error "Failed to acquire lock for $iface after ${timeout}s"
-        exec {lock_fd}>&-
-        return 1
-    fi
-    
-    # Execute the protected command
-    local ret=0
-    "$@" || ret=$?
-    
-    # Release and close
-    flock -u "$lock_fd"
-    exec {lock_fd}>&-
-    return $ret
+    # Use a subshell with a fixed FD (9) for the lock
+    # This avoids bash-specific {fd}> syntax and automatic allocation which breaks Dash/Ash
+    (
+        if flock -x -w "$timeout" 9; then
+            "$@"
+        else
+            log_error "Failed to acquire lock for $iface after ${timeout}s"
+            exit 1
+        fi
+    ) 9>"$lock_file"
 }
 
 # --- Logging ---
