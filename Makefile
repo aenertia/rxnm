@@ -127,7 +127,7 @@ check: all
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
 
-# Full Phase 3 Validation (Updated for RC3)
+# Full Phase 3 Validation (Updated for RC1)
 # Now includes linting as a prerequisite
 test-all: all lint
 	@echo "[TEST] Running Full Validation Suite..."
@@ -138,9 +138,9 @@ test-all: all lint
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
 	@bash tests/test_cli_fuzz.sh
-	@bash tests/verify_rc3.sh
+	@bash tests/verify_rc1.sh
 
 # Final Implementation Verification
 verify:
-	@echo "[VERIFY] Running RC3 Implementation Verification..."
-	@bash tests/verify_rc3.sh
+	@echo "[VERIFY] Running RC1 Implementation Verification..."
+	@bash tests/verify_rc1.sh

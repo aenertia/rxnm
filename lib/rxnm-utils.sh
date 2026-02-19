@@ -246,17 +246,32 @@ rxnm_match() {
     local _pat="$2"
 
     if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-        # Hide [[ =~ ]] syntax in eval to prevent Dash parse errors
+        # Path A: Bash native ERE — no subprocess
+        # Hide [[ =~ ]] from POSIX parsers via eval
         eval '[[ "$_str" =~ $_pat ]]'
         return
     fi
 
+    # Path B: grep -qE is universally available (BusyBox, musl, glibc).
+    # Try it first to avoid burning an agent invocation on pattern matching.
+    if printf '%s' "$_str" | grep -qE "$_pat" 2>/dev/null; then
+        return 0
+    fi
+    # grep returned non-zero — could be no-match or unsupported pattern.
+    # Check exit code: grep returns 1 for no-match, 2 for bad pattern.
+    local _grep_ret=$?
+    if [ "$_grep_ret" -eq 1 ]; then
+        return 1   # Clean no-match from grep — trust it
+    fi
+
+    # grep returned 2 (bad pattern) or failed — fall back to agent regex
     if [ -x "${RXNM_AGENT_BIN:-}" ]; then
         "$RXNM_AGENT_BIN" --match "$_str" "$_pat"
         return
     fi
 
-    printf '%s' "$_str" | grep -qE "$_pat"
+    # No agent, bad grep pattern: conservatively return 1 (no-match)
+    return 1
 }
 
 cli_error() {

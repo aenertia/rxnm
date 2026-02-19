@@ -2,9 +2,9 @@ name: RXNM CI (Native Nspawn)
 
 on:
   push:
-    branches: [ "main", "master", "1.1.0-dev" ]
+    branches: [ "main", "master", "v1.1.0" ]
   pull_request:
-    branches: [ "main", "master", "1.1.0-dev" ]
+    branches: [ "main", "master", "v1.1.0" ]
 
 jobs:
   test:
@@ -49,6 +49,52 @@ jobs:
         # Run foundation tests
         export GITHUB_ACTIONS=true
         make test-all
+
+    - name: "Path B: POSIX/dash compatibility"
+      run: |
+        sudo apt-get install -y dash
+
+        echo "=== Step 1: dash -n syntax check on lib/*.sh ==="
+        FAIL=0
+        for f in lib/*.sh; do
+          # rxnm-config-schema.sh uses Bash-only syntax below its POSIX guard.
+          # 'dash -n' does not execute the guard's 'return 0', so it would fail
+          # on the declare -A syntax below it. Exclude it here — it is covered
+          # by shellcheck --shell=bash in the shellcheck step.
+          case "$f" in lib/rxnm-config-schema.sh) continue ;; esac
+          if ! dash -n "$f"; then
+            echo "POSIX FAIL [dash -n]: $f"
+            FAIL=1
+          fi
+        done
+        for f in bin/rocknix-network-manager bin/rxnm; do
+          [ -f "$f" ] || continue
+          if ! dash -n "$f"; then
+            echo "POSIX FAIL [dash -n]: $f"
+            FAIL=1
+          fi
+        done
+        [ "$FAIL" -eq 0 ] || { echo "dash -n check failed"; exit 1; }
+
+        echo "=== Step 2: shellcheck strict POSIX on key lib files ==="
+        # SC3043: 'local' is not POSIX but is universally supported by ash/dash
+        shellcheck --shell=sh --exclude=SC3043 \
+          lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
+          lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
+
+        echo "=== Step 3: Path B smoke test (no agent, no Bash) ==="
+        # Verifies the lib sources without syntax error under dash.
+        # The 'true' exit prevents CI failure from missing agent — the goal
+        # is to catch parse errors and hard exits from missing guards.
+        RXNM_SHELL_IS_BASH=false RXNM_AGENT_BIN="/nonexistent/rxnm-agent" \
+          dash -c '
+            RXNM_LIB_DIR=./lib
+            for f in ./lib/rxnm-constants.sh ./lib/rxnm-utils.sh \
+                     ./lib/rxnm-system.sh ./lib/rxnm-wifi.sh; do
+              . "$f" || { echo "Failed to source $f"; exit 1; }
+            done
+            echo "POSIX source: OK"
+          ' || exit 1
 
     - name: Run Integration Tests
       run: |
