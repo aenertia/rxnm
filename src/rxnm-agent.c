@@ -15,6 +15,7 @@
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
  * 5. Namespace/Service: Native containerization primitives (unshare/mount/setns).
  * 6. XDP/eBPF: Fast-path packet dropping for Nullify Mode.
+ * 7. Regex: Provides POSIX regex matching for shell scripts on constrained systems.
  *
  * DESIGN PHILOSOPHY:
  * - No external dependencies (glibc/musl only).
@@ -53,6 +54,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <dirent.h>
+#include <regex.h>
 // New headers for BPF/XDP
 #include <linux/bpf.h>
 #include <sys/syscall.h>
@@ -1923,6 +1925,29 @@ int cmd_ns_exec(const char *name, int argc, char **argv) {
     return 0;
 }
 
+/**
+ * @brief Tests whether a string matches an extended POSIX regex.
+ * @param str   The string to test.
+ * @param pat   The extended regex pattern (ERE).
+ * @return 0 on match, 1 on no-match, 2 on regex compile error.
+ */
+int cmd_match(const char *str, const char *pat) {
+    regex_t re;
+    int ret;
+
+    ret = regcomp(&re, pat, REG_EXTENDED | REG_NOSUB);
+    if (ret != 0) {
+        char errbuf[256];
+        regerror(ret, &re, errbuf, sizeof(errbuf));
+        fprintf(stderr, "rxnm-agent --match: invalid pattern: %s\n", errbuf);
+        return 2;
+    }
+
+    ret = regexec(&re, str, 0, NULL, 0);
+    regfree(&re);
+    return (ret == 0) ? 0 : 1;
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -1988,6 +2013,7 @@ int main(int argc, char *argv[]) {
         {"ns-list", no_argument, 0, 1003},
         {"route-dump", required_argument, 0, 1004},
         {"ns-exec", required_argument, 0, 1005},
+        {"match", required_argument, 0, 1006},
         {0, 0, 0, 0}
     };
     
@@ -2022,6 +2048,13 @@ int main(int argc, char *argv[]) {
                 g_ns_exec_name = optarg;
                 // Stop option parsing here to pass remaining args to execvp
                 goto end_args;
+            case 1006:
+                if (optind < argc) {
+                    return cmd_match(optarg, argv[optind]);
+                } else {
+                    fprintf(stderr, "Usage: rxnm-agent --match <string> <pattern>\n");
+                    return 1;
+                }
             default: return 1;
         }
     }

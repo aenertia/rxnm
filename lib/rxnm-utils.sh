@@ -16,22 +16,37 @@
 # Description: Caches sysfs reads to reduce I/O overhead in tight loops.
 # Arguments: $1 = Interface Name
 # Returns: String containing operstate:address:mtu
-declare -A _sysfs_cache
+if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+    declare -A _sysfs_cache
+fi
+
 get_iface_sysfs() {
     local iface=$1
-    [ -n "${_sysfs_cache[$iface]}" ] && echo "${_sysfs_cache[$iface]}" && return
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        if [ -n "${_sysfs_cache[$iface]}" ]; then
+             echo "${_sysfs_cache[$iface]}"
+             return
+        fi
+    fi
+    
     local data=""
     if [ -d "/sys/class/net/$iface" ]; then
-        data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
+        if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
+             data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
+        fi
     fi
-    _sysfs_cache[$iface]="$data"
+    
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        _sysfs_cache[$iface]="$data"
+    fi
     echo "$data"
 }
 
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
     local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
-    if [ ${#temp_files[@]} -gt 0 ]; then
+    # POSIX safe check if glob failed (string contains *)
+    if [ "${temp_files[*]}" != "${STORAGE_NET_DIR}/*.XXXXXX" ]; then
         rm -f "${temp_files[@]}" 2>/dev/null
     fi
     # Release global lock if owned by this process
@@ -181,7 +196,7 @@ rxnm_json_get() {
     local _key="$2"
 
     # Fast Path: Bash + jq available (zero extra forks)
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+    if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
         "$JQ_BIN" -r ".${_key} // empty" <<< "$_json"
         return
     fi
@@ -244,7 +259,7 @@ rxnm_match() {
     local _pat="$2"
 
     # Fast Path: Bash built-in regex (zero forks)
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+    if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
         [[ "$_str" =~ $_pat ]]
         return
     fi

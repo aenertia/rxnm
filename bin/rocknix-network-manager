@@ -139,11 +139,12 @@ done
 
 # Rebuild $@ from collected positionals
 if [ -n "$_rxnm_tmpargs" ]; then
-    _oldifs="$IFS"
-    IFS='
+    _rebuild_args() {
+        local IFS='
 '
-    set -- $_rxnm_tmpargs
-    IFS="$_oldifs"
+        set -- $_rxnm_tmpargs
+    }
+    _rebuild_args
 else
     set --
 fi
@@ -251,29 +252,8 @@ fi
 # --- HIERARCHY DISPATCHER ---
 
 # List of Built-in Categories (POSIX word list matching global IFS)
-CATS="wifi
-interface
-bluetooth
-bridge
-bond
-vrf
-vlan
-macvlan
-ipvlan
-veth
-vpn
-tun
-tap
-profile
-system
-config
-api
-service
-route
-tunnel
-mpls
-pppoe
-ha"
+# POSIX word list — space-separated. Used with `for` and `rxnm_match`.
+CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config api service route tunnel mpls pppoe ha"
 
 # Determine Category from first argument
 RAW_CMD="${1:-}"
