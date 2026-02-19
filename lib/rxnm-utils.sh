@@ -149,12 +149,11 @@ with_iface_lock() {
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
     # Use a subshell to hold the lock FD (9)
-    # 1. Use standalone 'exec' (POSIX special builtin).
-    #    If redirection fails, the subshell exits immediately with error.
-    #    We DO NOT use '|| exit' because that causes syntax errors in Dash/Ash
-    #    when combined with exec-redirection.
+    # Use standalone 'exec' to open the FD. In strict POSIX, exec failure
+    # terminates the subshell immediately, so explicit error checking via
+    # 'if ! exec' is not required and causes syntax errors in Dash.
     (
-        exec 9> "$lock_file"
+        exec 9>"$lock_file"
         
         if flock -x -w "$timeout" 9; then
             "$@"
