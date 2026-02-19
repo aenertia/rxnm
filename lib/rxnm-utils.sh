@@ -149,18 +149,18 @@ with_iface_lock() {
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
     # Use a subshell to hold the lock FD (9)
-    # We use explicit 'exec' inside the subshell to open the file descriptor.
-    # This avoids "redirection unexpected" errors with compound commands in some shells.
+    # We use 'exec' inside the subshell to open the file descriptor.
+    # We avoid 'if ! exec' because negating redirection-only exec is invalid in POSIX.
     (
-        if ! exec 9> "$lock_file"; then
+        exec 9> "$lock_file" || {
              echo "Error: Failed to open lock file $lock_file" >&2
              exit 1
-        fi
+        }
         
         if flock -x -w "$timeout" 9; then
             "$@"
         else
-            # Fallback log if log_error isn't available in subshell context (though it should be)
+            # Fallback log if log_error isn't available in subshell context
             echo "[ERROR] Failed to acquire lock for $iface after ${timeout}s" >&2
             exit 1
         fi
