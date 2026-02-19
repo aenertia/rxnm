@@ -19,11 +19,11 @@
 # Note: Caching removed for POSIX compliance (no associative arrays).
 # OS page cache handles sysfs read performance efficiently enough.
 get_iface_sysfs() {
-    local iface=$1
+    local iface="$1"
     local data=""
     if [ -d "/sys/class/net/$iface" ]; then
         if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
-             data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
+             data=$(paste -d: "/sys/class/net/$iface/operstate" "/sys/class/net/$iface/address" "/sys/class/net/$iface/mtu" 2>/dev/null)
         fi
     fi
     echo "$data"
@@ -32,12 +32,12 @@ get_iface_sysfs() {
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
     # POSIX compliant cleanup using find instead of array globs
-    if [ -n "$STORAGE_NET_DIR" ] && [ -d "$STORAGE_NET_DIR" ]; then
+    if [ -n "${STORAGE_NET_DIR:-}" ] && [ -d "$STORAGE_NET_DIR" ]; then
         find "$STORAGE_NET_DIR" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
     fi
     
     # Release global lock if owned by this process
-    if [ -f "$GLOBAL_PID_FILE" ]; then
+    if [ -f "${GLOBAL_PID_FILE:-}" ]; then
         local pid
         pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
         if [ "$pid" = "$$" ]; then
@@ -46,7 +46,7 @@ cleanup() {
     fi
     
     # Attempt to clean up stale sub-locks in RUN_DIR
-    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
+    if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then
         if command -v fuser >/dev/null; then
             find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while read -r lock; do
                 if [ -f "$lock" ]; then
@@ -59,7 +59,7 @@ cleanup() {
             done
         fi
     fi
-    if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
+    if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
         rm -rf "$TMPDIR" 2>/dev/null
     fi
 }
@@ -89,7 +89,7 @@ acquire_global_lock() {
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Use FD 200 for global lock
+    # Use FD 200 for global lock (Standard and safe)
     exec 200>"$GLOBAL_LOCK_FILE"
     
     if ! flock -n 200; then
@@ -114,7 +114,7 @@ acquire_global_lock() {
             return 1
         fi
     fi
-    echo $$ > "$GLOBAL_PID_FILE"
+    echo "$$" > "$GLOBAL_PID_FILE"
     trap cleanup EXIT INT TERM
     return 0
 }
@@ -122,39 +122,43 @@ acquire_global_lock() {
 # Description: Acquires a fine-grained lock for a specific interface.
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
-# NOTE: Uses subshell redirection to avoid automatic FD allocation (Bashism).
+# NOTE: Uses FD 9 and explicit open/close to satisfy Dash's parser requirements.
 with_iface_lock() {
-    local iface="$1"
+    local _wi_iface="$1"
     shift
-    local timeout="${TIMEOUT:-10}"
-    local lock_file="${RUN_DIR}/${iface}.lock"
+    local _wi_timeout="${TIMEOUT:-10}"
+    local _wi_lock_file="${RUN_DIR}/${_wi_iface}.lock"
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Run in subshell with FD 201 redirected to lock file
-    # Standardizing on FD 201 to avoid dynamic FD allocation which breaks Dash/Ash
-    (
-        if ! flock -w "$timeout" 201; then
-            log_error "Failed to acquire lock for $iface after ${timeout}s"
-            exit 1
-        fi
-        
-        "$@"
-    ) 201>"$lock_file"
+    # Standardize on FD 9 for interface-level locks
+    exec 9>"$_wi_lock_file"
     
-    return $?
+    if ! flock -w "$_wi_timeout" 9; then
+        log_error "Failed to acquire lock for $_wi_iface after ${_wi_timeout}s"
+        exec 9>&-
+        return 1
+    fi
+    
+    # Execute command
+    "$@"
+    local _wi_ret=$?
+    
+    # Close FD
+    exec 9>&-
+    return $_wi_ret
 }
 
 # --- Logging ---
 
 log_debug() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
 }
 log_info() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
 }
 log_warn() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
 }
 log_error() {
     echo "[ERROR] $*" >&2
@@ -171,8 +175,8 @@ rxnm_json_get() {
     local _json="$1"
     local _key="$2"
 
-    if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
-        # Use pipe instead of <<< to avoid Dash syntax errors during parse
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        # Use pipe instead of here-string to avoid Dash syntax errors during parse
         echo "$_json" | "$JQ_BIN" -r ".${_key} // empty"
         return
     fi
@@ -213,7 +217,7 @@ rxnm_match() {
     local _str="$1"
     local _pat="$2"
 
-    if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
         # Hide [[ =~ ]] syntax in eval to prevent Dash parse errors
         eval '[[ "$_str" =~ $_pat ]]'
         return
@@ -265,12 +269,12 @@ print_table() {
     jq_query="${jq_query%,}] | @tsv"
     
     local tsv_data
-    if [ "$RXNM_HAS_JQ" = "true" ]; then
-        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        tsv_data=$(printf '%b\n' "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
     fi
     
     if command -v column >/dev/null; then
-        echo "$tsv_data" | column -t -s $'\t'
+        echo "$tsv_data" | column -t -s "$(printf '\t')"
     else
         echo "$tsv_data"
     fi
@@ -290,7 +294,7 @@ json_success() {
     
     # Corrected: Use POSIX fallback if JQ missing
     local full_json
-    if [ "$RXNM_HAS_JQ" = "true" ]; then
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
         full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
     else
         if [ "$data" = "{}" ]; then
@@ -329,7 +333,7 @@ json_error() {
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then
-        if [ "$RXNM_HAS_JQ" = "true" ]; then
+        if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
             "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
                 '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
         else
@@ -387,7 +391,7 @@ auto_select_interface() {
             fi
         fi
     done
-    if [ $count -eq 1 ]; then
+    if [ "$count" -eq 1 ]; then
         echo "$candidate"
         return 0
     fi
@@ -420,7 +424,7 @@ get_proxy_json() {
         if [ -n "$http" ] && ! validate_proxy_url "$http"; then http=""; fi
         if [ -n "$https" ] && ! validate_proxy_url "$https"; then https=""; fi
         
-        if [ "$RXNM_HAS_JQ" = "true" ]; then
+        if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
             "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
                 '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
         else
@@ -452,7 +456,7 @@ secure_write() {
     dir=$(dirname "$dest")
     [ -d "$dir" ] || mkdir -p "$dir"
     
-    if [ -x "${RXNM_AGENT_BIN}" ]; then
+    if [ -x "${RXNM_AGENT_BIN:-}" ]; then
         if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
             return 0
         fi
@@ -508,7 +512,7 @@ validate_bluetooth_name() {
 validate_channel() {
     local ch="$1"
     if ! rxnm_match "$ch" '^[0-9]+$'; then return 1; fi
-    if [ "$ch" -lt "$MIN_CHANNEL" ] || [ "$ch" -gt "$WIFI_CHANNEL_MAX" ]; then return 1; fi
+    if [ "$ch" -lt "${MIN_CHANNEL:-1}" ] || [ "$ch" -gt "${WIFI_CHANNEL_MAX:-177}" ]; then return 1; fi
     return 0
 }
 
