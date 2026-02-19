@@ -158,6 +158,7 @@ action_setup() {
     else
         # If sourcing order failed, try to source profiles manually
         if [ -n "${RXNM_LIB_DIR:-}" ] && [ -f "${RXNM_LIB_DIR}/rxnm-profiles.sh" ]; then
+             # shellcheck disable=SC1091
              . "${RXNM_LIB_DIR}/rxnm-profiles.sh"
              action_profile "boot"
         fi
@@ -304,6 +305,7 @@ tune_network_stack() {
 # --- Firewall Abstraction (NAT) ---
 
 detect_firewall_tool() {
+    # shellcheck disable=SC2153
     echo "$FW_TOOL"
 }
 

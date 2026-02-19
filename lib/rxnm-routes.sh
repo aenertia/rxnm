@@ -61,13 +61,16 @@ action_route_list() {
     local routes_v6="[]"
     
     if [ "$family" != "-6" ]; then
+        # shellcheck disable=SC2086
         routes_v4=$(ip -j -4 route show $_tbl 2>/dev/null || echo "[]")
     fi
     if [ "$family" != "-4" ]; then
+        # shellcheck disable=SC2086
         routes_v6=$(ip -j -6 route show $_tbl 2>/dev/null || echo "[]")
     fi
     
     # Merge and output
+    # shellcheck disable=SC2016
     "$JQ_BIN" -n --argjson v4 "$routes_v4" --argjson v6 "$routes_v6" \
         '{success: true, routes: ($v4 + $v6)}'
 }

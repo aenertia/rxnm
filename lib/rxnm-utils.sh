@@ -301,6 +301,7 @@ print_table() {
     
     local _oldifs="$IFS"
     IFS=','
+    # shellcheck disable=SC2086
     set -- $columns
     IFS="$_oldifs"
     
@@ -339,6 +340,7 @@ json_success() {
     # Corrected: Use POSIX fallback if JQ missing
     local full_json
     if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        # shellcheck disable=SC2016
         full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
     else
         if [ "$data" = "{}" ]; then
@@ -378,6 +380,7 @@ json_error() {
     
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+            # shellcheck disable=SC2016
             "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
                 '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
         else
@@ -469,6 +472,7 @@ get_proxy_json() {
         if [ -n "$https" ] && ! validate_proxy_url "$https"; then https=""; fi
         
         if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+            # shellcheck disable=SC2016
             "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
                 '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
         else
@@ -587,6 +591,7 @@ _validate_ip_csv() {
     local _list="$1"
     local _old_ifs="$IFS"
     IFS=','
+    # shellcheck disable=SC2086
     set -- $_list
     IFS="$_old_ifs"
     for _item do
@@ -601,6 +606,7 @@ validate_routes() {
     local routes="$1"
     local _oldifs="$IFS"
     IFS=','
+    # shellcheck disable=SC2086
     set -- $routes
     IFS="$_oldifs"
     

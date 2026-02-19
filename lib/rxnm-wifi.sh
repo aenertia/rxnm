@@ -293,6 +293,7 @@ _task_p2p_connect() {
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local peer_path
+    # shellcheck disable=SC2016
     peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
@@ -341,6 +342,7 @@ _task_p2p_status() {
         net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
     
+    # shellcheck disable=SC2016
     "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$objects_json" '
         ($iwd.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) |
          select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
@@ -425,6 +427,7 @@ action_scan() {
     fi
 
     local device_path
+    # shellcheck disable=SC2016
     device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
@@ -450,6 +453,7 @@ action_scan() {
     fi
     
     local result
+    # shellcheck disable=SC2016
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         ([
                 .data | to_entries[] |
