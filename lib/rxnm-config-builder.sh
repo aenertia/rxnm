@@ -16,14 +16,19 @@ _get_system_template_val() {
     local key="$2"
     local f="/usr/lib/systemd/network/$fname"
     [ -f "$f" ] || return
-    while read -r line; do
-        if [[ "$line" == "${key}="* ]]; then
-             local val="${line#*=}"
-             val="${val%%#*}" # Strip comments
-             val="${val//[[:space:]]/}" # Strip whitespace
-             echo "$val"
-             return
-        fi
+    
+    # POSIX read loop
+    while IFS= read -r line; do
+        case "$line" in
+            "${key}="*)
+                local val="${line#*=}"
+                val="${val%%#*}" # Strip comments
+                # Strip whitespace (POSIX compatible)
+                val="$(echo "$val" | tr -d '[:space:]')"
+                echo "$val"
+                return
+                ;;
+        esac
     done < "$f"
 }
 
@@ -56,7 +61,7 @@ build_network_config() {
     local ipv6_pd="yes"
 
     # Argument Parsing
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --match-name) match_iface="$2"; shift 2 ;;
             --match-ssid) match_ssid="$2"; shift 2 ;;
@@ -88,86 +93,115 @@ build_network_config() {
     done
 
     # Conflict resolution: If Avahi is running, disable networkd's mdns
-    if [ "$mdns" == "yes" ] && type is_avahi_running &>/dev/null && is_avahi_running; then
+    # Check type exists first to avoid 'not found' errors in some shells
+    if [ "$mdns" = "yes" ] && command -v is_avahi_running >/dev/null 2>&1 && is_avahi_running; then
         mdns="no"
     fi
 
     # [Match] Section
     local config="[Match]\nName=${match_iface}\n"
-    [ -n "$match_ssid" ] && config+="SSID=${match_ssid}\n"
+    [ -n "$match_ssid" ] && config="${config}SSID=${match_ssid}\n"
     
     # [Link] Section (Configuration applied at link up)
     if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$mac_addr" ]; then
-        config+="\n[Link]\n"
-        [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
-        [ -n "$mac_addr" ] && config+="MACAddress=${mac_addr}\n"
-        [ -n "$mtu" ] && config+="MTUBytes=${mtu}\n"
+        config="${config}\n[Link]\n"
+        [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
+        [ -n "$mac_addr" ] && config="${config}MACAddress=${mac_addr}\n"
+        [ -n "$mtu" ] && config="${config}MTUBytes=${mtu}\n"
     fi
 
     # [Network] Section (Core settings)
-    config+="\n[Network]\n"
-    [ -n "$desc" ] && config+="Description=${desc}\n"
-    [ -n "$dhcp" ] && config+="DHCP=${dhcp}\n"
+    config="${config}\n[Network]\n"
+    [ -n "$desc" ] && config="${config}Description=${desc}\n"
+    [ -n "$dhcp" ] && config="${config}DHCP=${dhcp}\n"
     
     # Virtual Memberships
-    [ -n "$bridge" ] && config+="Bridge=${bridge}\n"
-    [ -n "$bond" ] && config+="Bond=${bond}\n"
-    [ -n "$vrf" ] && config+="VRF=${vrf}\n"
-    [ -n "$vlan" ] && config+="VLAN=${vlan}\n"
+    [ -n "$bridge" ] && config="${config}Bridge=${bridge}\n"
+    [ -n "$bond" ] && config="${config}Bond=${bond}\n"
+    [ -n "$vrf" ] && config="${config}VRF=${vrf}\n"
+    [ -n "$vlan" ] && config="${config}VLAN=${vlan}\n"
     
-    config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
+    config="${config}MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     # ConfigureWithoutCarrier helps with virtual/flaky links
-    config+="LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
+    config="${config}LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ -n "$ipv6_privacy" ]; then
-        config+="IPv6PrivacyExtensions=${ipv6_privacy}\n"
+        config="${config}IPv6PrivacyExtensions=${ipv6_privacy}\n"
     fi
 
-    # Static Addresses
+    # Static Addresses - POSIX array emulation
     if [ -n "$addresses" ]; then
-        IFS=',' read -ra ADDRS <<< "$addresses"
-        for addr in "${ADDRS[@]}"; do config+="Address=${addr}\n"; done
+        # Save IFS
+        old_ifs="$IFS"
+        IFS=','
+        # Word splitting expansion
+        set -- $addresses
+        IFS="$old_ifs"
+        for addr do
+            config="${config}Address=${addr}\n"
+        done
     fi
     
     if [ -n "$gateway" ]; then
-        config+="Gateway=${gateway}\n"
+        config="${config}Gateway=${gateway}\n"
     fi
     
     if [ -n "$dns_servers" ]; then
-        IFS=',' read -ra DNS <<< "$dns_servers"
-        for d in "${DNS[@]}"; do config+="DNS=${d}\n"; done
+        old_ifs="$IFS"
+        IFS=','
+        set -- $dns_servers
+        IFS="$old_ifs"
+        for d do
+            config="${config}DNS=${d}\n"
+        done
     fi
     
     if [ -n "$domains" ]; then
-        IFS=',' read -ra DOMS <<< "$domains"
-        for d in "${DOMS[@]}"; do config+="Domains=${d}\n"; done
+        old_ifs="$IFS"
+        IFS=','
+        set -- $domains
+        IFS="$old_ifs"
+        for d do
+            config="${config}Domains=${d}\n"
+        done
     fi
     
     # DHCP Client Options
     if [ "$dhcp" != "no" ] || [ -n "$dhcp_client_id" ]; then
-         config+="\n[DHCPv4]\n"
-         [ -n "$dhcp_client_id" ] && config+="ClientIdentifier=${dhcp_client_id}\n"
+         config="${config}\n[DHCPv4]\n"
+         [ -n "$dhcp_client_id" ] && config="${config}ClientIdentifier=${dhcp_client_id}\n"
          # Fix: Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
-         [ "$dhcp" != "no" ] && [ -n "$metric" ] && config+="RouteMetric=${metric}\n"
+         [ "$dhcp" != "no" ] && [ -n "$metric" ] && config="${config}RouteMetric=${metric}\n"
     fi
     
-    if [ "$ipv6_pd" == "no" ]; then
-        config+="\n[DHCPv6]\nUseDelegatedPrefix=no\n"
+    if [ "$ipv6_pd" = "no" ]; then
+        config="${config}\n[DHCPv6]\nUseDelegatedPrefix=no\n"
     fi
 
     # Static Routes
     if [ -n "$routes" ]; then
-        IFS=',' read -ra RTS <<< "$routes"
-        for r in "${RTS[@]}"; do
+        old_ifs="$IFS"
+        IFS=','
+        set -- $routes
+        IFS="$old_ifs"
+        
+        for r do
             local r_dest="" r_gw="" r_metric=""
-            IFS='@' read -r r_dest r_gw r_metric <<< "$r"
-            config+="\n[Route]\nDestination=${r_dest}\n"
-            [ -n "$r_gw" ] && config+="Gateway=${r_gw}\n"
+            # POSIX split on @ using cut (safer than read)
+            r_dest=$(echo "$r" | cut -d'@' -f1)
+            r_gw=$(echo "$r" | cut -d'@' -f2 -s) # -s to only output if delimiter found
+            r_metric=$(echo "$r" | cut -d'@' -f3 -s)
+            
+            # If no @ found, dest is the whole string
+            [ -z "$r_dest" ] && r_dest="$r"
+            
+            config="${config}\n[Route]\nDestination=${r_dest}\n"
+            [ -n "$r_gw" ] && config="${config}Gateway=${r_gw}\n"
             if [ -n "$r_metric" ]; then 
-                config+="Metric=${r_metric}\n"
-            elif [ -n "$metric" ] && [ "$dhcp" == "no" ]; then 
+                config="${config}Metric=${r_metric}\n"
+            elif [ -n "$metric" ] && [ "$dhcp" = "no" ]; then 
                 # Explicitly inherit base metric for manual static routes
-                config+="Metric=${metric}\n"
+                config="${config}Metric=${metric}\n"
             fi
         done
     fi
@@ -180,15 +214,15 @@ build_device_link_config() {
     local iface="$1" speed="$2" duplex="$3" autoneg="$4" wol="$5" mac_policy="$6" name_policy="$7" mac_addr="$8"
     
     local config="[Match]\nOriginalName=${iface}\n"
-    config+="\n[Link]\nDescription=RXNM Hardware Config\n"
+    config="${config}\n[Link]\nDescription=RXNM Hardware Config\n"
     
-    [ -n "$speed" ] && config+="BitsPerSecond=${speed}M\n"
-    [ -n "$duplex" ] && config+="Duplex=${duplex}\n"
-    [ -n "$autoneg" ] && config+="AutoNegotiation=${autoneg}\n"
-    [ -n "$wol" ] && config+="WakeOnLan=${wol}\n"
-    [ -n "$mac_policy" ] && config+="MACAddressPolicy=${mac_policy}\n"
-    [ -n "$name_policy" ] && config+="NamePolicy=${name_policy}\n"
-    [ -n "$mac_addr" ] && config+="MACAddress=${mac_addr}\n"
+    [ -n "$speed" ] && config="${config}BitsPerSecond=${speed}M\n"
+    [ -n "$duplex" ] && config="${config}Duplex=${duplex}\n"
+    [ -n "$autoneg" ] && config="${config}AutoNegotiation=${autoneg}\n"
+    [ -n "$wol" ] && config="${config}WakeOnLan=${wol}\n"
+    [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
+    [ -n "$name_policy" ] && config="${config}NamePolicy=${name_policy}\n"
+    [ -n "$mac_addr" ] && config="${config}MACAddress=${mac_addr}\n"
     
     printf "%b" "$config"
 }
@@ -197,47 +231,55 @@ build_device_link_config() {
 build_gateway_config() {
     local iface="$1" ip="$2" share="$3" desc="$4" mdns="${5:-yes}" llmnr="${6:-yes}" ipv6_pd="${7:-yes}"
     
-    if [ "$mdns" == "yes" ] && type is_avahi_running &>/dev/null && is_avahi_running; then mdns="no"; fi
+    if [ "$mdns" = "yes" ] && command -v is_avahi_running >/dev/null 2>&1 && is_avahi_running; then mdns="no"; fi
     
     # Auto-detect IP if missing (useful for usb gadgets)
     if [ -z "$ip" ]; then
         local detected_ip=""
         # REFACTOR: Removed check for legacy bridge template
-        if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then
-             detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
-        elif [[ "$iface" == wlan* ]] && [ "$share" == "true" ]; then
-             detected_ip=$(_get_system_template_val "71-wifi-ap.network" "Address")
-        fi
+        # Use case instead of [[ == ]]
+        case "$iface" in
+            usb*|rndis*)
+                 detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")
+                 ;;
+            wlan*)
+                 if [ "$share" = "true" ]; then
+                     detected_ip=$(_get_system_template_val "71-wifi-ap.network" "Address")
+                 fi
+                 ;;
+        esac
         
         if [ -n "$detected_ip" ]; then ip="$detected_ip"
         else
-            if [ "$share" == "true" ]; then ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
+            if [ "$share" = "true" ]; then ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
             else
                  # Default for gadgets match templates (High RFC1918)
-                 if [[ "$iface" == usb* ]] || [[ "$iface" == rndis* ]]; then ip="192.168.213.1/24"
-                 else ip="169.254.1.1/16" ; fi
+                 case "$iface" in
+                    usb*|rndis*) ip="192.168.213.1/24" ;;
+                    *) ip="169.254.1.1/16" ;;
+                 esac
             fi
         fi
     fi
     
     local config="[Match]\nName=${iface}\n\n[Network]\nDescription=${desc}\n"
-    config+="MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
-    [ -n "$ip" ] && config+="Address=${ip}\n"
-    config+="LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
+    config="${config}MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
+    [ -n "$ip" ] && config="${config}Address=${ip}\n"
+    config="${config}LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
     
-    if [ "$share" == "true" ]; then
+    if [ "$share" = "true" ]; then
         # Router Mode: Forwarding + RA
-        config+="IPForwarding=yes\nIPv6SendRA=yes\n"
-        if [ "$ipv6_pd" != "no" ]; then config+="DHCPPrefixDelegation=yes\n"; fi
+        config="${config}IPForwarding=yes\nIPv6SendRA=yes\n"
+        if [ "$ipv6_pd" != "no" ]; then config="${config}DHCPPrefixDelegation=yes\n"; fi
         
         # Local ULA for IPv6
-        config+="Address=fd00:cafe:feed::a7ca:de/64\n"
+        config="${config}Address=fd00:cafe:feed::a7ca:de/64\n"
         
-        config+="DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
-        config+="[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
+        config="${config}DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
+        config="${config}[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
     else
         # Local Mode: No Forwarding
-        config+="IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
+        config="${config}IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
     fi
     
     printf "%b" "$config"

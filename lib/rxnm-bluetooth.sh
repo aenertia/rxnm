@@ -35,7 +35,7 @@ ensure_bluetooth_power() {
     for rdir in /sys/class/rfkill/rfkill*; do
         [ -e "$rdir/type" ] || continue
         read -r rtype < "$rdir/type" 2>/dev/null || rtype=""
-        if [ "$rtype" == "bluetooth" ]; then
+        if [ "$rtype" = "bluetooth" ]; then
              read -r soft < "$rdir/soft" 2>/dev/null || soft=0
              if [ "$soft" -eq 1 ]; then blocked=1; break; fi
         fi
@@ -81,16 +81,17 @@ _task_pan_net() {
             # Set Alias if provided
             if [ -n "$name" ]; then
                 validate_bluetooth_name "$name"
-                local adapters=$(_get_dbus_adapters)
+                local adapters
+                adapters=$(_get_dbus_adapters)
                 for adapter in $adapters; do
                     busctl --timeout=2s set-property org.bluez "$adapter" org.bluez.Adapter1 Alias s "$name" >/dev/null 2>&1
                 done
             fi
             
-            if [ "$mode" == "host" ] || [ "$mode" == "nap" ]; then
+            if [ "$mode" = "host" ] || [ "$mode" = "nap" ]; then
                 # Host/NAP Mode (Sharing internet)
                 local is_share="true"
-                [ "$share" == "false" ] && is_share="false"
+                [ "$share" = "false" ] && is_share="false"
                 
                 local content
                 # Create gateway config for bnep* interfaces
@@ -98,7 +99,7 @@ _task_pan_net() {
                 secure_write "$STORAGE_PAN_NET_FILE" "$content" "644"
                 
                 tune_network_stack "host"
-                [ "$is_share" == "true" ] && enable_nat_masquerade "bnep+"
+                [ "$is_share" = "true" ] && enable_nat_masquerade "bnep+"
             else
                 # Client Mode (Tethering from phone)
                 local content
@@ -134,7 +135,7 @@ action_pan_net() {
     check_paths
     with_iface_lock "pan_net" _task_pan_net "$cmd" "$pin" "$name" "$custom_ip" "$mode" "$share"
     
-    if [ "$cmd" == "enable" ]; then
+    if [ "$cmd" = "enable" ]; then
         json_success '{"status": "enabled", "mode": "'"$mode"'"}'
     else
         json_success '{"status": "disabled"}'
@@ -191,7 +192,7 @@ action_bt_scan() {
         ] | sort_by(-.rssi)
     ')
     
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         json_success "{\"devices\": $devices}"
     else
         echo "Bluetooth Devices:"
@@ -201,7 +202,8 @@ action_bt_scan() {
 
 action_bt_pair() {
     local mac="$1"
-    if ! [[ "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then
+    # POSIX: Use rxnm_match wrapper instead of [[ =~ ]]
+    if ! rxnm_match "$mac" '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'; then
         json_error "Invalid MAC address"
         return 1
     fi
@@ -221,8 +223,10 @@ action_bt_pair() {
     
     local retries=5
     local success=false
+    local i=0
     
-    for ((i=0; i<retries; i++)); do
+    # POSIX Loop
+    while [ "$i" -lt "$retries" ]; do
         if [ -z "$dev_path" ]; then
             dev_path=$(_get_dbus_device_path "$mac")
         fi
@@ -231,15 +235,16 @@ action_bt_pair() {
             local paired
             paired=$(busctl --timeout=2s get-property org.bluez "$dev_path" org.bluez.Device1 Paired --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
             
-            if [ "$paired" == "true" ]; then
+            if [ "$paired" = "true" ]; then
                 success=true
                 break
             fi
         fi
         sleep 1
+        i=$((i + 1))
     done
     
-    if [ "$success" == "true" ]; then
+    if [ "$success" = "true" ]; then
         timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1
         json_success '{"action": "paired", "mac": "'"$mac"'"}'
         return 0

@@ -90,7 +90,8 @@ _task_create_macvlan() {
             --mdns "yes" \
             --llmnr "yes")
             
-        content="${content/\[Network\]/[Network]\nMACVLAN=${name}}"
+        # Replaces POSIX string replacement
+        content="$(echo "$content" | sed "s/\[Network\]/[Network]\nMACVLAN=${name}/")"
         secure_write "$parent_cfg" "$content" "644"
     fi
     
@@ -132,7 +133,7 @@ _task_create_ipvlan() {
             --mdns "yes" \
             --llmnr "yes")
             
-        content="${content/\[Network\]/[Network]\nIPVLAN=${name}}"
+        content="$(echo "$content" | sed "s/\[Network\]/[Network]\nIPVLAN=${name}/")"
         secure_write "$parent_cfg" "$content" "644"
     fi
     
@@ -164,8 +165,8 @@ _task_create_bond() {
     local netdev_file="${STORAGE_NET_DIR}/60-bond-${name}.netdev"
     local netdev_content="[NetDev]\nName=${name}\nKind=bond\n[Bond]\nMode=${mode}\nMIIMonitorSec=100ms\n"
     
-    if [ "$mode" == "802.3ad" ]; then
-        netdev_content+="LACPTransmitRate=fast\nTransmitHashPolicy=layer2+3\n"
+    if [ "$mode" = "802.3ad" ]; then
+        netdev_content="${netdev_content}LACPTransmitRate=fast\nTransmitHashPolicy=layer2+3\n"
     fi
     secure_write "$netdev_file" "$netdev_content" "644"
     
@@ -304,7 +305,10 @@ action_create_bond() {
 
 action_set_bond_slave() {
     local iface="$1"; local bond="$2"
-    [ -z "$iface" ] || [ -z "$bond" ] && { json_error "Interface and Bond required"; return 1; }
+    if [ -z "$iface" ] || [ -z "$bond" ]; then
+        json_error "Interface and Bond required"
+        return 1
+    fi
     ! validate_interface_name "$iface" && { json_error "Invalid interface"; return 1; }
     
     with_iface_lock "$iface" _task_set_bond_slave "$iface" "$bond"

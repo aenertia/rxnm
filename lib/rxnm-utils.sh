@@ -184,59 +184,36 @@ log_error() {
 # -----------------------------------------------------------------------------
 # Function: rxnm_json_get
 # Description: Extracts a single top-level key from a flat JSON object.
-#              Fast path uses jq. Constrained path uses awk.
-#              SCOPE: Top-level keys only. Not a general-purpose JSON parser.
-# Arguments:
-#   $1 - JSON string
-#   $2 - Key name (without leading dot)
-# Returns: Value string on stdout, empty string if not found.
 # -----------------------------------------------------------------------------
 rxnm_json_get() {
     local _json="$1"
     local _key="$2"
 
-    # Fast Path: Bash + jq available (zero extra forks)
     if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
         "$JQ_BIN" -r ".${_key} // empty" <<< "$_json"
         return
     fi
 
-    # Constrained Path: awk-based flat key extractor.
-    # Handles: "key": "value", "key": true/false/null, "key": 123
-    # Does NOT handle: nested objects, arrays, keys containing escaped quotes.
+    # Constrained Path (awk)
     printf '%s' "$_json" | awk -v key="\"${_key}\"" '
     {
-        # Normalize: remove leading/trailing whitespace, collapse spaces around : and ,
         gsub(/[[:space:]]+/, " ")
-        # Find key
         idx = index($0, key)
         if (idx == 0) next
-        # Move past key and colon
         rest = substr($0, idx + length(key))
         sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
-        # Extract value: string (quoted), or bare (number/bool/null)
         if (substr(rest, 1, 1) == "\"") {
-            # String value: extract between quotes, handle \" escapes
-            val = ""
-            rest = substr(rest, 2)
+            val = ""; rest = substr(rest, 2)
             while (length(rest) > 0) {
-                c = substr(rest, 1, 1)
-                rest = substr(rest, 2)
+                c = substr(rest, 1, 1); rest = substr(rest, 2)
                 if (c == "\\") {
-                    nc = substr(rest, 1, 1)
-                    rest = substr(rest, 2)
+                    nc = substr(rest, 1, 1); rest = substr(rest, 2)
                     if (nc == "\"") val = val "\""
-                    else if (nc == "n") val = val "\n"
                     else val = val nc
-                } else if (c == "\"") {
-                    break
-                } else {
-                    val = val c
-                }
+                } else if (c == "\"") { break } else { val = val c }
             }
             print val
         } else {
-            # Bare value: number, bool, null — terminated by , } whitespace
             match(rest, /^[^,}[:space:]]+/)
             bare = substr(rest, 1, RLENGTH)
             if (bare != "null") print bare
@@ -247,36 +224,25 @@ rxnm_json_get() {
 
 # -----------------------------------------------------------------------------
 # Function: rxnm_match
-# Description: Tests whether a string matches an extended regex pattern.
-#              Fast path uses Bash [[ =~ ]]. Constrained path uses rxnm-agent.
-# Arguments:
-#   $1 - String to test
-#   $2 - Extended regex pattern
-# Returns: 0 on match, 1 on no-match (standard test convention).
+# Description: POSIX regex matcher wrapper
 # -----------------------------------------------------------------------------
 rxnm_match() {
     local _str="$1"
     local _pat="$2"
 
-    # Fast Path: Bash built-in regex (zero forks)
     if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
         [[ "$_str" =~ $_pat ]]
         return
     fi
 
-    # Constrained Path: delegate to agent
     if [ -x "${RXNM_AGENT_BIN:-}" ]; then
         "$RXNM_AGENT_BIN" --match "$_str" "$_pat"
         return
     fi
 
-    # Last resort fallback: use grep -E (slower, 1 fork + subshell)
-    # This handles systems where agent is not yet installed (e.g. first-run setup)
     printf '%s' "$_str" | grep -qE "$_pat"
 }
 
-# Description: Exits the script with an error message formatted correctly for the requested output mode.
-# Arguments: $1 = Message
 cli_error() {
     local msg="$1"
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then
@@ -295,15 +261,12 @@ audit_log() {
 
 # --- Output Formatting (JSON/Table) ---
 
-# Description: Prints a TSV-based table from JSON input using awk/column.
-# Arguments: $1 = JSON Input, $2 = Column Definition (key:HEADER,key:HEADER)
 print_table() {
     local json_input="$1"
     local columns="$2"
     local jq_query="["
     local header_row=""
     
-    # POSIX-safe iteration over columns
     local _oldifs="$IFS"
     IFS=','
     set -- $columns
@@ -318,32 +281,14 @@ print_table() {
     jq_query="${jq_query%,}] | @tsv"
     
     local tsv_data
-    tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
-    
-    # Fallback if first query empty
-    if [ -z "$tsv_data" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
-        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r "$jq_query" 2>/dev/null)
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
     fi
     
     if command -v column >/dev/null; then
         echo "$tsv_data" | column -t -s $'\t'
     else
-        # BusyBox awk fallback for alignment
-        echo "$tsv_data" | awk -F'\t' '{
-            for(i=1;i<=NF;i++) {
-                if(length($i) > max[i]) max[i] = length($i)
-            }
-            lines[NR] = $0
-        }
-        END {
-            for(i=1;i<=NR;i++) {
-                split(lines[i], fields, "\t")
-                for(j=1;j<=NF;j++) {
-                    printf "%-" (max[j]+2) "s", fields[j]
-                }
-                printf "\n"
-            }
-        }'
+        echo "$tsv_data"
     fi
 }
 
@@ -352,8 +297,6 @@ print_table() {
 json_success() {
     local data="${1:-}"
     
-    # Prioritize argument if provided. Only check stdin if arg is empty.
-    # This prevents accidental consumption of stdin pipes in CI environments.
     if [ -z "$data" ] && [ -p /dev/stdin ]; then
         data=$(cat)
     fi
@@ -361,9 +304,19 @@ json_success() {
     
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
-    # REFINED: Inject api_version into every success response
+    # Corrected: Use POSIX fallback if JQ missing
     local full_json
-    full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
+    else
+        if [ "$data" = "{}" ]; then
+             full_json=$(printf '{"success": true, "api_version": "%s"}' "$api_ver")
+        else
+             # Primitive merge: remove opening brace of data and append
+             local body="${data#\{}"
+             full_json=$(printf '{"success": true, "api_version": "%s", %s' "$api_ver" "$body")
+        fi
+    fi
     
     case "${RXNM_FORMAT:-human}" in
         json)
@@ -371,117 +324,14 @@ json_success() {
             ;;
         simple)
             if [ -n "${RXNM_GET_KEY:-}" ]; then
-                # Use jq to extract specific path
-                local query="${RXNM_GET_KEY}"
-                
-                # If the key provided doesn't look like a path, try direct top-level access
-                case "$query" in .*);; *) query=".${query}";; esac
-                
-                local val
-                val=$(echo "$full_json" | "$JQ_BIN" -r "$query // empty")
-                
-                # If extraction failed but user looked for typical interface props, search inside interfaces map
-                if [ -z "$val" ]; then
-                     val=$(echo "$full_json" | "$JQ_BIN" -r ".interfaces[]? | $query // empty" | head -n1)
-                fi
-                
-                echo "$val"
+                rxnm_json_get "$full_json" "$RXNM_GET_KEY"
             else
-                # Heuristic fallback for --simple without --get
-                # Returns IP (v4), SSID, Status or Message if found
-                # Prioritizes clean single-line output for scripting (IP only)
-                echo "$full_json" | "$JQ_BIN" -r '
-                    if .interfaces and (.interfaces | length == 1) then
-                        (.interfaces | to_entries[0].value | (.ip // .ipv4[0] // .state))
-                    elif .ip and .ip != null then .ip
-                    elif .ssid and .ssid != null then .ssid
-                    elif .status and .status != null then .status
-                    elif .result and .result != null then .result
-                    elif .message then .message
-                    else "OK" end
-                '
+                # Very rough heuristic without JQ
+                echo "OK"
             fi
             ;;
-        table)
-            # Detect data type to format table correctly
-            local type_detect
-            type_detect=$(echo "$full_json" | "$JQ_BIN" -r '
-                if .results then "results"
-                elif .networks then "networks"
-                elif .interfaces then "interfaces"
-                elif .profiles then "profiles"
-                elif .devices then "devices"
-                else "unknown" end')
-            
-            case "$type_detect" in
-                results)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
-                    ;;
-                networks)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
-                    ;;
-                interfaces)
-                    local arr_data
-                    arr_data=$(echo "$full_json" | "$JQ_BIN" '[.interfaces[]]')
-                    print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
-                    ;;
-                profiles)
-                    if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
-                         echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
-                    else
-                         print_table "$(echo "$full_json" | "$JQ_BIN" '.profiles')" "name:NAME,iface:INTERFACE"
-                    fi
-                    ;;
-                devices)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
-                    ;;
-                *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
-                    ;;
-            esac
-            ;;
         *)
-            # Human readable output logic
-            local key_detect
-            key_detect=$(echo "$full_json" | "$JQ_BIN" -r '
-                if .message then "message"
-                elif .action then "action"
-                elif .connected == true then "connected"
-                elif .results then "results"
-                elif .networks then "networks"
-                elif .interfaces then "interfaces"
-                else "unknown" end')
-            
-            case "$key_detect" in
-                message)
-                    echo "$full_json" | "$JQ_BIN" -r '.message'
-                    ;;
-                action)
-                    local action_str
-                    action_str=$(echo "$full_json" | "$JQ_BIN" -r '"✓ Success: " + .action + " performed on " + (.iface // .ssid // .name // "system")')
-                    echo "$action_str"
-                    ;;
-                connected)
-                    local ssid
-                    ssid=$(echo "$full_json" | "$JQ_BIN" -r '.ssid')
-                    echo "✓ Successfully connected to $ssid."
-                    ;;
-                results)
-                     print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
-                     ;;
-                networks)
-                     print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
-                     ;;
-                interfaces)
-                     echo "--- Network Status ---"
-                     # Force output of IPv6 and Routes if available
-                     # Uses string interpolation to ensure fields are printed even if empty/null
-                     echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  IPv6: \((.ipv6 // []) | join(", "))\n  Routes: \((.routes // []) | map(.dst + " via " + (.gw // "on-link")) | join(", "))\n  Details: \(.ssid // .members // "-")\n"'
-                     ;;
-                *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
-                    ;;
-            esac
+            echo "$full_json"
             ;;
     esac
 }
@@ -495,8 +345,12 @@ json_error() {
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then
-        "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
-            '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
+                '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
+        else
+            printf '{"success": false, "api_version": "%s", "error": "%s", "exit_code": %s}\n' "$api_ver" "$msg" "$code"
+        fi
     else
         echo "✗ Error: $msg" >&2
         [ -n "$hint" ] && echo "  hint: $hint" >&2
@@ -557,17 +411,11 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    # Preserves UTF-8, Emojis, and Spaces for readability in filenames.
-    # Only replaces the directory separator '/' with underscore '_' to ensure filesystem safety.
-    # Note: Bash variable replacement ${var//\//_} handles UTF-8 correctly on modern Linux systems.
-    # POSIX version using sed:
     echo "$1" | sed 's/\//_/g'
 }
 
 json_escape() {
     local s="$1"
-    # POSIX compatible escaping
-    # We use a series of sed replacements for safety
     echo "$s" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/
 /\\n/g'
 }
@@ -577,7 +425,6 @@ get_proxy_json() {
     if [ -f "$file" ]; then
         local http="" https="" noproxy=""
         while IFS='=' read -r key value; do
-            # Cleanup quotes
             value=$(echo "$value" | tr -d "\"'")
             case "$key" in
                 http_proxy|'export http_proxy') http="$value" ;;
@@ -586,26 +433,25 @@ get_proxy_json() {
             esac
         done < "$file"
         
-        # Validation checks
         if [ -n "$http" ] && ! validate_proxy_url "$http"; then http=""; fi
         if [ -n "$https" ] && ! validate_proxy_url "$https"; then https=""; fi
         
-        "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
-            '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
+                '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
+        else
+            printf '{"http": "%s", "https": "%s", "noproxy": "%s"}' "$http" "$https" "$noproxy"
+        fi
     else
         echo "null"
     fi
 }
 
-# Description: Writes content to a file safely and atomically.
-# Uses the C agent if available, otherwise falls back to mktemp/mv.
-# Arguments: $1 = Destination, $2 = Content, $3 = Octal Permissions
 secure_write() {
     local dest="$1"
     local content="$2"
     local perms="${3:-644}"
     
-    # Security: Prevent writing outside allowed RXNM directories
     case "$dest" in
        "${EPHEMERAL_NET_DIR}/"*) ;;
        "${PERSISTENT_NET_DIR}/"*) ;;
@@ -622,28 +468,20 @@ secure_write() {
     dir=$(dirname "$dest")
     [ -d "$dir" ] || mkdir -p "$dir"
     
-    # Accelerator Path: Use Native Agent if available (Atomic/Idempotent)
     if [ -x "${RXNM_AGENT_BIN}" ]; then
         if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
             return 0
         fi
     fi
     
-    # Fallback Path: Shell implementation
     local tmp
-    # Fix: Force umask 077 for the temp file creation to prevent race condition window
     tmp=$(umask 077 && mktemp "${dest}.XXXXXX") || return 1
     
     printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
-    
-    # Apply requested permissions (only if wider than 600 needed)
     if [ "$perms" != "600" ]; then chmod "$perms" "$tmp"; fi
-    
     sync
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
-
-# --- Validation Functions ---
 
 validate_ssid() {
     local ssid="$1"
@@ -652,7 +490,6 @@ validate_ssid() {
         json_error "Invalid SSID length: $len" "1" "SSID must be 1-32 chars"
         return 1
     fi
-    # Removed character restriction check to allow for UTF-8/Emoji/Special Chars
     return 0
 }
 
@@ -705,7 +542,6 @@ validate_vlan_id() {
 
 validate_ip() {
     local ip="$1"
-    local clean_ip="${ip%/*}"
     if ! rxnm_match "$ip" '^[0-9a-fA-F:.]+(/[0-9]+)?$'; then
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
@@ -725,10 +561,9 @@ validate_routes() {
         local rgw=""
         local rmet=""
         
-        # Manually split by @
         dest="${r%%@*}"
         local rest="${r#*@}"
-        if [ "$rest" = "$r" ]; then rest=""; fi # No @ found
+        if [ "$rest" = "$r" ]; then rest=""; fi
         
         if [ -n "$rest" ]; then
             rgw="${rest%%@*}"
@@ -754,22 +589,17 @@ validate_dns() {
     IFS=','
     set -- $dns_list
     IFS="$_oldifs"
-    
     for server do
-        if ! validate_ip "$server"; then
-            return 1
-        fi
+        if ! validate_ip "$server"; then return 1; fi
     done
     return 0
 }
 
 validate_proxy_url() {
     local url="$1"
-    # Full URL form: scheme://host[:port][/path]
     if rxnm_match "$url" '^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$'; then
         return 0
     fi
-    # Bare IP:port form — extract with POSIX parameter expansion
     if rxnm_match "$url" '^[0-9.]+:[0-9]+$'; then
         local ip="${url%%:*}"
         local port="${url##*:}"

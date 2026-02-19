@@ -20,14 +20,12 @@ set -eu
 IFS="$(printf '\n\t')"
 
 # --- BOOTSTRAP ---
-# Logic: Resolve the physical location of the script to find libraries relative to it.
 _rxnm_resolve_dir() {
     local src="$1"
     local dir
     while [ -L "$src" ]; do
         dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
         src="$(readlink "$src")"
-        # Handle relative symlinks
         case "$src" in
             /*) ;;
             *) src="${dir}/${src}" ;;
@@ -38,34 +36,27 @@ _rxnm_resolve_dir() {
 SCRIPT_DIR="$(_rxnm_resolve_dir "$0")"
 LIB_DIR="${SCRIPT_DIR}/../lib"
 
-# Export LIB_DIR so sourced scripts can access it
 export LIB_DIR
 export RXNM_LIB_DIR="${LIB_DIR}"
 
-# Fallback: If running from /usr/bin without relative libs, check system path
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
     LIB_DIR="/usr/lib/rocknix-network-manager/lib"
     export LIB_DIR
     export RXNM_LIB_DIR="${LIB_DIR}"
 fi
 
-# Sanity Check: Cannot proceed without constants
 if [ ! -f "${LIB_DIR}/rxnm-constants.sh" ]; then
     echo "ERROR: Could not locate library directory." >&2
     exit 1
 fi
 
-# Source Core: Only the absolute minimum required to parse args and find plugins
 . "${LIB_DIR}/rxnm-constants.sh"
 . "${LIB_DIR}/rxnm-utils.sh"
 . "${LIB_DIR}/rxnm-system.sh"
-. "${LIB_DIR}/rxnm-help.sh"  # Sourced early for help support
-# Plugins needed for discovery
+. "${LIB_DIR}/rxnm-help.sh"
 . "${LIB_DIR}/rxnm-plugins.sh"
-# Schema needed for validation (guarded internally)
+# Schema guarded internally
 . "${LIB_DIR}/rxnm-config-schema.sh"
-
-# Lazy Load Note: config-builder.sh and templates.sh are now sourced only on demand
 
 # --- GLOBAL VARIABLES & DEFAULTS ---
 export RXNM_FORMAT="human"
@@ -75,12 +66,9 @@ CATEGORY=""
 ACTION=""
 
 # --- ARGUMENT PARSING HELPER ---
-
-# Function: expand_alias
-# Description: Matches a partial string input against a list of valid options.
 expand_alias() {
     local input="$1"
-    shift  # Remove input from $@; remaining args are the valid options
+    shift
     local match=""
 
     [ -z "$input" ] && return 0
@@ -105,22 +93,17 @@ expand_alias() {
 }
 
 # --- GLOBAL OPTIONS PARSING ---
-# Parse flags that appear before subcommands or anywhere in the chain.
 SHOW_HELP="false"
 USE_STDIN="false"
 
-_rxnm_tmpargs=""
+# Robust POSIX Argument Parsing
+# 1. Iterate over "$@"
+# 2. Extract globals (setting vars)
+# 3. Accumulate positionals in a newline-delimited string
+# 4. Reset "$@" from the string
 
-_collect_positional() {
-    # Each positional arg is stored newline-separated.
-    # NB: This breaks for SSIDs containing literal newlines — acceptable constraint.
-    if [ -n "$_rxnm_tmpargs" ]; then
-        _rxnm_tmpargs="${_rxnm_tmpargs}
-${1}"
-    else
-        _rxnm_tmpargs="$1"
-    fi
-}
+_accumulated_args=""
+_nl="$(printf '\n')"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -133,26 +116,33 @@ while [ "$#" -gt 0 ]; do
         --help|-h) SHOW_HELP="true"; shift ;;
         --stdin)   USE_STDIN="true"; shift ;;
         --version) printf 'RXNM %s (API %s)\n' "${RXNM_VERSION:-1.1.0}" "${RXNM_API_VERSION:-1.1}"; exit 0 ;;
-        *)         _collect_positional "$1"; shift ;;
+        *)
+            # Non-global arg: Accumulate
+            if [ -z "$_accumulated_args" ]; then
+                _accumulated_args="$1"
+            else
+                _accumulated_args="${_accumulated_args}${_nl}${1}"
+            fi
+            shift
+            ;;
     esac
 done
 
-# Rebuild $@ from collected positionals
-if [ -n "$_rxnm_tmpargs" ]; then
-    _rebuild_args() {
-        local IFS='
-'
-        set -- $_rxnm_tmpargs
-    }
-    _rebuild_args
+# Rebuild "$@" from accumulator
+if [ -n "$_accumulated_args" ]; then
+    set -f          # Disable globbing to protect *
+    _old_ifs="$IFS"
+    IFS="$_nl"      # Split on newlines
+    # shellcheck disable=SC2086
+    set -- $_accumulated_args
+    IFS="$_old_ifs"
+    set +f
 else
     set --
 fi
-unset _rxnm_tmpargs
 
-# --- JSON STDIN EXPANSION (REST LITE MODE) ---
+# --- JSON STDIN EXPANSION ---
 if [ "$USE_STDIN" = "true" ]; then
-    # Ensure jq is available for stdin mode
     if [ "$RXNM_HAS_JQ" != "true" ]; then
         if [ "$RXNM_FORMAT" = "json" ]; then
             printf '{"success": false, "error": "JSON stdin mode requires jq"}\n'
@@ -162,37 +152,27 @@ if [ "$USE_STDIN" = "true" ]; then
         exit 1
     fi
 
-    # Check for stdin
-    # POSIX: [ -t 0 ] checks if stdin is a TTY. ! [ -t 0 ] means pipe/file.
     if ! [ -t 0 ]; then
-        # Read the raw JSON from stdin
         INPUT_JSON=$(cat)
         
-        # 0. Schema Validation (Input)
-        if ! validate_json_input "$INPUT_JSON"; then
-             exit 1
-        fi
+        # Validation
+        if ! validate_json_input "$INPUT_JSON"; then exit 1; fi
         
-        # 1. API Version Compatibility Check
+        # API Version Check
         REQ_VER=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.api_version // empty')
-        if [ -n "$REQ_VER" ] && [ -n "${RXNM_API_VERSION:-}" ] && [ "$REQ_VER" != "$RXNM_API_VERSION" ]; then
-             # Compare major version (strict)
-             if [ "${REQ_VER%%.*}" != "${RXNM_API_VERSION%%.*}" ]; then
-                 if [ "${RXNM_FORMAT}" = "json" ] || [ "$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.format')" = "json" ]; then
+        if [ -n "$REQ_VER" ] && [ -n "${RXNM_API_VERSION:-}" ]; then
+             case "$REQ_VER" in
+                "${RXNM_API_VERSION%%.*}"*) ;;
+                *)
                      echo "{\"success\": false, \"error\": \"API Version Mismatch\", \"supported\": \"$RXNM_API_VERSION\", \"requested\": \"$REQ_VER\"}"
                      exit 1
-                 else
-                     echo "Error: API Version Mismatch (Server: $RXNM_API_VERSION, Client: $REQ_VER)" >&2
-                     exit 1
-                 fi
-             fi
+                     ;;
+             esac
         fi
 
-        # 2. Extract Core Commands
         JSON_CAT=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.category // empty')
         JSON_ACT=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.action // empty')
         
-        # 3. Extract Globals (Overrides)
         J_FMT=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.format // empty')
         J_JSON=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.json // false')
         J_FORCE=$(printf '%s' "$INPUT_JSON" | "$JQ_BIN" -r '.force // .yes // false')
@@ -201,13 +181,10 @@ if [ "$USE_STDIN" = "true" ]; then
         if [ "$J_FORCE" = "true" ]; then FORCE_ACTION="true"; fi
         
         if [ -n "$JSON_CAT" ]; then
-            # Rebuild args from JSON structure
+            # Reset "$@" again for JSON args
             set -- "$JSON_CAT"
             [ -n "$JSON_ACT" ] && set -- "$@" "$JSON_ACT"
             
-            # Map JSON keys to CLI flags
-            # Use heredoc for jq input to avoid subshell variable loss if we were appending
-            # Here we are just reading output into variable
             _jq_out=$( "$JQ_BIN" -r '
                 del(.category, .action, .json, .format, .yes, .force, .api_version) | 
                 to_entries[] | 
@@ -224,14 +201,16 @@ $INPUT_JSON
 EOF
 )
             if [ -n "$_jq_out" ]; then
+                set -f
                 _oldifs="$IFS"
                 IFS='
 '
+                # shellcheck disable=SC2086
                 set -- "$@" $_jq_out
                 IFS="$_oldifs"
+                set +f
             fi
         else
-             # Error out if no category provided in JSON
              if [ "${RXNM_FORMAT}" = "json" ]; then
                  echo '{"success": false, "error": "Invalid JSON input: category required"}'
                  exit 1
@@ -243,65 +222,52 @@ EOF
     fi
 fi
 
-# If help requested at root (or explicit global help)
+# Help at root
 if [ "$SHOW_HELP" = "true" ] && [ "$#" -eq 0 ]; then
     rxnm_help_show_main
     exit 0
 fi
 
 # --- HIERARCHY DISPATCHER ---
-
-# List of Built-in Categories (POSIX word list matching global IFS)
-# POSIX word list — space-separated. Used with `for` and `rxnm_match`.
 CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config api service route tunnel mpls pppoe ha"
 
-# Determine Category from first argument
 RAW_CMD="${1:-}"
 CATEGORY=""
 
 if [ -n "$RAW_CMD" ]; then
-    # shellcheck disable=SC2086  # word splitting on CATS is intentional
+    # shellcheck disable=SC2086
     CATEGORY=$(expand_alias "$RAW_CMD" $CATS)
-    # Handle ambiguous expansion
     if [ "$CATEGORY" = "ambiguous" ]; then
         json_error "Ambiguous command: '$RAW_CMD'. Please be more specific." "1"
         exit 1
     fi
 else
-    # No category provided
     if [ "$SHOW_HELP" = "true" ]; then
         rxnm_help_show_main
         exit 0
     fi
-    # Default behavior: system status
+    # Default behavior
     CATEGORY="system"
-    # IMPORTANT: Inject 'system status' arguments so the shift logic works downstream
     set -- "system" "status"
 fi
 
-# Category Aliases (Mapping)
+# Category Aliases
 case "$CATEGORY" in
     if|iface) CATEGORY="interface" ;;
     bt) CATEGORY="bluetooth" ;;
     sys) CATEGORY="system" ;;
-    virt) CATEGORY="bridge" ;; # Or generic virt handling
+    virt) CATEGORY="bridge" ;;
     svc) CATEGORY="service" ;;
 esac
 
-# 1. Plugin Dispatch (Highest Priority)
-# Check if a plugin exists for this category (Extension or Override)
+# 1. Plugin Dispatch
 PLUGIN_EXEC=$(find_plugin "$CATEGORY" || true)
-
 if [ -n "$PLUGIN_EXEC" ]; then
-    # If a plugin is found, we hand over control immediately.
     shift
-    
-    # Check for help on the plugin itself if requested
     if [ "$SHOW_HELP" = "true" ]; then
         exec_plugin "$PLUGIN_EXEC" "--help"
         exit 0
     fi
-    
     exec_plugin "$PLUGIN_EXEC" "$@"
 fi
 
@@ -317,24 +283,21 @@ done
 
 if [ "$IS_VALID_CAT" = "false" ]; then
     if [ "$SHOW_HELP" = "true" ]; then
-        # If user asked for help on an invalid category, show main help
         rxnm_help_show_main
         exit 0
     fi
-    
     json_error "Unknown command or category: $RAW_CMD" "1" "Try 'rxnm --help'"
     exit 1
 else
     shift
 fi
 
-# Handle help request before dispatching action
 if [ "$SHOW_HELP" = "true" ]; then
     rxnm_help_show_category "$CATEGORY"
     exit 0
 fi
 
-# Load Dependencies (Lazy Loading)
+# Load Dependencies
 case "$CATEGORY" in
     wifi) 
         . "${LIB_DIR}/rxnm-wifi.sh" 
@@ -361,7 +324,6 @@ case "$CATEGORY" in
         . "${LIB_DIR}/rxnm-wifi.sh" 
         . "${LIB_DIR}/rxnm-nullify.sh"
         . "${LIB_DIR}/rxnm-interfaces.sh"
-        # Templates needed for 'setup'
         . "${LIB_DIR}/rxnm-templates.sh"
         ;;
     service) . "${LIB_DIR}/rxnm-service.sh" ;;
@@ -373,32 +335,24 @@ case "$CATEGORY" in
     api) ;;
 esac
 
-# Batch 2: Configuration State Validation & Deferred Loading
+# Validation & Deferred Loading
 case "$CATEGORY" in
     wifi|interface|bridge|bond|vlan|vrf)
         VAL_ACTION="${1:-}"
-        
-        # Special handling for interface dispatch where arg 1 might be interface name
         if [ "$CATEGORY" = "interface" ]; then
             if ! rxnm_match "${VAL_ACTION}" '^(show|set|enable|disable|list|hotplug)$'; then
                  VAL_ACTION="${2:-}"
             fi
         fi
 
-        # Optimization: Only load builders/templates if we are likely modifying configuration
         if rxnm_match "${VAL_ACTION}" '^(set|create|delete|add.*|connect|disconnect|ap)$'; then
-            # Schema validation requires Bash associative arrays — skip on constrained systems.
             if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
                 . "${LIB_DIR}/rxnm-config-builder.sh"
                 . "${LIB_DIR}/rxnm-templates.sh"
                 
                 descriptor=$(build_config_descriptor "$CATEGORY" "$VAL_ACTION" "$@")
-                if ! validate_config_state "$descriptor"; then
-                    # Error is handled inside validation function (json_error)
-                    exit 1
-                fi
+                if ! validate_config_state "$descriptor"; then exit 1; fi
             else
-                # On constrained systems, load dependencies but skip schema check
                 . "${LIB_DIR}/rxnm-config-builder.sh"
                 . "${LIB_DIR}/rxnm-templates.sh"
             fi
@@ -406,47 +360,41 @@ case "$CATEGORY" in
         ;;
 esac
 
-# Dispatch to Category Handlers
+# Dispatch
 case "$CATEGORY" in
     api)
         ACTION="${1:-schema}"
         case "$ACTION" in
             schema)
                 SCHEMA_FILE="${LIB_DIR}/../api-schema.json"
-                if [ -f "$SCHEMA_FILE" ]; then
-                    cat "$SCHEMA_FILE"
-                else
-                    echo '{"error": "Schema file not found"}'
-                fi
+                if [ -f "$SCHEMA_FILE" ]; then cat "$SCHEMA_FILE"; else echo '{"error": "Schema file not found"}'; fi
                 ;;
             version)
                 json_success "{\"version\": \"${RXNM_VERSION}\", \"api\": \"${RXNM_API_VERSION:-1.0}\"}"
                 ;;
             capabilities)
-                # Introspection of available features/stubs
                 netd_ver=$(networkctl --version 2>/dev/null | grep -oP 'systemd \K\d+' || echo 0)
                 agent_active="false"
                 if [ -x "${RXNM_AGENT_BIN}" ]; then agent_active="true"; fi
                 
-                "$JQ_BIN" -n \
-                    --arg netd "$netd_ver" \
-                    --argjson agent "$agent_active" \
-                    '{
-                        success: true,
-                        systemd_networkd_version: ($netd | tonumber),
-                        agent_available: $agent,
-                        features: {
-                            wifi: {status: "stable", since_version: "1.0"},
-                            interface: {status: "stable", since_version: "1.0"},
-                            nullify: {status: "beta", since_version: "1.1"},
-                            service: {status: "experimental", since_version: "1.0"},
-                            route: {status: "experimental", since_version: "1.0"},
-                            tunnel: {status: "experimental", since_version: "1.0"},
-                            mpls: {status: "deferred", since_version: "1.1"},
-                            pppoe: {status: "deferred", since_version: "1.1"},
-                            ha: {status: "deferred", since_version: "1.1"}
-                        }
-                    }'
+                if [ "$RXNM_HAS_JQ" = "true" ]; then
+                    "$JQ_BIN" -n \
+                        --arg netd "$netd_ver" \
+                        --argjson agent "$agent_active" \
+                        '{
+                            success: true,
+                            systemd_networkd_version: ($netd | tonumber),
+                            agent_available: $agent,
+                            features: {
+                                wifi: {status: "stable", since_version: "1.0"},
+                                service: {status: "experimental", since_version: "1.0"},
+                                mpls: {status: "deferred", since_version: "1.1"}
+                            }
+                        }'
+                else
+                    # Basic JSON output without JQ
+                    printf '{"success": true, "systemd_networkd_version": %s, "agent_available": %s}\n' "$netd_ver" "$agent_active"
+                fi
                 ;;
         esac
         ;;
@@ -456,32 +404,20 @@ case "$CATEGORY" in
         if [ "$#" -gt 0 ]; then shift; fi
         
         ARG_IFACE=""
-        
-        # POSIX-safe scan for --interface in remaining args
         _prev=""
         for _arg do
-            if [ "$_prev" = "--interface" ]; then
-                ARG_IFACE="$_arg"
-                break
-            fi
+            if [ "$_prev" = "--interface" ]; then ARG_IFACE="$_arg"; break; fi
             _prev="$_arg"
         done
         unset _prev _arg
 
-        # Roaming monitor might run without a specific iface initially, but we auto-detect
-        if [ -z "$ARG_IFACE" ] && [ "$ACTION" != "roaming" ]; then
-             ARG_IFACE=$(get_wifi_iface || echo "")
-        fi
+        if [ -z "$ARG_IFACE" ] && [ "$ACTION" != "roaming" ]; then ARG_IFACE=$(get_wifi_iface || echo ""); fi
 
         case "$ACTION" in
-            scan)
-                action_scan "$ARG_IFACE"
-                ;;
+            scan) action_scan "$ARG_IFACE" ;;
             connect)
                 SSID="${1:-}"; [ -n "$SSID" ] && shift
-                PASS="${1:-}"; 
-                case "$PASS" in --*) PASS="";; *) shift;; esac
-                
+                PASS="${1:-}"; case "$PASS" in --*) PASS="";; *) shift;; esac
                 HIDDEN="false"
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
@@ -496,18 +432,14 @@ case "$CATEGORY" in
                 action_connect "$SSID" "$PASS" "$ARG_IFACE" "$HIDDEN"
                 ;;
             disconnect)
-                 while [ "$#" -gt 0 ]; do
-                    case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
-                done
+                 while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac; done
                 action_disconnect "$ARG_IFACE"
                 ;;
             ap)
                 SUBCMD="${1:-}"; shift
                 if [ "$SUBCMD" = "start" ]; then
                     SSID="${1:-}"; [ -n "$SSID" ] && shift
-                    PASS="${1:-}"; 
-                    case "$PASS" in --*) PASS="";; *) shift;; esac
-                    
+                    PASS="${1:-}"; case "$PASS" in --*) PASS="";; *) shift;; esac
                     MODE="ap"; SHARE="false"; IP=""; IPV6_PD="yes"
                      while [ "$#" -gt 0 ]; do
                         case "$1" in
@@ -523,26 +455,18 @@ case "$CATEGORY" in
                     done
                     action_host "$SSID" "$PASS" "$MODE" "$SHARE" "$IP" "$ARG_IFACE" "" "$IPV6_PD"
                 elif [ "$SUBCMD" = "stop" ]; then
-                    while [ "$#" -gt 0 ]; do
-                        case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac
-                    done
+                    while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="$2"; shift 2 ;; *) shift ;; esac; done
                     action_client "$ARG_IFACE"
                 fi
                 ;;
-            wps)
-                action_wps "$ARG_IFACE"
-                ;;
-            networks|list)
-                action_list_known_networks
-                ;;
+            wps) action_wps "$ARG_IFACE" ;;
+            networks|list) action_list_known_networks ;;
             forget)
                  SSID="${1:-}"; [ -n "$SSID" ] && shift
                  confirm_action "Forget network '$SSID'?" "$FORCE_ACTION"
                  action_forget "$SSID"
                  ;;
-            country)
-                action_set_country "${1:-}"
-                ;;
+            country) action_set_country "${1:-}" ;;
             p2p)
                 SUBCMD="${1:-}"; shift
                 case "$SUBCMD" in
@@ -560,20 +484,10 @@ case "$CATEGORY" in
             roaming)
                 SUBCMD="${1:-}"; shift
                 case "$SUBCMD" in
-                    monitor)
-                        action_wifi_roaming_monitor "$@"
-                        ;;
-                    enable)
-                        systemctl enable --now rxnm-roaming
-                        json_success '{"action": "roaming_enable", "status": "active"}'
-                        ;;
-                    disable)
-                        systemctl disable --now rxnm-roaming
-                        json_success '{"action": "roaming_disable", "status": "inactive"}'
-                        ;;
-                    *)
-                        echo "Usage: rxnm wifi roaming {monitor|enable|disable}"
-                        ;;
+                    monitor) action_wifi_roaming_monitor "$@" ;;
+                    enable) systemctl enable --now rxnm-roaming; json_success '{"action": "roaming_enable", "status": "active"}' ;;
+                    disable) systemctl disable --now rxnm-roaming; json_success '{"action": "roaming_disable", "status": "inactive"}' ;;
+                    *) echo "Usage: rxnm wifi roaming {monitor|enable|disable}" ;;
                 esac
                 ;;
         esac
@@ -583,31 +497,19 @@ case "$CATEGORY" in
         ARG_1="${1:-}"
         TARGET=""
         ACTION=""
-        
-        # Valid actions for this category
         VALID_ACTS="show set enable disable list hotplug"
         
-        # Attempt expansion of first arg as a keyword
         # shellcheck disable=SC2086
         EXPANDED=$(expand_alias "$ARG_1" $VALID_ACTS)
-        
-        # Validate if the expanded result is actually one of our keywords
         IS_KEYWORD=false
         # shellcheck disable=SC2086
-        for v in $VALID_ACTS; do
-            if [ "$v" = "$EXPANDED" ]; then IS_KEYWORD=true; break; fi
-        done
+        for v in $VALID_ACTS; do if [ "$v" = "$EXPANDED" ]; then IS_KEYWORD=true; break; fi; done
         
         if [ "$IS_KEYWORD" = "true" ]; then
-            # Command-first syntax: rxnm interface set eth0 ...
             ACTION="$EXPANDED"
             if [ "$#" -gt 0 ]; then shift; fi
-            # If next arg is not a flag, it's the target
-            if [ -n "${1:-}" ]; then
-                case "${1:-}" in --*) ;; *) TARGET="$1"; shift ;; esac
-            fi
+            if [ -n "${1:-}" ]; then case "${1:-}" in --*) ;; *) TARGET="$1"; shift ;; esac; fi
         else
-            # Object-first syntax: rxnm interface eth0 set ...
             TARGET="$ARG_1"
             if [ "$#" -gt 0 ]; then shift; fi
             # shellcheck disable=SC2086
@@ -615,32 +517,16 @@ case "$CATEGORY" in
             if [ "$#" -gt 0 ]; then shift; fi
         fi
         
-        # Flag args override
-        # Pre-scan for interface override
         _prev=""
-        for _arg do
-            if [ "$_prev" = "--interface" ]; then TARGET="$_arg"; fi
-            _prev="$_arg"
-        done
+        for _arg do if [ "$_prev" = "--interface" ]; then TARGET="$_arg"; fi; _prev="$_arg"; done
 
         case "$ACTION" in
             show) action_status "$TARGET" ;;
-            enable)
-                [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }
-                action_set_link "$TARGET" "on" "on"
-                ;;
-            disable)
-                [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }
-                action_set_link "$TARGET" "off" "off"
-                ;;
-            hotplug)
-                [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }
-                action_hotplug "$TARGET"
-                ;;
+            enable) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_set_link "$TARGET" "on" "on" ;;
+            disable) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_set_link "$TARGET" "off" "off" ;;
+            hotplug) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_hotplug "$TARGET" ;;
             set)
                 SUBCMD="${1:-}"; shift
-                
-                # Check for hardware override
                 if [ "$SUBCMD" = "hardware" ]; then
                      SPEED=""; DUPLEX=""; AUTONEG=""; WOL=""; MACPOL=""; NAMEPOL=""; MAC=""
                      while [ "$#" -gt 0 ]; do
@@ -658,19 +544,10 @@ case "$CATEGORY" in
                      action_set_hardware "$TARGET" "$SPEED" "$DUPLEX" "$AUTONEG" "$WOL" "$MACPOL" "$NAMEPOL" "$MAC"
                      exit 0
                 fi
-
-                # Standard Configuration
-                METRIC=""
-                MTU=""
-                MAC=""
-                IPV6_PRIV=""
-                DHCP_ID=""
-                IPV6_PD=""
+                METRIC=""; MTU=""; MAC=""; IPV6_PRIV=""; DHCP_ID=""; IPV6_PD=""
                 case "$SUBCMD" in
                     dhcp)
-                         ROUTES=""
-                         DNS=""
-                         DOMAINS=""
+                         ROUTES=""; DNS=""; DOMAINS=""
                          while [ "$#" -gt 0 ]; do
                             case "$1" in 
                                 --metric) METRIC="$2"; shift 2 ;; 
@@ -688,9 +565,7 @@ case "$CATEGORY" in
                          action_set_dhcp "$TARGET" "" "$DNS" "$DOMAINS" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
                          ;;
                     static)
-                         IP="${1:-}"; 
-                         case "$IP" in --*) IP="";; *) shift;; esac
-                         
+                         IP="${1:-}"; case "$IP" in --*) IP="";; *) shift;; esac
                          GW=""; DNS=""; ROUTES=""; DOMAINS=""
                          while [ "$#" -gt 0 ]; do
                             case "$1" in
@@ -743,22 +618,14 @@ case "$CATEGORY" in
                  fi
                  ;;
             reload) action_reload ;;
-            setup|start) 
-                init_template_cache
-                action_setup 
-                ;;
+            setup|start) init_template_cache; action_setup ;;
             stop) action_stop ;;
-            nullify) 
-                # 1.1.0 Fix: Pass ALL arguments to handle flags like --interface
-                action_system_nullify "$@" 
-                ;;
+            nullify) action_system_nullify "$@" ;;
         esac
         ;;
         
     bluetooth)
-        ACTION="${1:-}"; 
-        if [ "$#" -gt 0 ]; then shift; fi
-        
+        ACTION="${1:-}"; if [ "$#" -gt 0 ]; then shift; fi
         case "$ACTION" in
             pan)
                 SUBCMD="${1:-}"; shift
@@ -793,30 +660,21 @@ case "$CATEGORY" in
         ;;
 
     bridge|bond|vrf|vlan|macvlan|ipvlan|veth)
-         ACTION="${1:-}"; 
-         if [ "$#" -gt 0 ]; then shift; fi
-         
-         NAME="${1:-}"; 
-         case "$NAME" in --*) NAME="";; *) shift ;; esac
+         ACTION="${1:-}"; if [ "$#" -gt 0 ]; then shift; fi
+         NAME="${1:-}"; case "$NAME" in --*) NAME="";; *) shift ;; esac
          
          if [ "$ACTION" = "delete" ]; then
              [ -z "$NAME" ] && { json_error "Name required"; exit 1; }
              action_delete_netdev "$NAME"
              exit 0
          fi
-         
-         # Enable generic listing for these categories
-         if [ "$ACTION" = "list" ]; then
-             action_status ""
-             exit 0
-         fi
+         if [ "$ACTION" = "list" ]; then action_status ""; exit 0; fi
          
          case "$CATEGORY" in
             bridge)
                 if [ "$ACTION" = "create" ]; then action_create_bridge "$NAME"; fi
                 if [ "$ACTION" = "add-member" ]; then
-                     IFACE="${1:-}"; 
-                     if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
+                     IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      BRIDGE=""
                      while [ "$#" -gt 0 ]; do case "$1" in --bridge) BRIDGE="$2"; shift 2;; *) shift ;; esac; done
                      action_set_member "$IFACE" "$BRIDGE"
@@ -825,8 +683,7 @@ case "$CATEGORY" in
             bond)
                 if [ "$ACTION" = "create" ]; then action_create_bond "$NAME" "active-backup"; fi
                 if [ "$ACTION" = "add-slave" ]; then
-                     IFACE="${1:-}";
-                     if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
+                     IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      BOND=""
                      while [ "$#" -gt 0 ]; do case "$1" in --bond) BOND="$2"; shift 2;; *) shift ;; esac; done
                      action_set_bond_slave "$IFACE" "$BOND"
@@ -839,8 +696,7 @@ case "$CATEGORY" in
                      action_create_vrf "$NAME" "$TABLE"
                 fi
                 if [ "$ACTION" = "add-member" ]; then
-                     IFACE="${1:-}";
-                     if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
+                     IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      VRF=""
                      while [ "$#" -gt 0 ]; do case "$1" in --vrf) VRF="$2"; shift 2;; *) shift ;; esac; done
                      action_set_vrf_member "$IFACE" "$VRF"
@@ -878,41 +734,24 @@ case "$CATEGORY" in
          ;;
 
     vpn|tun|tap)
-        # Handle tun/tap aliases
         if [ "$CATEGORY" = "tun" ] || [ "$CATEGORY" = "tap" ]; then
-             KIND="$CATEGORY"
-             ACTION="${1:-create}"; shift
-             NAME="${1:-}"; shift
-             USER=""; GROUP=""
+             KIND="$CATEGORY"; ACTION="${1:-create}"; shift; NAME="${1:-}"; shift; USER=""; GROUP=""
              if [ "$ACTION" = "delete" ]; then action_delete_vpn "$NAME"; exit 0; fi
-             while [ "$#" -gt 0 ]; do
-                case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift ;; esac
-             done
+             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift ;; esac; done
              [ "$KIND" = "tun" ] && action_create_tun "$NAME" "$USER" "$GROUP"
              [ "$KIND" = "tap" ] && action_create_tap "$NAME" "$USER" "$GROUP"
              exit 0
         fi
-        
-        # Handle 'rxnm vpn tun ...'
         if [ "$1" = "tun" ] || [ "$1" = "tap" ]; then
-             KIND="$1"; shift
-             ACTION="${1:-create}"; shift
-             NAME="${1:-}"; shift
-             USER=""; GROUP=""
+             KIND="$1"; shift; ACTION="${1:-create}"; shift; NAME="${1:-}"; shift; USER=""; GROUP=""
              if [ "$ACTION" = "delete" ]; then action_delete_vpn "$NAME"; exit 0; fi
-             while [ "$#" -gt 0 ]; do
-                case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift ;; esac
-             done
+             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="$2"; shift 2;; --group) GROUP="$2"; shift 2;; *) shift ;; esac; done
              [ "$KIND" = "tun" ] && action_create_tun "$NAME" "$USER" "$GROUP"
              [ "$KIND" = "tap" ] && action_create_tap "$NAME" "$USER" "$GROUP"
              exit 0
         fi
-
         if [ "$1" = "wireguard" ]; then shift; fi
-        ACTION="${1:-}"; shift
-        NAME="${1:-}"; 
-        case "$NAME" in --*) NAME="";; *) shift ;; esac
-        
+        ACTION="${1:-}"; shift; NAME="${1:-}"; case "$NAME" in --*) NAME="";; *) shift ;; esac
         case "$ACTION" in
             connect)
                 PRIV=""; PEER=""; ENDP=""; IPS=""; IP=""
@@ -933,10 +772,7 @@ case "$CATEGORY" in
         ;;
 
     profile)
-        ACTION="${1:-}"; shift
-        NAME="${1:-}"; 
-        case "$NAME" in --*) NAME="";; *) shift ;; esac
-        
+        ACTION="${1:-}"; shift; NAME="${1:-}"; case "$NAME" in --*) NAME="";; *) shift ;; esac
         IFACE=""; FILE=""
         while [ "$#" -gt 0 ]; do
              case "$1" in 
@@ -949,12 +785,8 @@ case "$CATEGORY" in
         action_profile "$ACTION" "$NAME" "$IFACE" "$FILE"
         ;;
     
-    # --- SERVICE ORIENTED ARCHITECTURE (v1.0 Hybrid) ---
     service)
-        ACTION="${1:-list}"; shift
-        NAME="${1:-}"; 
-        case "$NAME" in --*) NAME="";; *) shift ;; esac
-        
+        ACTION="${1:-list}"; shift; NAME="${1:-}"; case "$NAME" in --*) NAME="";; *) shift ;; esac
         case "$ACTION" in
             create) action_service_create "$NAME" ;;
             delete) action_service_delete "$NAME" ;;
@@ -969,37 +801,17 @@ case "$CATEGORY" in
                 [ -z "$IFACE" ] && { IFACE="$NAME"; NAME=""; }
                 action_service_detach "$NAME" "$IFACE"
                 ;;
-            exec)
-                action_service_exec "$NAME" "$@"
-                ;;
+            exec) action_service_exec "$NAME" "$@" ;;
         esac
         ;;
         
-    route)
-        ACTION="${1:-list}"; shift
-        action_route_dispatch "$ACTION" "$@"
-        ;;
-        
-    tunnel)
-        ACTION="${1:-list}"; shift
-        action_tunnel_dispatch "$ACTION" "$@"
-        ;;
-        
-    mpls)
-        ACTION="${1:-list}"; shift
-        action_mpls_dispatch "$ACTION" "$@"
-        ;;
-        
-    pppoe)
-        ACTION="${1:-list}"; shift
-        action_pppoe_dispatch "$ACTION" "$@"
-        ;;
-        
-    ha)
-        ACTION="${1:-list}"; shift
-        action_ha_dispatch "$ACTION" "$@"
-        ;;
-        
+    route) ACTION="${1:-list}"; shift; action_route_dispatch "$ACTION" "$@" ;;
+    tunnel) ACTION="${1:-list}"; shift; action_tunnel_dispatch "$ACTION" "$@" ;;
+    mpls) ACTION="${1:-list}"; shift; action_mpls_dispatch "$ACTION" "$@" ;;
+    pppoe) ACTION="${1:-list}"; shift; action_pppoe_dispatch "$ACTION" "$@" ;;
+    ha) ACTION="${1:-list}"; shift; action_ha_dispatch "$ACTION" "$@" ;;
+    
     *)
-        json_error "Command category '$CATEGORY' not implemented yet." "1"; exit 1 ;;
+        json_error "Command category '$CATEGORY' not implemented yet." "1"
+        exit 1 ;;
 esac

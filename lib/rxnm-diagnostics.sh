@@ -15,37 +15,40 @@ CACHE_TTL=5
 AGENT_BIN="${RXNM_AGENT_BIN}"
 
 # Description: Generates a JSON representation of WiFi state using standard tools (iw).
-# Used as a fallback when DBus/Agent are unavailable.
 _get_wifi_fallback_json() {
     local json_items=""
     if type -P iw >/dev/null 2>&1; then
         for iface_path in /sys/class/net/*; do
             [ -e "$iface_path" ] || continue
-            local ifname=$(basename "$iface_path")
+            local ifname
+            ifname=$(basename "$iface_path")
             local is_wifi=false
             
             if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
                 is_wifi=true
-            elif [[ "$ifname" == wl* ]]; then
-                is_wifi=true
+            else
+                case "$ifname" in wl*) is_wifi=true ;; esac
             fi
             
-            if [ "$is_wifi" == "true" ]; then
+            if [ "$is_wifi" = "true" ]; then
                 local link_out
                 link_out=$(LC_ALL=C iw dev "$ifname" link 2>/dev/null)
-                if [[ -z "$link_out" ]] || [[ "$link_out" == *"Not connected"* ]]; then continue; fi
+                case "$link_out" in *"Not connected"*|"") continue ;; esac
                 
-                local ssid=$(echo "$link_out" | sed -n 's/^[[:space:]]*SSID: //p')
-                local freq=$(echo "$link_out" | awk '/freq:/ {print int($2)}')
-                local rssi=$(echo "$link_out" | awk '/signal:/ {print $2}')
-                local bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
+                local ssid
+                ssid=$(echo "$link_out" | sed -n 's/^[[:space:]]*SSID: //p')
+                local freq
+                freq=$(echo "$link_out" | awk '/freq:/ {print int($2)}')
+                local rssi
+                rssi=$(echo "$link_out" | awk '/signal:/ {print $2}')
+                local bssid
+                bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
                 local bssid_val="null"
                 if [ -n "$bssid" ]; then bssid_val="\"$bssid\""; fi
                 
                 if [ -n "$ssid" ]; then
-                    ssid="${ssid//\\/\\\\}"
-                    ssid="${ssid//\"/\\\"}"
-                    [ -n "$json_items" ] && json_items="$json_items,"
+                    ssid=$(echo "$ssid" | sed 's/\\/\\\\/g; s/"/\\"/g')
+                    if [ -n "$json_items" ]; then json_items="$json_items,"; fi
                     json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": $bssid_val, \"state\": \"connected\" }"
                 fi
             fi
@@ -54,35 +57,39 @@ _get_wifi_fallback_json() {
     echo "{ $json_items }"
 }
 
-# Description: Slow-path status generation using shell tools.
-# Returns: Full SystemStatus JSON string.
 action_status_legacy() {
+    # Guard: JQ is required for legacy status aggregation
+    if [ "$RXNM_HAS_JQ" != "true" ]; then
+        if [ -x "$AGENT_BIN" ]; then
+            "$AGENT_BIN" --dump 2>/dev/null || printf '{"success":false,"error":"agent failed and jq missing"}\n'
+        else
+            printf '{"success":false,"error":"jq unavailable and agent missing"}\n'
+        fi
+        return
+    fi
+
     local filter_iface="${1:-}"
     local hostname="ROCKNIX"
     [ -f /etc/hostname ] && read -r hostname < /etc/hostname
     
-    # 1. Get Networkd State
     local net_json="[]"
     if type -P networkctl >/dev/null 2>&1; then
         net_json=$(timeout 3s networkctl status --all --json=short 2>/dev/null || timeout 3s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
     
-    # 2. Get IWD State (DBus)
     local iwd_json="{}"
     if is_service_active "iwd"; then
         iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data // {}' || echo "{}")
     fi
     
-    # 3. Fallback WiFi (if IWD fails)
     local legacy_wifi_json="{}"
-    if [[ "$iwd_json" == "{}" ]]; then
+    if [ "$iwd_json" = "{}" ]; then
         legacy_wifi_json=$(_get_wifi_fallback_json)
     fi
     
     local global_proxy_json
     global_proxy_json=$(get_proxy_json "$STORAGE_PROXY_GLOBAL")
     
-    # 4. Routes & IPs
     local routes_json="[]"
     if ip -j route show >/dev/null 2>&1; then
         routes_json=$( { ip -j route show; ip -j -6 route show; } 2>/dev/null | "$JQ_BIN" -s 'add // []' )
@@ -93,13 +100,14 @@ action_status_legacy() {
         ip_json=$(ip -j -s addr show 2>/dev/null || echo "[]")
     fi
     
-    # 5. Link Speeds
     local speed_json="{}"
     local speed_data=""
     for iface_dir in /sys/class/net/*; do
         if [ -e "$iface_dir/speed" ]; then
-            local ifname=$(basename "$iface_dir")
-            local s_val=$(cat "$iface_dir/speed" 2>/dev/null || echo -1)
+            local ifname
+            ifname=$(basename "$iface_dir")
+            local s_val
+            s_val=$(cat "$iface_dir/speed" 2>/dev/null || echo -1)
             if [ "$s_val" -gt 0 ] 2>/dev/null; then
                 if [ -z "$speed_data" ]; then speed_data="\"$ifname\": $s_val"; else speed_data="$speed_data, \"$ifname\": $s_val"; fi
             fi
@@ -116,7 +124,7 @@ action_status_legacy() {
     [ -z "$speed_json" ] && speed_json="{}"
     [ -z "$global_proxy_json" ] && global_proxy_json="null"
     
-    # 6. Massive JQ Merge
+    # Final Merge
     local json_output
     json_output=$("$JQ_BIN" -n \
         --arg hn "$hostname" \
@@ -138,48 +146,33 @@ action_status_legacy() {
             else $raw_type end;
             
         ($iwd | if . == {} or . == null then {} else . end) as $safe_iwd |
+        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Device"]?)) | map({key: .key, value: .value["net.connman.iwd.Device"].Name.data}) | from_entries) as $dev_paths |
+        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.AccessPoint"]?)) | map({key: .key, value: .value["net.connman.iwd.AccessPoint"]}) | from_entries) as $access_points |
         
-        # Map IWD Objects
-        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Device"]?)) |
-         map({key: .key, value: .value["net.connman.iwd.Device"].Name.data}) | from_entries) as $dev_paths |
-         
-        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.AccessPoint"]?)) |
-         map({key: .key, value: .value["net.connman.iwd.AccessPoint"]}) | from_entries
-        ) as $access_points |
-        
-        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Station"]?)) |
-         map({
+        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Station"]?)) | map({
             iface: $dev_paths[.key],
             rssi: (.value["net.connman.iwd.Station"].SignalStrength.data // -100),
             state: .value["net.connman.iwd.Station"].State.data,
             bssid_path: .value["net.connman.iwd.Station"].ConnectedBss.data
-         }) |
-         map(select(.iface != null)) |
-         map({
+         }) | map(select(.iface != null)) | map({
             (.iface): {
                 rssi: .rssi,
                 state: .state,
                 bssid: (if .bssid_path then ($access_points[.bssid_path].HardwareAddress.data) else null end),
                 frequency: (if .bssid_path then ($access_points[.bssid_path].Frequency.data) else null end)
             }
-         }) | add
-        ) as $wifi_station_info |
+         }) | add) as $wifi_station_info |
         
-        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Network"]? and .value["net.connman.iwd.Network"].Connected.data == true)) |
-         map({
+        ($safe_iwd | to_entries | map(select(.value["net.connman.iwd.Network"]? and .value["net.connman.iwd.Network"].Connected.data == true)) | map({
             iface: $dev_paths[.value["net.connman.iwd.Network"].Device.data],
             ssid: .value["net.connman.iwd.Network"].Name.data
-         }) |
-         map(select(.iface != null)) |
-         map({(.iface): {ssid: .ssid}}) | add
-        ) as $wifi_network_info |
+         }) | map(select(.iface != null)) | map({(.iface): {ssid: .ssid}}) | add) as $wifi_network_info |
         
         (($wifi_network_info // {}) * ($wifi_station_info // {})) as $dbus_wifi |
         ($legacy_wifi + ($dbus_wifi // {})) as $full_wifi |
         
         (($routes // []) | group_by(.dev) | map({key: .[0].dev, value: .}) | from_entries) as $route_map |
         
-        # Handle Networkd vs IP command output variance
         (($net | objects | .Interfaces) // ($net | arrays) // []) as $sysd_net |
         
         ($ip | map({key: .ifname, value: (.stats64 // .stats)}) | from_entries) as $ip_stats |
@@ -223,21 +216,13 @@ action_status_legacy() {
                         gateway: (.Gateway // $def_route.gateway // null),
                         metric: ($def_route.metric // null),
                         speed: ($speeds[.Name] // null),
-                        routes: ($iface_routes | map({
-                            dst: .dst,
-                            gw: .gateway,
-                            metric: .metric
-                        })),
-                        stats: {
-                            rx_bytes: ($my_stats.rx.bytes // 0),
-                            tx_bytes: ($my_stats.tx.bytes // 0)
-                        }
+                        routes: ($iface_routes | map({ dst: .dst, gw: .gateway, metric: .metric })),
+                        stats: { rx_bytes: ($my_stats.rx.bytes // 0), tx_bytes: ($my_stats.tx.bytes // 0) }
                     }
                 }
             ) | add)
         }
-        '
-    )
+        ')
     echo "$json_output"
 }
 
@@ -251,15 +236,14 @@ action_check_internet_legacy() {
         if ip -4 route show default | grep -q default; then
             local code
             code=$(curl -4 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
-            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+            if [ "$code" = "204" ]; then echo "true"; else echo "false"; fi
         else echo "false"; fi
     ) > "$t_v4" &
-    
     (
         if ip -6 route show default | grep -q default; then
             local code
             code=$(curl -6 -s -o /dev/null -w "$curl_fmt" -m "$CURL_TIMEOUT" "$target" 2>/dev/null || echo "000")
-            if [[ "$code" == "204" ]]; then echo "true"; else echo "false"; fi
+            if [ "$code" = "204" ]; then echo "true"; else echo "false"; fi
         else echo "false"; fi
     ) > "$t_v6" &
     
@@ -269,11 +253,10 @@ action_check_internet_legacy() {
     rm -f "$t_v4" "$t_v6"
     
     local connected="false"
-    [[ "$v4" == "true" || "$v6" == "true" ]] && connected="true"
+    if [ "$v4" = "true" ] || [ "$v6" = "true" ]; then connected="true"; fi
     
     "$JQ_BIN" -n --argjson v4 "$v4" --argjson v6 "$v6" --argjson connected "$connected" \
-        '{ipv4: $v4, ipv6: $v6, connected: $connected}' \
-        | json_success
+        '{ipv4: $v4, ipv6: $v6, connected: $connected}' | json_success
 }
 
 action_status() {
@@ -283,39 +266,41 @@ action_status() {
     if [ -z "$filter_iface" ] && [ -f "$CACHE_FILE" ]; then
         local now file_time age
         now=$(date +%s)
-        file_time=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+        if stat -c %Y "$CACHE_FILE" >/dev/null 2>&1; then file_time=$(stat -c %Y "$CACHE_FILE"); else file_time=0; fi
         age=$((now - file_time))
-        if [ "$age" -lt "$CACHE_TTL" ]; then
-            cat "$CACHE_FILE"
-            return 0
-        fi
+        if [ "$age" -lt "$CACHE_TTL" ]; then cat "$CACHE_FILE"; return 0; fi
     fi
     
-    # 2. Try Accelerator (rxnm-agent)
+    # 2. Try Accelerator
     local json_output=""
     if [ -x "$AGENT_BIN" ]; then
-        if output=$("$AGENT_BIN" --dump 2>/dev/null) && [[ "$output" == \{* ]]; then
-            if [ -n "$filter_iface" ]; then
-                json_output=$("$JQ_BIN" --arg f "$filter_iface" '.interfaces |= with_entries(select(.key == $f))' <<< "$output")
-            else
-                json_output="$output"
-            fi
+        if output=$("$AGENT_BIN" --dump 2>/dev/null); then
+            case "$output" in
+                '{'*)
+                    if [ -n "$filter_iface" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
+                        json_output=$("$JQ_BIN" --arg f "$filter_iface" '.interfaces |= with_entries(select(.key == $f))' <<< "$output")
+                    else
+                        json_output="$output"
+                    fi
+                    ;;
+            esac
         fi
     fi
     
-    # 3. Fallback to Legacy
+    # 3. Fallback
     if [ -z "$json_output" ]; then
-        json_output=$(action_status_legacy "$filter_iface")
+        # Capture legacy output, if it fails return empty object to prevent script exit on set -e
+        json_output=$(action_status_legacy "$filter_iface") || json_output="{}"
     fi
     
-    # 4. Update Cache (Fail gracefully if we lack permissions)
-    if [ -z "$filter_iface" ]; then
+    # 4. Cache
+    if [ -z "$filter_iface" ] && [ -n "$json_output" ]; then
         if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
             echo "$json_output" > "$CACHE_FILE" 2>/dev/null || true
         fi
     fi
     
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         echo "$json_output"
     else
         json_success "$json_output"
@@ -323,54 +308,81 @@ action_status() {
 }
 
 action_check_internet() {
-    # Try Accelerator
     if [ -x "$AGENT_BIN" ]; then
-        if output=$("$AGENT_BIN" --check-internet 2>/dev/null) && [[ "$output" == \{* ]]; then
-            echo "$output"
-            return 0
+        if output=$("$AGENT_BIN" --check-internet 2>/dev/null); then
+            case "$output" in '{'*) echo "$output"; return 0 ;; esac
         fi
     fi
-    action_check_internet_legacy
+    
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        action_check_internet_legacy
+    else
+        printf '{"success": false, "error": "Cannot check internet (no agent, no jq)"}\n'
+    fi
 }
 
 action_check_portal() {
     local iface="$1"
     local primary_url="http://connectivitycheck.gstatic.com/generate_204"
-    local fallback_urls=("http://nmcheck.gnome.org/check_network_status.txt" "http://detectportal.firefox.com/success.txt")
-    local curl_base_opts=(-s -o /dev/null --max-time 3)
-    [ -n "$iface" ] && curl_base_opts+=(--interface "$iface")
+    local fallback_urls="http://nmcheck.gnome.org/check_network_status.txt http://detectportal.firefox.com/success.txt"
     
-    # 1. Fast Path
-    if curl "${curl_base_opts[@]}" -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
-        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
+    local curl_opts="-s -o /dev/null --max-time 3"
+    local iface_opt=""
+    if [ -n "$iface" ]; then iface_opt="--interface $iface"; fi
+    
+    # shellcheck disable=SC2086
+    if curl $curl_opts $iface_opt -w "%{http_code}" "$primary_url" 2>/dev/null | grep -q "204"; then
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "fast_path"}' | json_success
+        else
+            printf '{"success": true, "portal_detected": false, "status": "online", "method": "fast_path"}\n'
+        fi
         return 0
     fi
     
-    # 2. Portal Detection
-    local portal_opts=("${curl_base_opts[@]}" -L -w "%{http_code}:%{url_effective}")
-    local result; result=$(curl "${portal_opts[@]}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
-    local code="${result%%:*}"; local effective_url="${result#*:}"
+    # shellcheck disable=SC2086
+    local result
+    result=$(curl $curl_opts $iface_opt -L -w "%{http_code}:%{url_effective}" "$primary_url" 2>/dev/null || echo "000:$primary_url")
+    local code="${result%%:*}"
+    local effective_url="${result#*:}"
     
-    if [[ "$code" == "204" ]] && [[ "$effective_url" == "$primary_url" ]]; then
-        "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success
+    if [ "$code" = "204" ] && [ "$effective_url" = "$primary_url" ]; then
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            "$JQ_BIN" -n '{portal_detected: false, status: "online", method: "tier2_check"}' | json_success
+        else
+            printf '{"success": true, "portal_detected": false, "status": "online", "method": "tier2_check"}\n'
+        fi
         return 0
     fi
     
-    if [[ "$effective_url" != "$primary_url" ]] || [[ "$code" != "204" && "$code" != "000" ]]; then
-        # Check if hijack is benign (transparent proxy often returns 200/204 but modifies headers, we assume here URL change is key)
-        local hijack_flag="false"; if [[ "$effective_url" == "$primary_url" ]]; then hijack_flag="true"; fi
-        "$JQ_BIN" -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
-            '{portal_detected: true, auto_ack: false, status: "portal_locked", target: $url, http_code: $code, hijacked: $hijacked}' | json_success
+    if [ "$effective_url" != "$primary_url" ] || { [ "$code" != "204" ] && [ "$code" != "000" ]; }; then
+        local hijack_flag="false"
+        if [ "$effective_url" = "$primary_url" ]; then hijack_flag="true"; fi
+        
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            "$JQ_BIN" -n --arg url "$effective_url" --arg code "$code" --argjson hijacked "$hijack_flag" \
+                '{portal_detected: true, auto_ack: false, status: "portal_locked", target: $url, http_code: $code, hijacked: $hijacked}' | json_success
+        else
+             printf '{"success": true, "portal_detected": true, "status": "portal_locked", "target": "%s"}\n' "$effective_url"
+        fi
         return 0
     fi
     
-    # 3. Fallback Mirrors
-    for fallback in "${fallback_urls[@]}"; do
-        if curl "${curl_base_opts[@]}" -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
-            "$JQ_BIN" -n --arg url "$fallback" '{portal_detected: false, status: "online", method: "fallback", host: $url}' | json_success
+    for fallback in $fallback_urls; do
+        # shellcheck disable=SC2086
+        if curl $curl_opts $iface_opt -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
+            if [ "$RXNM_HAS_JQ" = "true" ]; then
+                "$JQ_BIN" -n --arg url "$fallback" '{portal_detected: false, status: "online", method: "fallback", host: $url}' | json_success
+            else
+                printf '{"success": true, "portal_detected": false, "status": "online", "method": "fallback"}\n'
+            fi
             return 0
         fi
     done
     
-    "$JQ_BIN" -n '{portal_detected: false, status: "offline"}' | json_success
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        "$JQ_BIN" -n '{portal_detected: false, status: "offline"}' | json_success
+    else
+        printf '{"success": true, "portal_detected": false, "status": "offline"}\n'
+    fi
 }

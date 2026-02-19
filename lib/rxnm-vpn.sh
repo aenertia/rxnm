@@ -20,11 +20,11 @@ _task_connect_wireguard() {
     local network_file="${STORAGE_NET_DIR}/90-${name}.network"
     local network_content="[Match]\nName=${name}\n\n[Network]\nAddress=${addr}\n"
     
-    [ -n "$dns" ] && network_content+="DNS=${dns}\n"
+    [ -n "$dns" ] && network_content="${network_content}DNS=${dns}\n"
     
-    network_content+="\n[WireGuardPeer]\nPublicKey=${peer}\nEndpoint=${endp}\n"
+    network_content="${network_content}\n[WireGuardPeer]\nPublicKey=${peer}\nEndpoint=${endp}\n"
     [ -z "$ips" ] && ips="0.0.0.0/0"
-    network_content+="AllowedIPs=${ips}\nPersistentKeepalive=25\n"
+    network_content="${network_content}AllowedIPs=${ips}\nPersistentKeepalive=25\n"
 
     # Prevent credential leak in logs
     { set +x; } 2>/dev/null
@@ -44,13 +44,16 @@ _task_create_tuntap() {
     
     ensure_dirs
     local netdev_file="${STORAGE_NET_DIR}/60-${kind}-${name}.netdev"
-    local netdev_content="[NetDev]\nName=${name}\nKind=${kind}\n\n[${kind^}]\n"
+    # To uppercase kind: using awk since ${var^} is Bash
+    local kind_upper
+    kind_upper=$(echo "$kind" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
+    local netdev_content="[NetDev]\nName=${name}\nKind=${kind}\n\n[${kind_upper}]\n"
     
-    [ -n "$user" ] && netdev_content+="User=${user}\n"
-    [ -n "$group" ] && netdev_content+="Group=${group}\n"
+    [ -n "$user" ] && netdev_content="${netdev_content}User=${user}\n"
+    [ -n "$group" ] && netdev_content="${netdev_content}Group=${group}\n"
     
     # Enable packet info by default for better compatibility with some daemons
-    netdev_content+="PacketInfo=yes\n"
+    netdev_content="${netdev_content}PacketInfo=yes\n"
 
     secure_write "$netdev_file" "$netdev_content" "644"
     
@@ -78,6 +81,7 @@ _task_delete_vpn() {
     fi
     
     # Remove Tun/Tap files
+    # POSIX loop
     for kind in tun tap; do
         if [ -f "${STORAGE_NET_DIR}/60-${kind}-${name}.netdev" ]; then
             rm -f "${STORAGE_NET_DIR}/60-${kind}-${name}.netdev"
@@ -90,7 +94,7 @@ _task_delete_vpn() {
         rm -f "${STORAGE_NET_DIR}/75-config-${name}.network"
     fi
     
-    if [ "$found" == "true" ]; then
+    if [ "$found" = "true" ]; then
         reload_networkd
     else
         return 1
@@ -104,8 +108,10 @@ action_connect_wireguard() {
     
     ! validate_interface_name "$name" && { json_error "Invalid interface name"; return 1; }
     
-    [ -z "$name" ] || [ -z "$priv" ] || [ -z "$peer" ] || [ -z "$endp" ] || [ -z "$addr" ] && \
-        { json_error "Missing WireGuard args"; return 1; }
+    if [ -z "$name" ] || [ -z "$priv" ] || [ -z "$peer" ] || [ -z "$endp" ] || [ -z "$addr" ]; then
+        json_error "Missing WireGuard args"
+        return 1
+    fi
 
     with_iface_lock "$name" _task_connect_wireguard "$name" "$priv" "$peer" "$endp" "$ips" "$addr" "$dns"
 
