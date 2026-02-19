@@ -510,7 +510,7 @@ case "$CATEGORY" in
         ARG_1="${1:-}"
         TARGET=""
         ACTION=""
-        VALID_ACTS="show set enable disable list hotplug"
+        VALID_ACTS="show status set enable disable list hotplug"
         
         # shellcheck disable=SC2086
         EXPANDED=$(expand_alias "$ARG_1" $VALID_ACTS)
@@ -533,8 +533,16 @@ case "$CATEGORY" in
         _prev=""
         for _arg do if [ "$_prev" = "--interface" ]; then TARGET="$_arg"; fi; _prev="$_arg"; done
 
+        # Auto-prefix --get key with interfaces.<target> if not fully qualified
+        if [ -n "$TARGET" ] && [ -n "$RXNM_GET_KEY" ]; then
+            case "$RXNM_GET_KEY" in
+                interfaces.*) ;;
+                *) RXNM_GET_KEY="interfaces.${TARGET}.${RXNM_GET_KEY}" ;;
+            esac
+        fi
+
         case "$ACTION" in
-            show) action_status "$TARGET" ;;
+            show|status) action_status "$TARGET" ;;
             enable) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_set_link "$TARGET" "on" "on" ;;
             disable) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_set_link "$TARGET" "off" "off" ;;
             hotplug) [ -z "$TARGET" ] && { json_error "Interface name required"; exit 1; }; action_hotplug "$TARGET" ;;

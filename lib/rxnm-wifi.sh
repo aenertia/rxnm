@@ -7,11 +7,18 @@
 # ARCHITECTURE: Logic / Wireless
 # -----------------------------------------------------------------------------
 
-# Cache variables to avoid repeated sysfs lookups
+# Cache variables to avoid repeated sysfs lookups.
+# SCOPE: In-process only. Each 'rxnm wifi ...' invocation forks a new
+# shell process — this cache provides no benefit across CLI calls.
+# Value is in long-lived daemon contexts (rxnm-roaming.service) where
+# get_wifi_iface() is called in a monitor loop.
+# DO NOT write this to disk — cross-process interface state is provided
+# by 'rxnm-agent --get interfaces.<iface>.state' or '--dump'.
 : "${WIFI_IFACE_CACHE:=}"
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 # Description: Auto-detects the primary wireless interface.
+# shellcheck disable=SC2120
 get_wifi_iface() {
     local preferred="${1:-}"
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
@@ -389,6 +396,7 @@ action_forget() {
     local ssid="$1"
     [ -z "$ssid" ] && { json_error "SSID required"; return 0; }
     local iface
+    # shellcheck disable=SC2119
     iface=$(get_wifi_iface || echo "global_wifi")
     with_iface_lock "$iface" _task_forget "$ssid"
     return 0

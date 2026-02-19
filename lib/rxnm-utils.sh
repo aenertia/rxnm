@@ -107,6 +107,7 @@ secure_exec() {
 # Arguments: $1 = Timeout (seconds)
 # Returns: 0 on success, 1 on failure.
 acquire_global_lock() {
+    # shellcheck disable=SC2034
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
@@ -580,6 +581,22 @@ validate_ip() {
     return 0
 }
 
+# _validate_ip_csv <comma-separated-ip-list>
+# Returns 0 if every entry passes validate_ip, 1 on first failure.
+_validate_ip_csv() {
+    local _list="$1"
+    local _old_ifs="$IFS"
+    IFS=','
+    set -- $_list
+    IFS="$_old_ifs"
+    for _item do
+        _item=$(printf '%s' "$_item" | tr -d ' \t')
+        [ -z "$_item" ] && continue
+        if ! validate_ip "$_item"; then return 1; fi
+    done
+    return 0
+}
+
 validate_routes() {
     local routes="$1"
     local _oldifs="$IFS"
@@ -614,17 +631,7 @@ validate_routes() {
     return 0
 }
 
-validate_dns() {
-    local dns_list="$1"
-    local _oldifs="$IFS"
-    IFS=','
-    set -- $dns_list
-    IFS="$_oldifs"
-    for server do
-        if ! validate_ip "$server"; then return 1; fi
-    done
-    return 0
-}
+validate_dns() { _validate_ip_csv "$1"; }
 
 validate_proxy_url() {
     local url="$1"

@@ -71,7 +71,7 @@ action_status_legacy() {
 
     local filter_iface="${1:-}"
     local hostname="ROCKNIX"
-    if [ -f /etc/hostname ]; then read -r hostname < /etc/hostname; fi
+    if [ -f /etc/hostname ]; then read -r hostname < /etc/hostname || true; fi
     
     local net_json="[]"
     if command -v networkctl >/dev/null 2>&1; then

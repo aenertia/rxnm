@@ -48,6 +48,7 @@ load_roaming_config() {
     local conf_file="${CONF_DIR}/rxnm-roaming.conf"
     if [ -f "$conf_file" ]; then
         log_roam "Loading configuration from $conf_file"
+        # shellcheck disable=SC1090
         . "$conf_file"
     fi
 }
@@ -78,6 +79,7 @@ _task_update_map() {
             # Merge new scan data into map atomically to prevent file corruption
             # Only run if JQ available (this feature requires it)
             if [ "$RXNM_HAS_JQ" = "true" ]; then
+                # shellcheck disable=SC2016
                 if "$JQ_BIN" -n --argjson map "$current_map" --argjson scan "$scan_json" --arg now "$now" '
                     ($scan.results | map(
                         (.bssids // []) | map({
@@ -244,9 +246,10 @@ _logic_signal_steering() {
     # Check Map for better options
     local map_has_better="false"
     if [ -f "$ROAM_MAP_FILE" ] && [ "${RXNM_FEATURE_MAP:-true}" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
-        map_has_better=$(cat "$ROAM_MAP_FILE" | "$JQ_BIN" -r --arg ssid "$ssid" --arg current_sig "$rssi" '
+        # shellcheck disable=SC2016
+        map_has_better=$("$JQ_BIN" -r --arg ssid "$ssid" --arg current_sig "$rssi" '
             to_entries | map(select(.value.ssid == $ssid and (.value.rssi | tonumber) > ($current_sig | tonumber + 12))) | length > 0
-        ')
+        ' < "$ROAM_MAP_FILE")
     fi
     
     # Condition A: Signal Critical (Panic)
