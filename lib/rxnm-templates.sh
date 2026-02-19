@@ -144,8 +144,3 @@ unmask_system_template() {
         fi
     fi
 }
-
-# Description: Initialize cache (Placeholder for future optimization)
-init_template_cache() {
-    :
-}

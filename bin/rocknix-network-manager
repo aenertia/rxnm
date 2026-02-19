@@ -631,7 +631,7 @@ case "$CATEGORY" in
                  fi
                  ;;
             reload) action_reload ;;
-            setup|start) init_template_cache; action_setup ;;
+            setup|start) action_setup ;;
             stop) action_stop ;;
             nullify) action_system_nullify "$@" ;;
         esac

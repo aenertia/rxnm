@@ -26,6 +26,22 @@ _SVC_TS_NETWORKD=0
 _SVC_TS_RESOLVED=0
 _SVC_TS_AVAHI=0
 
+# --- Service State Cache ---
+# This cache (flat variables, POSIX-safe) provides a 2-second TTL for
+# systemctl is-active queries. It is the BASH PATH mechanism for reducing
+# fork overhead when multiple actions within a single invocation check
+# service state (e.g. action_setup calls cache_service_states once, then
+# is_service_active is called several times for iwd, networkd, resolved).
+#
+# RELATIONSHIP TO AGENT:
+# On PATH B (compat/agent-mandatory), 'rxnm-agent --dump' provides service
+# state in one Netlink+DBus pass — the agent is called first by action_status
+# and the cache is not exercised. The cache remains essential for PATH A
+# operations that don't go through action_status (e.g. action_setup,
+# tune_network_stack, action_reload).
+#
+# DO NOT REMOVE this cache. The agent-available path optimisation in
+# action_status/action_reload does not cover all callers of is_service_active.
 cache_service_states() {
     local now
     now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
@@ -122,6 +138,9 @@ configure_standalone_gadget() {
 
 # --- Lifecycle Actions ---
 
+# NOTE: init_template_cache() was a no-op removed in v1.1.0-rc1.
+# If template conflict pre-scanning is implemented in a future version,
+# add a build_template_conflict_map warmup call here with a TTL cache.
 action_setup() {
     log_info "Initializing Network Manager..."
     ensure_dirs

@@ -85,7 +85,13 @@ action_status_legacy() {
     
     local legacy_wifi_json="{}"
     if [ "$iwd_json" = "{}" ]; then
-        legacy_wifi_json=$(_get_wifi_fallback_json)
+        # On low-power/POSIX-compat targets the agent is mandatory.
+        # If we reach here without IWD data, iw-based fallback won't help.
+        # Path A (Bash, any hardware) always uses the fallback.
+        if [ "${IS_LOW_POWER:-false}" != "true" ] || \
+           [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+            legacy_wifi_json=$(_get_wifi_fallback_json)
+        fi
     fi
     
     local global_proxy_json
