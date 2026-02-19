@@ -76,6 +76,9 @@ build_template_conflict_map() {
             
             # Pattern matching via case for POSIX compatibility
             case "$iface" in
+                # shellcheck disable=SC2254
+                # We intentionally leave $match_pattern unquoted because systemd
+                # templates use glob patterns (e.g. wlan*) in the Name= field.
                 $match_pattern)
                     # Conflict logic:
                     local is_conflict="false"
