@@ -111,6 +111,7 @@ Usage: rxnm interface [name] <action> [options]
 
 Actions:
   show                  Show interface details
+  nullify <cmd>         Suspend/Resume hardware traffic (enable, disable, status)
   hotplug               Trigger hotplug event (Standard/Rescue)
   set dhcp              Enable DHCP
   set static <ip>       Set Static IP (CIDR format)
@@ -141,16 +142,13 @@ Examples:
   # Set Static IP
   rxnm interface eth0 set static 192.168.1.50/24 --gateway 192.168.1.1 --dns 8.8.8.8
 
-  # Enable DHCP with custom metric (priority)
-  rxnm interface wlan0 set dhcp --metric 100
+  # Power Management: Suspend hardware traffic on specific interface
+  rxnm interface wlan0 nullify enable --yes
 
   # Get just the IP address (useful for scripts)
   rxnm interface eth0 show --get ip
 
   # Change MAC address
-  rxnm interface wlan0 set hardware --mac 00:11:22:33:44:55
-EOF
-            ;;
         route)
             cat <<'EOF'
 Usage: rxnm route <action> [destination] [options]
@@ -302,13 +300,15 @@ Actions:
   check portal          Check for captive portal
   reload                Reload network configuration
   proxy set             Configure global/interface proxy
-  nullify enable        Disable networking entirely (requires --yes)
-  nullify disable       Attempt to restore networking
+  nullify enable        Suspend hardware network traffic via XDP (requires --yes)
+  nullify disable       Resume hardware network traffic
+  nullify status        Show current nullify XDP status
 
 Options:
   --http <url>          Set HTTP proxy
   --https <url>         Set HTTPS proxy
   --noproxy <list>      Set no_proxy exclusions
+  --interface <iface>   Target a specific interface (e.g., for proxy or nullify)
   --dry-run             Show actions without executing (nullify only)
 
 Examples:
@@ -321,8 +321,11 @@ Examples:
   # Remove Proxy
   rxnm system proxy set
 
-  # Emergency: Disable all networking (Nullify)
+  # Power Management: Suspend all network traffic globally via XDP
   rxnm system nullify enable --yes
+
+  # Power Management: Suspend traffic on a specific interface only
+  rxnm system nullify enable --interface wlan0
 EOF
             ;;
         api)
