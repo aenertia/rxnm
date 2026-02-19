@@ -135,7 +135,7 @@ action_profile() {
     local cmd="${1:-}"; local name="${2:-}"; local iface="${3:-}";
     # SC2034: file_path unused fixed by removal (it was indeed unused in previous logic)
     
-    if [[ "$cmd" == "save" || "$cmd" == "load" ]] && [ -z "$name" ]; then
+    if { [ "$cmd" = "save" ] || [ "$cmd" = "load" ]; } && [ -z "$name" ]; then
         name="default"
     fi
     ensure_dirs
@@ -152,7 +152,7 @@ action_profile() {
                 json_success '{"action": "saved_global", "name": "'"$name"'"}'
                 ;;
             load)
-                if [ "$name" == "default" ] && [ ! -d "$global_dir/default" ]; then
+                if [ "$name" = "default" ] && [ ! -d "$global_dir/default" ]; then
                      # If loading default but it doesn't exist, reset to empty slate
                      confirm_action "Reset active configuration to system defaults?" "$FORCE_ACTION"
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
@@ -169,13 +169,17 @@ action_profile() {
                 json_success '{"action": "loaded_global", "name": "'"$name"'"}'
                 ;;
             list)
-                local files=()
-                for f in "$global_dir"/*; do [ -d "$f" ] && files+=("$(basename "$f")") ; done
-                [ ! -d "$global_dir/default" ] && files+=("default (system)")
-                
                 local json_list="[]"
-                if [ ${#files[@]} -gt 0 ]; then
-                    json_list=$(printf '%s\n' "${files[@]}" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
+                local _pnames=""
+                for f in "$global_dir"/*; do
+                    [ -d "$f" ] || continue
+                    _pnames="${_pnames}$(basename "$f")
+"
+                done
+                [ ! -d "$global_dir/default" ] && _pnames="${_pnames}default (system)
+"
+                if [ -n "$_pnames" ]; then
+                    json_list=$(printf '%s' "$_pnames" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
                 fi
                 json_success '{"profiles": '"$json_list"', "scope": "global"}'
                 ;;
@@ -232,15 +236,15 @@ action_profile() {
             json_success '{"action": "loaded", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
         list)
-            local clean_files=()
+            local _cf=""
             for f in "${profile_iface_dir}"/*.network "${profile_iface_dir}"/*.link; do
-                [ -e "$f" ] && clean_files+=("$(basename "$f" | sed 's/\.network$//;s/\.link$//')")
+                [ -e "$f" ] || continue
+                _cf="${_cf}$(basename "$f" | sed 's/\.network$//;s/\.link$//')
+"
             done
             local json_list="[]"
-            if [ ${#clean_files[@]} -gt 0 ]; then
-                local unique_files
-                unique_files=$(printf '%s\n' "${clean_files[@]}" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
-                json_list="$unique_files"
+            if [ -n "$_cf" ]; then
+                json_list=$(printf '%s' "$_cf" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
             fi
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;

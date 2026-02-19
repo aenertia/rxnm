@@ -99,11 +99,10 @@ USE_STDIN="false"
 # Robust POSIX Argument Parsing
 # 1. Iterate over "$@"
 # 2. Extract globals (setting vars)
-# 3. Accumulate positionals in a newline-delimited string
+# 3. Accumulate positionals in a RS-delimited string (0x1E)
 # 4. Reset "$@" from the string
 
 _accumulated_args=""
-_nl="$(printf '\n')"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -115,24 +114,28 @@ while [ "$#" -gt 0 ]; do
         --debug)   export RXNM_DEBUG=1; set -x; shift ;;
         --help|-h) SHOW_HELP="true"; shift ;;
         --stdin)   USE_STDIN="true"; shift ;;
-        --version) printf 'RXNM %s (API %s)\n' "${RXNM_VERSION:-1.1.0}" "${RXNM_API_VERSION:-1.1}"; exit 0 ;;
+        --version) printf 'RXNM %s (API %s)\n' \
+                           "${RXNM_VERSION:-1.1.0}" "${RXNM_API_VERSION:-1.1}"
+                       exit 0 ;;
         *)
-            # Non-global arg: Accumulate
             if [ -z "$_accumulated_args" ]; then
                 _accumulated_args="$1"
             else
-                _accumulated_args="${_accumulated_args}${_nl}${1}"
+                # ASCII RS (0x1E) is the field separator.
+                # It is a single non-newline byte, so $() does NOT strip it.
+                # It never appears legitimately in command names or arguments.
+                _accumulated_args="${_accumulated_args}"$'\x1e'"$1"
             fi
             shift
             ;;
     esac
 done
 
-# Rebuild "$@" from accumulator
+# Rebuild "$@" using RS as IFS.
 if [ -n "$_accumulated_args" ]; then
-    set -f          # Disable globbing to protect *
+    set -f
     _old_ifs="$IFS"
-    IFS="$_nl"      # Split on newlines
+    IFS="$(printf '\x1e')"  # single non-newline char: survives $() intact
     # shellcheck disable=SC2086
     set -- $_accumulated_args
     IFS="$_old_ifs"
@@ -140,6 +143,7 @@ if [ -n "$_accumulated_args" ]; then
 else
     set --
 fi
+unset _accumulated_args _old_ifs
 
 # --- JSON STDIN EXPANSION ---
 if [ "$USE_STDIN" = "true" ]; then

@@ -108,24 +108,24 @@ action_route_modify() {
     
     [ -z "$dest" ] && { json_error "Destination required (e.g. 10.0.0.0/24 or default)"; return 1; }
     
-    # Construct ip route command
-    local cmd=("ip" "route" "$op" "$dest")
+    # Construct ip route command using set -- (POSIX compatible)
+    set -- ip route "$op" "$dest"
     
-    [ -n "$gw" ] && cmd+=("via" "$gw")
-    [ -n "$iface" ] && cmd+=("dev" "$iface")
-    [ -n "$metric" ] && cmd+=("metric" "$metric")
-    [ -n "$table" ] && cmd+=("table" "$table")
-    [ -n "$src" ] && cmd+=("src" "$src")
-    [ -n "$scope" ] && cmd+=("scope" "$scope")
-    [ -n "$proto" ] && cmd+=("proto" "$proto")
-    [ -n "$type" ] && cmd+=("type" "$type")
+    [ -n "$gw" ]     && set -- "$@" via "$gw"
+    [ -n "$iface" ]  && set -- "$@" dev "$iface"
+    [ -n "$metric" ] && set -- "$@" metric "$metric"
+    [ -n "$table" ]  && set -- "$@" table "$table"
+    [ -n "$src" ]    && set -- "$@" src "$src"
+    [ -n "$scope" ]  && set -- "$@" scope "$scope"
+    [ -n "$proto" ]  && set -- "$@" proto "$proto"
+    [ -n "$type" ]   && set -- "$@" type "$type"
     
-    if "${cmd[@]}"; then
+    if "$@"; then
         json_success '{"action": "route_'"$op"'", "destination": "'"$dest"'", "status": "ok"}'
     else
         # Capture stderr for error message
         local err
-        err=$("${cmd[@]}" 2>&1)
+        err=$("$@" 2>&1)
         json_error "Failed to $op route: $err"
     fi
 }
