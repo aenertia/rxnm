@@ -75,10 +75,10 @@ build_template_conflict_map() {
             wlan_type=$(echo "$meta" | "$JQ_BIN" -r '.wlan_type')
             
             # Pattern matching via case for POSIX compatibility
+            # shellcheck disable=SC2254
+            # We intentionally leave $match_pattern unquoted because systemd
+            # templates use glob patterns (e.g. wlan*) in the Name= field.
             case "$iface" in
-                # shellcheck disable=SC2254
-                # We intentionally leave $match_pattern unquoted because systemd
-                # templates use glob patterns (e.g. wlan*) in the Name= field.
                 $match_pattern)
                     # Conflict logic:
                     local is_conflict="false"
