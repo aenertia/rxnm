@@ -16,39 +16,47 @@
 # Description: Caches sysfs reads to reduce I/O overhead in tight loops.
 # Arguments: $1 = Interface Name
 # Returns: String containing operstate:address:mtu
+
+# Optimization: Bash Associative Arrays (Hidden from POSIX parser via eval)
 if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-    declare -A _sysfs_cache
+    eval 'declare -A _sysfs_cache'
 fi
 
 get_iface_sysfs() {
     local iface=$1
+    local data=""
+    
+    # Fast Path: Bash Cache
     if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-        if [ -n "${_sysfs_cache[$iface]}" ]; then
-             echo "${_sysfs_cache[$iface]}"
+        # Use eval to prevent syntax error in Dash on ${arr[key]}
+        eval 'data="${_sysfs_cache['"$iface"']:-}"'
+        if [ -n "$data" ]; then
+             echo "$data"
              return
         fi
     fi
     
-    local data=""
     if [ -d "/sys/class/net/$iface" ]; then
         if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
              data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
         fi
     fi
     
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-        _sysfs_cache[$iface]="$data"
+    # Store in Cache (Bash only)
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$data" ]; then
+        eval '_sysfs_cache['"$iface"']="$data"'
     fi
     echo "$data"
 }
 
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
-    local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
-    # POSIX safe check if glob failed (string contains *)
-    if [ "${temp_files[*]}" != "${STORAGE_NET_DIR}/*.XXXXXX" ]; then
-        rm -f "${temp_files[@]}" 2>/dev/null
+    # Remove temp files safely without arrays
+    # Find is safer and works in POSIX sh
+    if [ -d "${STORAGE_NET_DIR}" ]; then
+        find "${STORAGE_NET_DIR}" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
     fi
+
     # Release global lock if owned by this process
     if [ -f "$GLOBAL_PID_FILE" ]; then
         local pid
@@ -57,6 +65,7 @@ cleanup() {
             rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
         fi
     fi
+    
     # Attempt to clean up stale sub-locks in RUN_DIR
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
         if command -v fuser >/dev/null; then
@@ -230,8 +239,10 @@ rxnm_match() {
     local _str="$1"
     local _pat="$2"
 
+    # Optimization: Use Bash built-in regex if available
+    # Must use eval to hide the syntax from Dash parser
     if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
-        [[ "$_str" =~ $_pat ]]
+        eval '[[ "$_str" =~ $_pat ]]'
         return
     fi
 
