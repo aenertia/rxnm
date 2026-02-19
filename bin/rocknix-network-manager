@@ -103,6 +103,8 @@ USE_STDIN="false"
 # 4. Reset "$@" from the string
 
 _accumulated_args=""
+# Define Record Separator (0x1E) using octal printf for strict POSIX (SC3003)
+_rs="$(printf '\036')"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -121,10 +123,8 @@ while [ "$#" -gt 0 ]; do
             if [ -z "$_accumulated_args" ]; then
                 _accumulated_args="$1"
             else
-                # ASCII RS (0x1E) is the field separator.
-                # It is a single non-newline byte, so $() does NOT strip it.
-                # It never appears legitimately in command names or arguments.
-                _accumulated_args="${_accumulated_args}"$'\x1e'"$1"
+                # Use standard variable concatenation instead of ANSI-C quoting
+                _accumulated_args="${_accumulated_args}${_rs}${1}"
             fi
             shift
             ;;
@@ -135,7 +135,7 @@ done
 if [ -n "$_accumulated_args" ]; then
     set -f
     _old_ifs="$IFS"
-    IFS="$(printf '\x1e')"  # single non-newline char: survives $() intact
+    IFS="$_rs"  # single non-newline char: survives $() intact
     # shellcheck disable=SC2086
     set -- $_accumulated_args
     IFS="$_old_ifs"
@@ -143,7 +143,7 @@ if [ -n "$_accumulated_args" ]; then
 else
     set --
 fi
-unset _accumulated_args _old_ifs
+unset _accumulated_args _old_ifs _rs
 
 # --- JSON STDIN EXPANSION ---
 if [ "$USE_STDIN" = "true" ]; then
@@ -233,6 +233,10 @@ if [ "$SHOW_HELP" = "true" ] && [ "$#" -eq 0 ]; then
 fi
 
 # --- HIERARCHY DISPATCHER ---
+# FIX: Restore space in IFS temporarily to allow splitting the CATS list
+_safe_ifs="$IFS"
+IFS=" $(printf '\n\t')"
+
 CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config api service route tunnel mpls pppoe ha"
 
 RAW_CMD="${1:-}"
@@ -272,6 +276,8 @@ if [ -n "$PLUGIN_EXEC" ]; then
         exec_plugin "$PLUGIN_EXEC" "--help"
         exit 0
     fi
+    # Must restore strict IFS before exec to avoid side effects in subshells if any
+    IFS="$_safe_ifs"
     exec_plugin "$PLUGIN_EXEC" "$@"
 fi
 
@@ -284,6 +290,9 @@ for valid_cat in $CATS; do
         break
     fi
 done
+
+# Restore strict IFS for the remainder of script execution
+IFS="$_safe_ifs"
 
 if [ "$IS_VALID_CAT" = "false" ]; then
     if [ "$SHOW_HELP" = "true" ]; then
