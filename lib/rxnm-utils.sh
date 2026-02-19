@@ -16,16 +16,35 @@
 # Description: Caches sysfs reads to reduce I/O overhead in tight loops.
 # Arguments: $1 = Interface Name
 # Returns: String containing operstate:address:mtu
-# Note: Caching removed for POSIX compliance (no associative arrays).
-# OS page cache handles sysfs read performance efficiently enough.
+# Optimization: Restored Bash Associative Arrays (Hidden from POSIX parser via eval)
+if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+    eval 'declare -A _sysfs_cache'
+fi
+
 get_iface_sysfs() {
     local iface="$1"
     local data=""
+    
+    # Fast Path: Bash Cache (eval-guarded)
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        eval 'data="${_sysfs_cache['"$iface"']:-}"'
+        if [ -n "$data" ]; then
+             echo "$data"
+             return
+        fi
+    fi
+    
     if [ -d "/sys/class/net/$iface" ]; then
         if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
              data=$(paste -d: "/sys/class/net/$iface/operstate" "/sys/class/net/$iface/address" "/sys/class/net/$iface/mtu" 2>/dev/null)
         fi
     fi
+    
+    # Store in Cache (Bash only, eval-guarded)
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$data" ]; then
+        eval '_sysfs_cache['"$iface"']="$data"'
+    fi
+    
     echo "$data"
 }
 
@@ -89,7 +108,7 @@ acquire_global_lock() {
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Use FD 200 for global lock (Standard and safe)
+    # Use FD 200 for global lock
     exec 200>"$GLOBAL_LOCK_FILE"
     
     if ! flock -n 200; then
@@ -122,7 +141,7 @@ acquire_global_lock() {
 # Description: Acquires a fine-grained lock for a specific interface.
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
-# NOTE: Uses FD 9 and explicit open/close to satisfy Dash's parser requirements.
+# NOTE: Uses FD 9 and explicit open/close to satisfy sensitive Dash/Ash parsers.
 with_iface_lock() {
     local _wi_iface="$1"
     shift
@@ -140,11 +159,11 @@ with_iface_lock() {
         return 1
     fi
     
-    # Execute command
+    # Execute protected command
     "$@"
     local _wi_ret=$?
     
-    # Close FD
+    # Release and close
     exec 9>&-
     return $_wi_ret
 }

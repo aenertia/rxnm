@@ -6,32 +6,23 @@
 # PURPOSE: Persistence & Profile Management
 # ARCHITECTURE: Logic / Profiles
 #
-# Saves and loads network configurations.
-# Two modes:
-# 1. Global Profile (Snapshot of entire system state)
-# 2. Interface Profile (Snapshot of single interface config)
+# Saves and loads network configurations. Refactored for POSIX compliance.
 # -----------------------------------------------------------------------------
 
 _sync_active_configs() {
-    local src_dir="$1"
-    local dest_dir="$2"
+    local src_dir="$1" dest_dir="$2"
     
-    local devs=("${src_dir}"/*.netdev)
-    if [ ${#devs[@]} -gt 0 ] && [ -e "${devs[0]}" ]; then
-        cp "${devs[@]}" "${dest_dir}/" 2>/dev/null
-    fi
-    local nets=("${src_dir}"/*.network)
-    if [ ${#nets[@]} -gt 0 ] && [ -e "${nets[0]}" ]; then
-        cp "${nets[@]}" "${dest_dir}/" 2>/dev/null
-    fi
-    local links=("${src_dir}"/*.link)
-    if [ ${#links[@]} -gt 0 ] && [ -e "${links[0]}" ]; then
-        cp "${links[@]}" "${dest_dir}/" 2>/dev/null
-    fi
-    local proxies=("${src_dir}"/proxy-*.conf)
-    if [ ${#proxies[@]} -gt 0 ] && [ -e "${proxies[0]}" ]; then
-        cp "${proxies[@]}" "${dest_dir}/" 2>/dev/null
-    fi
+    # POSIX safe glob iteration and copy
+    for ext in netdev network link conf; do
+        # Use simple globbing check
+        # shellcheck disable=SC2044
+        for f in "${src_dir}"/*."${ext}"; do
+            if [ -e "$f" ]; then
+                cp "${src_dir}"/*."${ext}" "${dest_dir}/" 2>/dev/null
+                break
+            fi
+        done
+    done
 }
 
 _task_profile_save_global() {
@@ -39,31 +30,26 @@ _task_profile_save_global() {
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    # Safety Check: SC2115 - Prevent expansion to root if vars empty
     rm -rf "${profile_dir:?}/"
     mkdir -p "$profile_dir"
     
-    # Save Networkd state
     _sync_active_configs "${EPHEMERAL_NET_DIR}" "${profile_dir}"
     
-    # Save System state
     [ -f "${STORAGE_PROXY_GLOBAL}" ] && cp "${STORAGE_PROXY_GLOBAL}" "$profile_dir/proxy.conf"
     [ -f "${STORAGE_COUNTRY_FILE}" ] && cp "${STORAGE_COUNTRY_FILE}" "$profile_dir/country"
     
-    # Save Resolved state
     if [ -d "${STORAGE_RESOLVED_DIR}" ]; then
         mkdir -p "$profile_dir/resolved.conf.d"
-        local res_confs=("${STORAGE_RESOLVED_DIR}"/*.conf)
-        [ ${#res_confs[@]} -gt 0 ] && [ -e "${res_confs[0]}" ] && cp "${res_confs[@]}" "$profile_dir/resolved.conf.d/"
+        for f in "${STORAGE_RESOLVED_DIR}"/*.conf; do
+            [ -e "$f" ] && cp "$f" "$profile_dir/resolved.conf.d/"
+        done
     fi
     
-    # Save IWD state (Wifi creds)
     if [ -d "$iwd_dir" ]; then
         mkdir -p "$profile_dir/wifi"
-        local psks=("${iwd_dir}"/*.psk)
-        [ ${#psks[@]} -gt 0 ] && [ -e "${psks[0]}" ] && cp "${psks[@]}" "$profile_dir/wifi/"
-        local eaps=("${iwd_dir}"/*.8021x)
-        [ ${#eaps[@]} -gt 0 ] && [ -e "${eaps[0]}" ] && cp "${eaps[@]}" "$profile_dir/wifi/"
+        for f in "${iwd_dir}"/*.psk "${iwd_dir}"/*.8021x; do
+            [ -e "$f" ] && cp "$f" "$profile_dir/wifi/"
+        done
     fi
     
     return 0
@@ -74,39 +60,26 @@ _task_profile_load_global() {
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    # Transactional Loading Strategy:
-    # 1. Create staging directory
-    # 2. Populate staging
-    # 3. Verify
-    # 4. Atomic Swap (move into place)
-    
     local staging_dir="${RUN_DIR}/profile_staging_$$"
     rm -rf "$staging_dir"
     mkdir -p "$staging_dir"
     
-    # 2. Populate Staging
     _sync_active_configs "${profile_dir}" "${staging_dir}"
     
-    # Verify basic integrity (check if we copied anything, or if empty profile is intentional)
-    # For "default" empty profile, it might be empty, so loose check.
-    
-    # 4. Atomic Commit
-    # Clean current ephemeral dir
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "proxy-*.conf" -delete
     
-    # Move from staging to ephemeral
-    # Note: Since they are likely on the same tmpfs (/run), mv is atomic for individual files.
-    # We move contents of staging into destination.
     if [ -d "$staging_dir" ]; then
-        find "$staging_dir" -maxdepth 1 -type f -exec mv -f {} "${EPHEMERAL_NET_DIR}/" \;
+        # POSIX safe move content
+        for f in "$staging_dir"/*; do
+            [ -e "$f" ] && mv -f "$f" "${EPHEMERAL_NET_DIR}/"
+        done
         rm -rf "$staging_dir"
     fi
     
-    # Handle System files (Non-networkd)
-    if [ -f "$profile_dir/proxy.conf" ]; then cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"; fi
+    [ -f "$profile_dir/proxy.conf" ] && cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"
     
     if [ -f "$profile_dir/country" ]; then
         cp "$profile_dir/country" "${STORAGE_COUNTRY_FILE}"
@@ -114,33 +87,27 @@ _task_profile_load_global() {
         if command -v iw >/dev/null; then [ -n "$code" ] && iw reg set "$code" 2>/dev/null || true; fi
     fi
     
-    # Restore IWD (Direct copy as IWD watches this dir)
     if [ -d "$profile_dir/wifi" ]; then
         mkdir -p "$iwd_dir"
-        local psks=("${profile_dir}/wifi"/*.psk)
-        [ ${#psks[@]} -gt 0 ] && [ -e "${psks[0]}" ] && cp "${psks[@]}" "$iwd_dir/"
-        local eaps=("${profile_dir}/wifi"/*.8021x)
-        [ ${#eaps[@]} -gt 0 ] && [ -e "${eaps[0]}" ] && cp "${eaps[@]}" "$iwd_dir/"
-        
-        # Permissions fix
-        chmod 600 "$iwd_dir"/*.psk 2>/dev/null || true
-        chmod 600 "$iwd_dir"/*.8021x 2>/dev/null || true
+        for f in "${profile_dir}/wifi"/*.psk "${profile_dir}/wifi"/*.8021x; do
+            if [ -e "$f" ]; then
+                cp "$f" "$iwd_dir/"
+                chmod 600 "$iwd_dir/${f##*/}" 2>/dev/null || true
+            fi
+        done
     fi
     
     reload_networkd
 }
 
 action_profile() {
-    # Fix: Initialize local variables with defaults to prevent 'unbound variable' errors under set -u
-    local cmd="${1:-}"; local name="${2:-}"; local iface="${3:-}";
-    # SC2034: file_path unused fixed by removal (it was indeed unused in previous logic)
+    local cmd="${1:-}" name="${2:-}" iface="${3:-}"
     
-    if { [ "$cmd" = "save" ] || [ "$cmd" = "load" ]; } && [ -z "$name" ]; then
-        name="default"
+    if [ "$cmd" = "save" ] || [ "$cmd" = "load" ]; then
+        [ -z "$name" ] && name="default"
     fi
     ensure_dirs
     
-    # GLOBAL PROFILE SCOPE
     if [ -z "$iface" ]; then
         local global_dir="${STORAGE_PROFILES_DIR}/global"
         mkdir -p "$global_dir"
@@ -153,7 +120,6 @@ action_profile() {
                 ;;
             load)
                 if [ "$name" = "default" ] && [ ! -d "$global_dir/default" ]; then
-                     # If loading default but it doesn't exist, reset to empty slate
                      confirm_action "Reset active configuration to system defaults?" "$FORCE_ACTION"
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
@@ -169,41 +135,33 @@ action_profile() {
                 json_success '{"action": "loaded_global", "name": "'"$name"'"}'
                 ;;
             list)
-                local json_list="[]"
                 local _pnames=""
                 for f in "$global_dir"/*; do
-                    [ -d "$f" ] || continue
-                    _pnames="${_pnames}$(basename "$f")
-"
+                    [ -d "$f" ] && _pnames="${_pnames}${f##*/} "
                 done
-                [ ! -d "$global_dir/default" ] && _pnames="${_pnames}default (system)
-"
+                [ ! -d "$global_dir/default" ] && _pnames="${_pnames}default "
+                
+                local json_list="[]"
                 if [ -n "$_pnames" ]; then
-                    json_list=$(printf '%s' "$_pnames" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
+                    # shellcheck disable=SC2086
+                    json_list=$(printf '%s\n' $_pnames | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
                 fi
                 json_success '{"profiles": '"$json_list"', "scope": "global"}'
                 ;;
             boot)
-                # Boot logic: Wipes ephemeral, then loads 'default' if it exists
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
                 
                 if [ -d "$global_dir/default" ]; then
-                    log_info "Boot: Loading persistent 'default' profile into RAM..."
                     _sync_active_configs "$global_dir/default" "${EPHEMERAL_NET_DIR}"
                 fi
-                
-                # Overlay persistent manual configs (not in a profile)
-                log_info "Boot: Syncing manual overrides from root config..."
                 _sync_active_configs "${PERSISTENT_NET_DIR}" "${EPHEMERAL_NET_DIR}"
-                log_info "Boot: RAM Active State initialized."
                 ;;
         esac
         return 0
     fi
     
-    # INTERFACE PROFILE SCOPE (Single Iface)
     local profile_iface_dir="${STORAGE_PROFILES_DIR}/${iface}"
     mkdir -p "$profile_iface_dir"
     
@@ -217,18 +175,14 @@ action_profile() {
     
     case "$cmd" in
         save)
-            if [ ! -f "$active_cfg" ] && [ ! -f "$active_link" ]; then
-                 json_error "No active config to save for $iface"; return 1
-            fi
+            if [ ! -f "$active_cfg" ] && [ ! -f "$active_link" ]; then json_error "No active config to save for $iface"; return 1; fi
             [ -f "$active_cfg" ] && cp "$active_cfg" "$profile_path"
             [ -f "$active_link" ] && cp "$active_link" "$profile_link"
             [ -f "$active_proxy" ] && cp "$active_proxy" "$profile_proxy"
             json_success '{"action": "saved", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
         load)
-            if [ ! -f "$profile_path" ] && [ ! -f "$profile_link" ]; then
-                 json_error "Profile not found"; return 1
-            fi
+            if [ ! -f "$profile_path" ] && [ ! -f "$profile_link" ]; then json_error "Profile not found"; return 1; fi
             [ -f "$profile_path" ] && cp "$profile_path" "$active_cfg"
             [ -f "$profile_link" ] && cp "$profile_link" "$active_link"
             if [ -f "$profile_proxy" ]; then cp "$profile_proxy" "$active_proxy"; else rm -f "$active_proxy"; fi
@@ -238,20 +192,17 @@ action_profile() {
         list)
             local _cf=""
             for f in "${profile_iface_dir}"/*.network "${profile_iface_dir}"/*.link; do
-                [ -e "$f" ] || continue
-                _cf="${_cf}$(basename "$f" | sed 's/\.network$//;s/\.link$//')
-"
+                [ -e "$f" ] && _cf="${_cf}${f##*/} "
             done
             local json_list="[]"
             if [ -n "$_cf" ]; then
-                json_list=$(printf '%s' "$_cf" | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
+                # shellcheck disable=SC2086
+                json_list=$(printf '%s\n' $_cf | sed 's/\.network//;s/\.link//' | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
             fi
             json_success '{"profiles": '"$json_list"', "scope": "'"$iface"'"}'
             ;;
         delete)
-            [ -f "$profile_path" ] && rm -f "$profile_path"
-            [ -f "$profile_link" ] && rm -f "$profile_link"
-            [ -f "$profile_proxy" ] && rm -f "$profile_proxy"
+            rm -f "$profile_path" "$profile_link" "$profile_proxy"
             json_success '{"action": "deleted", "name": "'"$name"'", "iface": "'"$iface"'"}'
             ;;
     esac
