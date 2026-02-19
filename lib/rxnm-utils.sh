@@ -164,6 +164,100 @@ log_error() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Function: rxnm_json_get
+# Description: Extracts a single top-level key from a flat JSON object.
+#              Fast path uses jq. Constrained path uses awk.
+#              SCOPE: Top-level keys only. Not a general-purpose JSON parser.
+# Arguments:
+#   $1 - JSON string
+#   $2 - Key name (without leading dot)
+# Returns: Value string on stdout, empty string if not found.
+# -----------------------------------------------------------------------------
+rxnm_json_get() {
+    local _json="$1"
+    local _key="$2"
+
+    # Fast Path: Bash + jq available (zero extra forks)
+    if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
+        "$JQ_BIN" -r ".${_key} // empty" <<< "$_json"
+        return
+    fi
+
+    # Constrained Path: awk-based flat key extractor.
+    # Handles: "key": "value", "key": true/false/null, "key": 123
+    # Does NOT handle: nested objects, arrays, keys containing escaped quotes.
+    printf '%s' "$_json" | awk -v key="\"${_key}\"" '
+    {
+        # Normalize: remove leading/trailing whitespace, collapse spaces around : and ,
+        gsub(/[[:space:]]+/, " ")
+        # Find key
+        idx = index($0, key)
+        if (idx == 0) next
+        # Move past key and colon
+        rest = substr($0, idx + length(key))
+        sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
+        # Extract value: string (quoted), or bare (number/bool/null)
+        if (substr(rest, 1, 1) == "\"") {
+            # String value: extract between quotes, handle \" escapes
+            val = ""
+            rest = substr(rest, 2)
+            while (length(rest) > 0) {
+                c = substr(rest, 1, 1)
+                rest = substr(rest, 2)
+                if (c == "\\") {
+                    nc = substr(rest, 1, 1)
+                    rest = substr(rest, 2)
+                    if (nc == "\"") val = val "\""
+                    else if (nc == "n") val = val "\n"
+                    else val = val nc
+                } else if (c == "\"") {
+                    break
+                } else {
+                    val = val c
+                }
+            }
+            print val
+        } else {
+            # Bare value: number, bool, null — terminated by , } whitespace
+            match(rest, /^[^,}[:space:]]+/)
+            bare = substr(rest, 1, RLENGTH)
+            if (bare != "null") print bare
+        }
+        exit
+    }'
+}
+
+# -----------------------------------------------------------------------------
+# Function: rxnm_match
+# Description: Tests whether a string matches an extended regex pattern.
+#              Fast path uses Bash [[ =~ ]]. Constrained path uses rxnm-agent.
+# Arguments:
+#   $1 - String to test
+#   $2 - Extended regex pattern
+# Returns: 0 on match, 1 on no-match (standard test convention).
+# -----------------------------------------------------------------------------
+rxnm_match() {
+    local _str="$1"
+    local _pat="$2"
+
+    # Fast Path: Bash built-in regex (zero forks)
+    if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
+        [[ "$_str" =~ $_pat ]]
+        return
+    fi
+
+    # Constrained Path: delegate to agent
+    if [ -x "${RXNM_AGENT_BIN:-}" ]; then
+        "$RXNM_AGENT_BIN" --match "$_str" "$_pat"
+        return
+    fi
+
+    # Last resort fallback: use grep -E (slower, 1 fork + subshell)
+    # This handles systems where agent is not yet installed (e.g. first-run setup)
+    printf '%s' "$_str" | grep -qE "$_pat"
+}
+
 # Description: Exits the script with an error message formatted correctly for the requested output mode.
 # Arguments: $1 = Message
 cli_error() {
@@ -192,8 +286,13 @@ print_table() {
     local jq_query="["
     local header_row=""
     
-    IFS=',' read -ra COLS <<< "$columns"
-    for col in "${COLS[@]}"; do
+    # POSIX-safe iteration over columns
+    local _oldifs="$IFS"
+    IFS=','
+    set -- $columns
+    IFS="$_oldifs"
+    
+    for col do
         local key="${col%%:*}"
         local hdr="${col#*:}"
         jq_query+=" .${key} // \"-\","
@@ -532,7 +631,7 @@ validate_ssid() {
 
 validate_interface_name() {
     local iface="$1"
-    if [[ ! "$iface" =~ ^[a-zA-Z0-9_:.-]{1,15}$ ]]; then
+    if ! rxnm_match "$iface" '^[a-zA-Z0-9_:.-]{1,15}$'; then
         json_error "Invalid interface name: $iface" "1" "Must be alphanumeric, max 15 chars"
         return 1
     fi
@@ -554,21 +653,20 @@ validate_bluetooth_name() {
     local name="$1"
     local len=${#name}
     if [ "$len" -gt 248 ]; then return 1; fi
-    if [[ "$name" =~ [[:cntrl:]] ]]; then return 1; fi
+    if rxnm_match "$name" '[[:cntrl:]]'; then return 1; fi
     return 0
 }
 
 validate_channel() {
     local ch="$1"
-    if [[ ! "$ch" =~ ^[0-9]+$ ]]; then return 1; fi
+    if ! rxnm_match "$ch" '^[0-9]+$'; then return 1; fi
     if [ "$ch" -lt "$MIN_CHANNEL" ] || [ "$ch" -gt "$WIFI_CHANNEL_MAX" ]; then return 1; fi
     return 0
 }
 
 validate_integer() {
     local val="$1"
-    if [[ "$val" =~ ^[0-9]+$ ]]; then return 0; fi
-    return 1
+    rxnm_match "$val" '^[0-9]+$'
 }
 
 validate_vlan_id() {
@@ -581,7 +679,7 @@ validate_vlan_id() {
 validate_ip() {
     local ip="$1"
     local clean_ip="${ip%/*}"
-    if [[ ! "$ip" =~ ^[0-9a-fA-F:.]+(/[0-9]+)?$ ]]; then
+    if ! rxnm_match "$ip" '^[0-9a-fA-F:.]+(/[0-9]+)?$'; then
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
     fi
@@ -626,12 +724,16 @@ validate_dns() {
 
 validate_proxy_url() {
     local url="$1"
-    if [[ "$url" =~ ^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]; then return 0; fi
-    if [[ "$url" =~ ^([0-9.]+):([0-9]+)$ ]]; then
-        local ip="${BASH_REMATCH[1]}"
-        local port="${BASH_REMATCH[2]}"
-        if validate_ip "$ip"; then
-             if [ "$port" -le 65535 ]; then return 0; fi
+    # Full URL form: scheme://host[:port][/path]
+    if rxnm_match "$url" '^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$'; then
+        return 0
+    fi
+    # Bare IP:port form — extract with POSIX parameter expansion (no BASH_REMATCH needed)
+    if rxnm_match "$url" '^[0-9.]+:[0-9]+$'; then
+        local ip="${url%%:*}"
+        local port="${url##*:}"
+        if validate_ip "$ip" && [ "$port" -le 65535 ]; then
+            return 0
         fi
     fi
     return 1
@@ -639,7 +741,7 @@ validate_proxy_url() {
 
 validate_country() {
     local code="$1"
-    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then
+    if ! rxnm_match "$code" '^[A-Z]{2}$'; then
         json_error "Invalid country code: $code" "1" "Use ISO 3166-1 alpha-2 format (e.g., US, JP, DE)"
         return 1
     fi
@@ -648,35 +750,45 @@ validate_country() {
 
 validate_mac() {
     local mac="$1"
-    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then return 0; fi
-    json_error "Invalid MAC address format" "1" "Expected XX:XX:XX:XX:XX:XX"
-    return 1
+    if ! rxnm_match "$mac" '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'; then
+        json_error "Invalid MAC address format" "1" "Expected XX:XX:XX:XX:XX:XX"
+        return 1
+    fi
+    return 0
 }
 
 validate_mtu() {
     local mtu="$1"
-    if [[ "$mtu" =~ ^[0-9]+$ ]] && [ "$mtu" -ge 68 ] && [ "$mtu" -le 65535 ]; then return 0; fi
-    json_error "Invalid MTU" "1" "Must be integer between 68 and 65535"
-    return 1
+    if ! rxnm_match "$mtu" '^[0-9]+$' || [ "$mtu" -lt 68 ] || [ "$mtu" -gt 65535 ]; then
+        json_error "Invalid MTU" "1" "Must be integer between 68 and 65535"
+        return 1
+    fi
+    return 0
 }
 
 validate_link_speed() {
     local spd="$1"
-    if [[ "$spd" =~ ^[0-9]+$ ]] && [ "$spd" -ge 10 ]; then return 0; fi
-    json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
-    return 1
+    if ! rxnm_match "$spd" '^[0-9]+$' || [ "$spd" -lt 10 ]; then
+        json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
+        return 1
+    fi
+    return 0
 }
 
 validate_duplex() {
     local dup="$1"
-    if [[ "$dup" =~ ^(half|full)$ ]]; then return 0; fi
-    json_error "Invalid duplex mode: $dup" "1" "Must be 'half' or 'full'"
-    return 1
+    if ! rxnm_match "$dup" '^(half|full)$'; then
+        json_error "Invalid duplex mode: $dup" "1" "Must be 'half' or 'full'"
+        return 1
+    fi
+    return 0
 }
 
 validate_autoneg() {
     local auto="$1"
-    if [[ "$auto" =~ ^(yes|no)$ ]]; then return 0; fi
-    json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
-    return 1
+    if ! rxnm_match "$auto" '^(yes|no)$'; then
+        json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
+        return 1
+    fi
+    return 0
 }

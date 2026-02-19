@@ -1,15 +1,20 @@
-#!/bin/bash
+#!/bin/sh
 # Shorthand for rocknix-network-manager
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 # Resolve symlinks to find the real source directory
-SOURCE="${BASH_SOURCE[0]}"
-while [ -h "$SOURCE" ]; do
-  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-done
-SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+_rxnm_resolve_dir() {
+    local src="$1"
+    local dir
+    while [ -L "$src" ]; do
+        dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+        src="$(readlink "$src")"
+        case "$src" in /*) ;; *) src="${dir}/${src}" ;; esac
+    done
+    cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+SCRIPT_DIR="$(_rxnm_resolve_dir "$0")"
 
 # Execute the main binary from the resolved location
 exec "${SCRIPT_DIR}/rocknix-network-manager" "$@"
+```cat

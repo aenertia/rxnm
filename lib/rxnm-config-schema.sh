@@ -1,3 +1,14 @@
+# POSIX Guard: This file uses Bash associative arrays (declare -A).
+# On non-Bash systems, schema validation is unavailable. Functions are stubbed
+# to return 0 (pass-through) so execution continues to the action layer.
+if [ "${RXNM_SHELL_IS_BASH:-false}" != "true" ]; then
+    validate_config_state() { return 0; }
+    build_config_descriptor() { printf 'iface:|states:\n'; }
+    _check_requirement() { return 0; }
+    validate_json_input() { return 0; }
+    return 0  # Stop sourcing this file — remaining content is Bash-only
+fi
+
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 

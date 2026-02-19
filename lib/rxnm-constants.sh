@@ -148,6 +148,17 @@ if command -v jaq >/dev/null; then
 elif command -v gojq >/dev/null; then export JQ_BIN="gojq";
 else export JQ_BIN="jq"; fi
 
+# --- Shell Capability Flags ---
+# Detected once at startup; used by guard wrappers in rxnm-utils.sh.
+# These are exported so sourced libraries see them without re-detection.
+RXNM_SHELL_IS_BASH=false
+[ -n "${BASH_VERSION:-}" ] && RXNM_SHELL_IS_BASH=true
+export RXNM_SHELL_IS_BASH
+
+RXNM_HAS_JQ=false
+command -v "${JQ_BIN:-jq}" >/dev/null 2>&1 && RXNM_HAS_JQ=true
+export RXNM_HAS_JQ
+
 # --- State Caches ---
 declare -A SERVICE_STATE_CACHE
 declare -A SERVICE_STATE_TS
