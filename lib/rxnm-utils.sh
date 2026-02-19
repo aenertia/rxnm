@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # -----------------------------------------------------------------------------
 # FILE: rxnm-utils.sh
 # PURPOSE: Standard Library for RXNM
@@ -36,7 +38,7 @@ cleanup() {
     if [ -f "$GLOBAL_PID_FILE" ]; then
         local pid
         pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
-        if [ "$pid" == "$$" ]; then
+        if [ "$pid" = "$$" ]; then
             rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
         fi
     fi
@@ -47,7 +49,7 @@ cleanup() {
                 if [ -f "$lock" ]; then
                     local lock_pid
                     lock_pid=$(fuser "$lock" 2>/dev/null | awk '{print $1}')
-                    if [ -z "$lock_pid" ] || [ "$lock_pid" == "$$" ]; then
+                    if [ -z "$lock_pid" ] || [ "$lock_pid" = "$$" ]; then
                         rm -f "$lock" 2>/dev/null
                     fi
                 fi
@@ -66,7 +68,7 @@ cleanup() {
 secure_exec() {
     local was_x=0
     # Check if xtrace is currently enabled
-    if [[ $- == *x* ]]; then was_x=1; set +x; fi
+    if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
     
     # Execute the command
     "$@"
@@ -179,7 +181,7 @@ rxnm_json_get() {
     local _key="$2"
 
     # Fast Path: Bash + jq available (zero extra forks)
-    if [ "$RXNM_SHELL_IS_BASH" = "true" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
         "$JQ_BIN" -r ".${_key} // empty" <<< "$_json"
         return
     fi
@@ -242,7 +244,7 @@ rxnm_match() {
     local _pat="$2"
 
     # Fast Path: Bash built-in regex (zero forks)
-    if [ "$RXNM_SHELL_IS_BASH" = "true" ]; then
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
         [[ "$_str" =~ $_pat ]]
         return
     fi
@@ -262,7 +264,7 @@ rxnm_match() {
 # Arguments: $1 = Message
 cli_error() {
     local msg="$1"
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         json_error "$msg"
     else
         echo "Error: $msg" >&2
@@ -295,8 +297,8 @@ print_table() {
     for col do
         local key="${col%%:*}"
         local hdr="${col#*:}"
-        jq_query+=" .${key} // \"-\","
-        header_row+="${hdr}\t"
+        jq_query="${jq_query} .${key} // \"-\","
+        header_row="${header_row}${hdr}\t"
     done
     jq_query="${jq_query%,}] | @tsv"
     
@@ -358,7 +360,7 @@ json_success() {
                 local query="${RXNM_GET_KEY}"
                 
                 # If the key provided doesn't look like a path, try direct top-level access
-                if [[ "$query" != .* ]]; then query=".${query}"; fi
+                case "$query" in .*);; *) query=".${query}";; esac
                 
                 local val
                 val=$(echo "$full_json" | "$JQ_BIN" -r "$query // empty")
@@ -477,7 +479,7 @@ json_error() {
     local hint="${3:-}"
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
             '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
     else
@@ -493,20 +495,20 @@ confirm_action() {
     local msg="$1"
     local force="${2:-false}"
     
-    if [ "$force" == "true" ]; then return 0; fi
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi # Implicit yes in JSON mode
+    if [ "$force" = "true" ]; then return 0; fi
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then return 0; fi # Implicit yes in JSON mode
     
-    if [ ! -t 0 ]; then
+    if ! [ -t 0 ]; then
         log_error "Destructive action requires confirmation or --yes flag."
         return 1
     fi
     
-    read -p "⚠ $msg [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Cancelled."
-        exit 0
-    fi
+    printf '⚠ %s [y/N] ' "$msg"
+    read -r REPLY
+    case "$REPLY" in
+        [Yy]*) ;;
+        *) echo "Cancelled."; exit 0 ;;
+    esac
     return 0
 }
 
@@ -516,10 +518,16 @@ auto_select_interface() {
     local type="$1"
     local count=0
     local candidate=""
-    local ifaces=(/sys/class/net/*)
-    for iface_path in "${ifaces[@]}"; do
-        local ifname=$(basename "$iface_path")
-        if [[ "$type" == "wifi" ]]; then
+    local ifaces
+    # POSIX safe expansion of glob
+    set -- /sys/class/net/*
+    ifaces="$*"
+    
+    for iface_path in $ifaces; do
+        if [ ! -e "$iface_path" ]; then continue; fi
+        local ifname
+        ifname=$(basename "$iface_path")
+        if [ "$type" = "wifi" ]; then
             if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
                 candidate="$ifname"
                 count=$((count + 1))
@@ -537,20 +545,16 @@ sanitize_ssid() {
     # Preserves UTF-8, Emojis, and Spaces for readability in filenames.
     # Only replaces the directory separator '/' with underscore '_' to ensure filesystem safety.
     # Note: Bash variable replacement ${var//\//_} handles UTF-8 correctly on modern Linux systems.
-    # Example: "Café 🚀/5G" -> "Café 🚀_5G"
-    printf '%s\n' "${1//\//_}"
+    # POSIX version using sed:
+    echo "$1" | sed 's/\//_/g'
 }
 
 json_escape() {
     local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    s="${s//$'\b'/\\b}"
-    s="${s//$'\f'/\\f}"
-    printf '%s' "$s"
+    # POSIX compatible escaping
+    # We use a series of sed replacements for safety
+    echo "$s" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/
+/\\n/g'
 }
 
 get_proxy_json() {
@@ -558,16 +562,19 @@ get_proxy_json() {
     if [ -f "$file" ]; then
         local http="" https="" noproxy=""
         while IFS='=' read -r key value; do
-            value="${value//\"/}"
-            value="${value//\'/}"
+            # Cleanup quotes
+            value=$(echo "$value" | tr -d "\"'")
             case "$key" in
-                http_proxy|export\ http_proxy) http="$value" ;;
-                https_proxy|export\ https_proxy) https="$value" ;;
-                no_proxy|export\ no_proxy) noproxy="$value" ;;
+                http_proxy|'export http_proxy') http="$value" ;;
+                https_proxy|'export https_proxy') https="$value" ;;
+                no_proxy|'export no_proxy') noproxy="$value" ;;
             esac
         done < "$file"
-        [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
-        [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
+        
+        # Validation checks
+        if [ -n "$http" ] && ! validate_proxy_url "$http"; then http=""; fi
+        if [ -n "$https" ] && ! validate_proxy_url "$https"; then https=""; fi
+        
         "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
             '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
     else
@@ -584,16 +591,21 @@ secure_write() {
     local perms="${3:-644}"
     
     # Security: Prevent writing outside allowed RXNM directories
-    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${STATE_DIR}/"* ]] && \
-       [[ "$dest" != "${CONF_DIR}/"* ]] && \
-       [[ "$dest" != "${RUN_DIR}/"* ]]; then
+    case "$dest" in
+       "${EPHEMERAL_NET_DIR}/"*) ;;
+       "${PERSISTENT_NET_DIR}/"*) ;;
+       "${STATE_DIR}/"*) ;;
+       "${CONF_DIR}/"*) ;;
+       "${RUN_DIR}/"*) ;;
+       *)
          log_error "Illegal file write attempted: $dest"
          return 1
-    fi
+         ;;
+    esac
     
-    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
+    local dir
+    dir=$(dirname "$dest")
+    [ -d "$dir" ] || mkdir -p "$dir"
     
     # Accelerator Path: Use Native Agent if available (Atomic/Idempotent)
     if [ -x "${RXNM_AGENT_BIN}" ]; then
@@ -621,7 +633,7 @@ secure_write() {
 validate_ssid() {
     local ssid="$1"
     local len=${#ssid}
-    if (( len < 1 || len > 32 )); then
+    if [ "$len" -lt 1 ] || [ "$len" -gt 32 ]; then
         json_error "Invalid SSID length: $len" "1" "SSID must be 1-32 chars"
         return 1
     fi
@@ -683,22 +695,32 @@ validate_ip() {
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
     fi
-    # REMOVED: ip route get check.
-    # In isolated namespaces (like during tests or early boot), routing tables are empty.
-    # 'ip route get' fails with 'Network is unreachable', preventing valid static IP assignment.
-    # We rely on regex validation above.
     return 0
 }
 
 validate_routes() {
     local routes="$1"
-    IFS=',' read -ra RTS <<< "$routes"
-    for r in "${RTS[@]}"; do
+    local _oldifs="$IFS"
+    IFS=','
+    set -- $routes
+    IFS="$_oldifs"
+    
+    for r do
         local dest=""
         local rgw=""
         local rmet=""
-        # Split by @
-        IFS='@' read -r dest rgw rmet <<< "$r"
+        
+        # Manually split by @
+        dest="${r%%@*}"
+        local rest="${r#*@}"
+        if [ "$rest" = "$r" ]; then rest=""; fi # No @ found
+        
+        if [ -n "$rest" ]; then
+            rgw="${rest%%@*}"
+            rmet="${rest#*@}"
+            if [ "$rmet" = "$rest" ]; then rmet=""; fi
+        fi
+        
         if [ -z "$dest" ]; then return 1; fi
         if ! validate_ip "$dest"; then return 1; fi
         if [ -n "$rgw" ]; then
@@ -713,8 +735,12 @@ validate_routes() {
 
 validate_dns() {
     local dns_list="$1"
-    IFS=',' read -ra SERVERS <<< "$dns_list"
-    for server in "${SERVERS[@]}"; do
+    local _oldifs="$IFS"
+    IFS=','
+    set -- $dns_list
+    IFS="$_oldifs"
+    
+    for server do
         if ! validate_ip "$server"; then
             return 1
         fi
@@ -728,7 +754,7 @@ validate_proxy_url() {
     if rxnm_match "$url" '^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$'; then
         return 0
     fi
-    # Bare IP:port form — extract with POSIX parameter expansion (no BASH_REMATCH needed)
+    # Bare IP:port form — extract with POSIX parameter expansion
     if rxnm_match "$url" '^[0-9.]+:[0-9]+$'; then
         local ip="${url%%:*}"
         local port="${url##*:}"

@@ -4,6 +4,8 @@
 # NOTE: This script is POSIX sh compatible. Bash-specific features are
 # handled via guard wrappers in rxnm-utils.sh. Do not add bare Bashisms.
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # -----------------------------------------------------------------------------
 # FILE: rocknix-network-manager
 # PURPOSE: Central Command Dispatcher (CLI Entry Point)
@@ -248,8 +250,30 @@ fi
 
 # --- HIERARCHY DISPATCHER ---
 
-# List of Built-in Categories (POSIX word list)
-CATS="wifi interface bluetooth bridge bond vrf vlan macvlan ipvlan veth vpn tun tap profile system config api service route tunnel mpls pppoe ha"
+# List of Built-in Categories (POSIX word list matching global IFS)
+CATS="wifi
+interface
+bluetooth
+bridge
+bond
+vrf
+vlan
+macvlan
+ipvlan
+veth
+vpn
+tun
+tap
+profile
+system
+config
+api
+service
+route
+tunnel
+mpls
+pppoe
+ha"
 
 # Determine Category from first argument
 RAW_CMD="${1:-}"
@@ -580,8 +604,13 @@ case "$CATEGORY" in
         TARGET=""
         ACTION=""
         
-        # Valid actions for this category
-        VALID_ACTS="show set enable disable list hotplug"
+        # Valid actions for this category (POSIX word list matching IFS)
+        VALID_ACTS="show
+set
+enable
+disable
+list
+hotplug"
         
         # Attempt expansion of first arg as a keyword
         # shellcheck disable=SC2086

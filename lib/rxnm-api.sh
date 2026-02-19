@@ -3,6 +3,8 @@
 # Source this file in your script to gain RXNM capabilities.
 # ==============================================================================
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # Ensure we know where we are
 if [ -z "${RXNM_LIB_DIR:-}" ]; then
     # Derivation
@@ -59,4 +61,3 @@ export RXNM_LIB_DIR
 export RXNM_FORMAT
 export CONF_DIR
 export STATE_DIR
-```cat

@@ -2,6 +2,8 @@
 # Shorthand for rocknix-network-manager
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # Resolve symlinks to find the real source directory
 _rxnm_resolve_dir() {
     local src="$1"
@@ -17,4 +19,3 @@ SCRIPT_DIR="$(_rxnm_resolve_dir "$0")"
 
 # Execute the main binary from the resolved location
 exec "${SCRIPT_DIR}/rocknix-network-manager" "$@"
-```cat
