@@ -50,6 +50,8 @@ get_iface_sysfs() {
 
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
+    exec 8>&- 2>/dev/null   # Release global lock FD (RXNM_FD_GLOBAL_LOCK)
+    
     # POSIX compliant cleanup using find instead of array globs
     if [ -n "${STORAGE_NET_DIR:-}" ] && [ -d "$STORAGE_NET_DIR" ]; then
         find "$STORAGE_NET_DIR" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
@@ -108,10 +110,11 @@ acquire_global_lock() {
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Use FD 200 for global lock
-    exec 200>"$GLOBAL_LOCK_FILE"
+    # FD 8 reserved for global lock — see RXNM_FD_GLOBAL_LOCK in rxnm-constants.sh.
+    # FD 9 is used by with_iface_lock; do not change either without updating both.
+    exec 8>"$GLOBAL_LOCK_FILE"
     
-    if ! flock -n 200; then
+    if ! flock -n 8; then
         # Lock exists, check if stale
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
@@ -119,17 +122,20 @@ acquire_global_lock() {
             if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
-                exec 200>"$GLOBAL_LOCK_FILE"
-                if ! flock -n 200; then
-                    log_error "Failed to acquire lock even after cleanup"
+                exec 8>"$GLOBAL_LOCK_FILE"
+                if ! flock -n 8; then
+                    log_error "Failed to acquire lock even after stale-lock cleanup"
+                    exec 8>&-
                     return 1
                 fi
             else
-                log_error "Another instance is running (PID $old_pid)"
+                log_error "Another instance is running (PID ${old_pid:-unknown})"
+                exec 8>&-
                 return 1
             fi
         else
-            log_error "Another instance is running (Lock held)"
+            log_error "Another instance is running (no PID file)"
+            exec 8>&-
             return 1
         fi
     fi
@@ -142,6 +148,9 @@ acquire_global_lock() {
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
 # NOTE: Uses FD 9 and explicit open/close to satisfy sensitive Dash/Ash parsers.
+# POSIX SAFETY: Uses FD 9 (RXNM_FD_IFACE_LOCK). NOT reentrant — do not
+# call with_iface_lock from within a with_iface_lock-protected function.
+# The one-action-per-dispatcher-invocation model prevents this in normal use.
 with_iface_lock() {
     local _wi_iface="$1"
     shift

@@ -88,6 +88,15 @@ extract_sh_var "CURL_TIMEOUT" "int" "$CONSTANTS_SH"
 extract_sh_var "WIFI_CHANNEL_MAX" "int" "$CONSTANTS_SH"
 echo "" >> "$HEADER_FILE"
 
+echo "// --- DBus Limits ---" >> "$HEADER_FILE"
+extract_sh_var "IWD_DBUS_MAX_KB" "int" "$CONSTANTS_SH"
+echo "" >> "$HEADER_FILE"
+
+echo "// --- FD Reservations ---" >> "$HEADER_FILE"
+extract_sh_var "RXNM_FD_GLOBAL_LOCK" "int" "$CONSTANTS_SH"
+extract_sh_var "RXNM_FD_IFACE_LOCK"  "int" "$CONSTANTS_SH"
+echo "" >> "$HEADER_FILE"
+
 echo "// --- API Schema Keys ---" >> "$HEADER_FILE"
 if [ -f "$SCHEMA_JSON" ] && command -v jq >/dev/null; then
     # Extracts top-level properties as keys (KEY_SUCCESS="success", etc)

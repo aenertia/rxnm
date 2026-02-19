@@ -111,6 +111,11 @@ bool g_filter_table = true; /* If false, dump all tables */
 #define DBUS_BACKOFF_CAP_US 100000       /* 100ms Cap (Ensure < 0.1s latency on wake) */
 #define DBUS_IO_TIMEOUT_SEC 2            /* 2 Seconds I/O Timeout (Select/SO_RCV) */
 
+#ifndef IWD_DBUS_MAX_KB
+#define IWD_DBUS_MAX_KB 512
+#endif
+#define IWD_DBUS_MAX_BYTES ((size_t)(IWD_DBUS_MAX_KB) * 1024)
+
 /* --- Netlink/WiFi Constants --- */
 #define NL80211_GENL_NAME           "nl80211"
 #define NL80211_CMD_GET_INTERFACE   5
@@ -365,88 +370,18 @@ const char* detect_iface_type(iface_entry_t *entry) {
 
 /* --- Configuration Loading --- */
 
-void extract_bash_var(const char *line, const char *key, char *dest, size_t dest_size) {
-    char search_pattern[128];
-    // Pattern 1: : "${KEY:=Val}"
-    snprintf(search_pattern, sizeof(search_pattern), "${%s:=", key);
-    char *p = strstr(line, search_pattern);
-    if (p) {
-        p += strlen(search_pattern);
-        char *end = strchr(p, '}');
-        if (end) {
-            if (p[0] == '"' && end[-1] == '"') { p++; end--; }
-            size_t len = end - p;
-            size_t copy_len = len < dest_size ? len : dest_size - 1;
-            strncpy(dest, p, copy_len);
-            dest[copy_len] = '\0';
-            return;
-        }
-    }
-    // Pattern 2: export KEY=Val
-    snprintf(search_pattern, sizeof(search_pattern), "export %s=", key);
-    p = strstr(line, search_pattern);
-    if (p) {
-        p += strlen(search_pattern);
-        char *end = strpbrk(p, "\n");
-        if (!end) end = p + strlen(p);
-        if (p[0] == '"') { p++; end = strchr(p, '"'); }
-        if (end) {
-            size_t len = end - p;
-            size_t copy_len = len < dest_size ? len : dest_size - 1;
-            strncpy(dest, p, copy_len);
-            dest[copy_len] = '\0';
-        }
-    }
-}
-
 /**
- * @brief Reads runtime config logic from Bash script if headers are stale.
+ * @brief Reads runtime config logic from environment overrides.
  * Acts as a runtime fallback for compiled-in constants.
  */
-void load_runtime_config() {
-    // 1. Check Env Overrides first
-    char *env_timeout = getenv("RXNM_DBUS_TIMEOUT_MS");
+static void apply_env_overrides(void) {
+    const char *env_timeout = getenv("RXNM_DBUS_TIMEOUT_MS");
     if (env_timeout) {
-        g_dbus_timeout_us = atol(env_timeout) * 1000;
+        long ms = atol(env_timeout);
+        if (ms > 0 && ms < 60000)           /* sanity: 1ms–60s */
+            g_dbus_timeout_us = ms * 1000L;
     }
-
-    char self_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (len == -1) return;
-    self_path[len] = '\0';
-    
-    // Resolve ../lib/rxnm-constants.sh
-    char *last_slash = strrchr(self_path, '/');
-    if (!last_slash) return;
-    *last_slash = '\0';
-    char *bin_parent = strdup(self_path);
-    if (!bin_parent) return;
-    last_slash = strrchr(bin_parent, '/');
-    if (last_slash) *last_slash = '\0';
-    
-    char script_path[PATH_MAX];
-    snprintf(script_path, sizeof(script_path), "%s/lib/rxnm-constants.sh", bin_parent);
-    
-    FILE *f = fopen(script_path, "r");
-    if (!f) {
-        f = fopen("/usr/lib/rocknix-network-manager/lib/rxnm-constants.sh", "r");
-    }
-    
-    if (f) {
-        char line[1024];
-        while (fgets(line, sizeof(line), f)) {
-            char *trimmed = line;
-            while(*trimmed == ' ' || *trimmed == '\t') trimmed++;
-            if (*trimmed == '#') continue;
-            extract_bash_var(trimmed, "CONF_DIR", g_conf_dir, sizeof(g_conf_dir));
-            extract_bash_var(trimmed, "RUN_DIR", g_run_dir, sizeof(g_run_dir));
-            extract_bash_var(trimmed, "RXNM_VERSION", g_agent_version, sizeof(g_agent_version));
-            extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V4", g_conn_targets_v4, sizeof(g_conn_targets_v4));
-            extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V6", g_conn_targets_v6, sizeof(g_conn_targets_v6));
-        }
-        fclose(f);
-    }
-    free(bin_parent);
+    /* Future runtime overrides go here, not in a file parser */
 }
 
 /* --- Udev Enrichment --- */
@@ -721,25 +656,30 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     
     if (send(sock, msg, (ptr - msg), 0) < 0) return -1;
     
-    /* 2. Read Response (Large Buffer) */
-    static char buf[65536]; /* 64KB should cover typical scan lists */
+    /* 2. Read Response — heap-allocated to avoid BSS bloat and re-entrancy risk */
+    char hdr_raw[sizeof(dbus_header_t)];
+    int n = recv(sock, hdr_raw, sizeof(hdr_raw), 0);
+    if (n < (int)sizeof(hdr_raw)) return -1;
     
-    /* Read header first to get body length */
-    int n = recv(sock, buf, sizeof(dbus_header_t), 0);
-    if (n < (int)sizeof(dbus_header_t)) return -1;
+    dbus_header_t *resp_hdr = (dbus_header_t *)hdr_raw;
+    size_t total_msg_size = sizeof(dbus_header_t)
+                            + (size_t)ALIGN8(resp_hdr->fields_len)
+                            + (size_t)resp_hdr->body_len;
+                            
+    if (total_msg_size < sizeof(dbus_header_t)) return -2;  /* underflow/malformed */
+    if (total_msg_size > IWD_DBUS_MAX_BYTES)    return -2;  /* exceeds tunable cap */
     
-    dbus_header_t *resp_hdr = (dbus_header_t *)buf;
-    int total_msg_size = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len) + resp_hdr->body_len;
+    char *buf = malloc(total_msg_size);
+    if (!buf) return -3;                                      /* OOM */
     
-    if (total_msg_size > (int)sizeof(buf)) return -2; /* Too big */
+    memcpy(buf, hdr_raw, sizeof(hdr_raw));
     
-    /* Read rest of message */
-    int remaining = total_msg_size - n;
-    char *p = buf + n;
-    while (remaining > 0) {
-        int r = recv(sock, p, remaining, 0);
-        if (r <= 0) break;
-        p += r; remaining -= r;
+    size_t received = (size_t)n;
+    while (received < total_msg_size) {
+        size_t want = total_msg_size - received;
+        int r = recv(sock, buf + received, want, 0);
+        if (r <= 0) break;                                    /* timeout or peer close */
+        received += (size_t)r;
     }
     
     /* 3. Scan for SSID */
@@ -752,7 +692,8 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
     
     /* RC3 FIX: Explicit upper bound check */
-    int loop_limit = total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
+    int loop_limit = (int)total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
+    int result = -1;
     
     for (int i = start_offset; i < loop_limit; i += 4) {
         
@@ -780,13 +721,15 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
             if (last_path[0] != '\0') {
                 if (check_variant_sig_string(buf, i)) {
                     strncpy(out_path, last_path, max_len);
-                    return 0;
+                    result = 0;
+                    break;
                 }
             }
         }
     }
     
-    return -1; /* Not found */
+    free(buf);
+    return result;
 }
 
 int cmd_connect(const char *ssid, const char *iface) {
@@ -1985,7 +1928,7 @@ char *g_route_table = NULL;
 
 int main(int argc, char *argv[]) {
     atexit(cleanup_ifaces);
-    load_runtime_config();
+    apply_env_overrides();
     
     static struct option long_options[] = {
         {"version", no_argument, 0, 'v'},
