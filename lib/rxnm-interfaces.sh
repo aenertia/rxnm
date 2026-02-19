@@ -80,6 +80,8 @@ set_network_cfg() {
     secure_write "$filename" "$cfg" 644
 }
 
+# --- Actions ---
+
 action_hotplug() {
     local iface="$1"
     [ -z "$iface" ] && return 1
@@ -162,4 +164,28 @@ action_set_static() {
     if [ -z "$metric" ]; then case "$iface" in wlan*|wlp*|uap*) metric="600" ;; eth*|en*) metric="100" ;; esac; fi
     with_iface_lock "$iface" _task_set_static "$iface" "$final_ips" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
     json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'"}'
+}
+
+action_set_hardware() {
+    local iface="$1" speed="$2" duplex="$3" autoneg="$4" wol="$5" mac_policy="$6" name_policy="$7" mac_addr="$8"
+    [ -z "$iface" ] && return 1
+    if [ -n "$speed" ] && ! validate_link_speed "$speed"; then return 1; fi
+    if [ -n "$duplex" ] && ! validate_duplex "$duplex"; then return 1; fi
+    if [ -n "$autoneg" ] && ! validate_autoneg "$autoneg"; then return 1; fi
+    if [ -n "$mac_addr" ] && ! validate_mac "$mac_addr"; then return 1; fi
+    with_iface_lock "$iface" _task_set_hardware "$iface" "$speed" "$duplex" "$autoneg" "$wol" "$mac_policy" "$name_policy" "$mac_addr"
+    json_success '{"action": "set_hardware", "iface": "'"$iface"'"}'
+}
+
+action_set_link() {
+    local iface="$1" ipv4="$2" ipv6="$3"
+    [ -z "$iface" ] && return 1
+    with_iface_lock "$iface" _task_set_link "$iface" "$ipv4" "$ipv6"
+    json_success '{"action": "set_link", "iface": "'"$iface"'"}'
+}
+
+action_set_proxy() {
+    local iface="$1" http="$2" https="$3" noproxy="$4"
+    with_iface_lock "${iface:-global_proxy}" _task_set_proxy "$iface" "$http" "$https" "$noproxy"
+    json_success '{"action": "set_proxy"}'
 }
