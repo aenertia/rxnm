@@ -8,6 +8,7 @@
 #
 # Aggregates state from multiple sources (Netlink, IWD, Networkd) into a single
 # JSON object. Handles the "Legacy Path" if the C Agent is unavailable.
+# Refactored for strict POSIX compatibility.
 # -----------------------------------------------------------------------------
 
 CACHE_FILE="${RUN_DIR}/status.json"
@@ -17,11 +18,10 @@ AGENT_BIN="${RXNM_AGENT_BIN}"
 # Description: Generates a JSON representation of WiFi state using standard tools (iw).
 _get_wifi_fallback_json() {
     local json_items=""
-    if type -P iw >/dev/null 2>&1; then
+    if command -v iw >/dev/null 2>&1; then
         for iface_path in /sys/class/net/*; do
             [ -e "$iface_path" ] || continue
-            local ifname
-            ifname=$(basename "$iface_path")
+            local ifname="${iface_path##*/}"
             local is_wifi=false
             
             if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
@@ -47,6 +47,7 @@ _get_wifi_fallback_json() {
                 if [ -n "$bssid" ]; then bssid_val="\"$bssid\""; fi
                 
                 if [ -n "$ssid" ]; then
+                    # JSON escaping
                     ssid=$(echo "$ssid" | sed 's/\\/\\\\/g; s/"/\\"/g')
                     if [ -n "$json_items" ]; then json_items="$json_items,"; fi
                     json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": $bssid_val, \"state\": \"connected\" }"
@@ -70,10 +71,10 @@ action_status_legacy() {
 
     local filter_iface="${1:-}"
     local hostname="ROCKNIX"
-    [ -f /etc/hostname ] && read -r hostname < /etc/hostname
+    if [ -f /etc/hostname ]; then read -r hostname < /etc/hostname; fi
     
     local net_json="[]"
-    if type -P networkctl >/dev/null 2>&1; then
+    if command -v networkctl >/dev/null 2>&1; then
         net_json=$(timeout 3s networkctl status --all --json=short 2>/dev/null || timeout 3s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
     
@@ -96,16 +97,14 @@ action_status_legacy() {
     fi
     
     local ip_json="[]"
-    if type -P ip >/dev/null 2>&1; then
+    if command -v ip >/dev/null 2>&1; then
         ip_json=$(ip -j -s addr show 2>/dev/null || echo "[]")
     fi
     
-    local speed_json="{}"
     local speed_data=""
     for iface_dir in /sys/class/net/*; do
         if [ -e "$iface_dir/speed" ]; then
-            local ifname
-            ifname=$(basename "$iface_dir")
+            local ifname="${iface_dir##*/}"
             local s_val
             s_val=$(cat "$iface_dir/speed" 2>/dev/null || echo -1)
             if [ "$s_val" -gt 0 ] 2>/dev/null; then
@@ -113,7 +112,7 @@ action_status_legacy() {
             fi
         fi
     done
-    speed_json="{ $speed_data }"
+    local speed_json="{ $speed_data }"
     
     # Normalize inputs
     [ -z "$net_json" ] && net_json="[]"
@@ -121,12 +120,10 @@ action_status_legacy() {
     [ -z "$legacy_wifi_json" ] && legacy_wifi_json="{}"
     [ -z "$routes_json" ] && routes_json="[]"
     [ -z "$ip_json" ] && ip_json="[]"
-    [ -z "$speed_json" ] && speed_json="{}"
     [ -z "$global_proxy_json" ] && global_proxy_json="null"
     
     # Final Merge
-    local json_output
-    json_output=$("$JQ_BIN" -n \
+    "$JQ_BIN" -n \
         --arg hn "$hostname" \
         --arg filter "$filter_iface" \
         --argjson gp "$global_proxy_json" \
@@ -222,8 +219,7 @@ action_status_legacy() {
                 }
             ) | add)
         }
-        ')
-    echo "$json_output"
+        '
 }
 
 action_check_internet_legacy() {
@@ -274,11 +270,13 @@ action_status() {
     # 2. Try Accelerator
     local json_output=""
     if [ -x "$AGENT_BIN" ]; then
+        local output
         if output=$("$AGENT_BIN" --dump 2>/dev/null); then
             case "$output" in
                 '{'*)
                     if [ -n "$filter_iface" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
-                        json_output=$("$JQ_BIN" --arg f "$filter_iface" '.interfaces |= with_entries(select(.key == $f))' <<< "$output")
+                        # Use pipe instead of Bash here-string for POSIX compliance
+                        json_output=$(echo "$output" | "$JQ_BIN" --arg f "$filter_iface" '.interfaces |= with_entries(select(.key == $f))')
                     else
                         json_output="$output"
                     fi
@@ -289,12 +287,11 @@ action_status() {
     
     # 3. Fallback
     if [ -z "$json_output" ]; then
-        # Capture legacy output, if it fails return empty object to prevent script exit on set -e
         json_output=$(action_status_legacy "$filter_iface") || json_output="{}"
     fi
     
     # 4. Cache
-    if [ -z "$filter_iface" ] && [ -n "$json_output" ]; then
+    if [ -z "$filter_iface" ] && [ -n "$json_output" ] && [ "$json_output" != "{}" ]; then
         if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
             echo "$json_output" > "$CACHE_FILE" 2>/dev/null || true
         fi
@@ -309,6 +306,7 @@ action_status() {
 
 action_check_internet() {
     if [ -x "$AGENT_BIN" ]; then
+        local output
         if output=$("$AGENT_BIN" --check-internet 2>/dev/null); then
             case "$output" in '{'*) echo "$output"; return 0 ;; esac
         fi
@@ -368,6 +366,7 @@ action_check_portal() {
         return 0
     fi
     
+    # POSIX safe iteration
     for fallback in $fallback_urls; do
         # shellcheck disable=SC2086
         if curl $curl_opts $iface_opt -w "%{http_code}" "$fallback" 2>/dev/null | grep -qE "200|204"; then
