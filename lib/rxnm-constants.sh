@@ -71,13 +71,13 @@ _LP_CACHE="${RUN_DIR}/.is_low_power"
 
 if [ -f "$_LP_CACHE" ]; then
     # Fast path: Read from runtime cache
-    [ "$(cat "$_LP_CACHE")" == "true" ] && IS_LOW_POWER=true
+    if [ "$(cat "$_LP_CACHE")" = "true" ]; then IS_LOW_POWER=true; fi
 else
     # Slow path: Detection logic
     if [ -x "$RXNM_AGENT_BIN" ]; then
         # Prefer Agent detection if available
         _lp=$("$RXNM_AGENT_BIN" --is-low-power 2>/dev/null || echo "false")
-        [ "$_lp" == "true" ] && IS_LOW_POWER=true
+        if [ "$_lp" = "true" ]; then IS_LOW_POWER=true; fi
     else
         # Fallback: Grep cpuinfo for known low-power chipsets
         # This list includes Rockchip, Allwinner, Broadcom, Amlogic, and MIPS variants common in handhelds.
@@ -160,8 +160,12 @@ command -v "${JQ_BIN:-jq}" >/dev/null 2>&1 && RXNM_HAS_JQ=true
 export RXNM_HAS_JQ
 
 # --- State Caches ---
-declare -A SERVICE_STATE_CACHE
-declare -A SERVICE_STATE_TS
+# NOTE: Bash associative arrays (declare -A) are guarded to avoid syntax errors in sh.
+# rxnm-system.sh handles the constrained path via flat variables.
+if [ "${RXNM_SHELL_IS_BASH}" = "true" ]; then
+    declare -A SERVICE_STATE_CACHE
+    declare -A SERVICE_STATE_TS
+fi
 
 # --- Nullify Mode Constants ---
 export NULLIFY_SERVICES="systemd-networkd NetworkManager connman iwd wpa_supplicant bluetooth bluez ifupdown dhcpcd systemd-resolved avahi-daemon cups-browsed sshd dropbear telnetd ntpd chrony systemd-timesyncd smbd nmbd wsdd rpcbind nfs-common nginx lighttpd apache2 nftables iptables ufw firewalld docker docker.socket containerd podman podman.socket lxc lxc-net libvirtd virtlogd tailscaled zerotier-one tinc nebula warpgate"

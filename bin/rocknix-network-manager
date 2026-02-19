@@ -604,13 +604,8 @@ case "$CATEGORY" in
         TARGET=""
         ACTION=""
         
-        # Valid actions for this category (POSIX word list matching IFS)
-        VALID_ACTS="show
-set
-enable
-disable
-list
-hotplug"
+        # Valid actions for this category
+        VALID_ACTS="show set enable disable list hotplug"
         
         # Attempt expansion of first arg as a keyword
         # shellcheck disable=SC2086

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # -----------------------------------------------------------------------------
 # FILE: rxnm-system.sh
 # PURPOSE: System-Level Operations & Service Management
@@ -13,29 +15,39 @@
 # --- Service State Caching ---
 # Optimization: Calling 'systemctl is-active' is slow (fork + IPC).
 # We cache the state for 2 seconds to speed up bulk operations.
+# POSIX Compatible: Uses flat variables to mimic associative array behavior.
+
+_SVC_CACHE_IWD=""
+_SVC_CACHE_NETWORKD=""
+_SVC_CACHE_RESOLVED=""
+_SVC_CACHE_AVAHI=""
+_SVC_TS_IWD=0
+_SVC_TS_NETWORKD=0
+_SVC_TS_RESOLVED=0
+_SVC_TS_AVAHI=0
 
 cache_service_states() {
     local now
-    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
-    local services=("iwd" "systemd-networkd" "systemd-resolved" "avahi-daemon")
+    now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
     
     # Bulk query to minimize fork overhead
     local states
-    states=$(timeout 2s systemctl is-active "${services[@]}" 2>/dev/null || echo "inactive")
+    states=$(timeout 2s systemctl is-active iwd systemd-networkd systemd-resolved avahi-daemon 2>/dev/null || echo "inactive
+inactive
+inactive
+inactive")
     
-    local i=0
-    while IFS= read -r state; do
-        local svc="${services[$i]}"
-        SERVICE_STATE_CACHE["$svc"]="$state"
-        SERVICE_STATE_TS["$svc"]=$now
-        ((++i))
-    done <<< "$states"
+    # Read into flat vars (POSIX safe)
+    # The order matches the systemctl call args above
+    _SVC_CACHE_IWD=$(echo "$states" | sed -n '1p')
+    _SVC_CACHE_NETWORKD=$(echo "$states" | sed -n '2p')
+    _SVC_CACHE_RESOLVED=$(echo "$states" | sed -n '3p')
+    _SVC_CACHE_AVAHI=$(echo "$states" | sed -n '4p')
     
-    # Export specific flags for easy logic checks
-    [ "${SERVICE_STATE_CACHE["iwd"]}" == "active" ] && IWD_ACTIVE=true || IWD_ACTIVE=false
-    [ "${SERVICE_STATE_CACHE["systemd-networkd"]}" == "active" ] && NETWORKD_ACTIVE=true || NETWORKD_ACTIVE=false
-    [ "${SERVICE_STATE_CACHE["systemd-resolved"]}" == "active" ] && RESOLVED_ACTIVE=true || RESOLVED_ACTIVE=false
-    [ "${SERVICE_STATE_CACHE["avahi-daemon"]}" == "active" ] && AVAHI_ACTIVE=true || AVAHI_ACTIVE=false
+    _SVC_TS_IWD=$now
+    _SVC_TS_NETWORKD=$now
+    _SVC_TS_RESOLVED=$now
+    _SVC_TS_AVAHI=$now
 }
 
 # Description: Checks if a service is active, using cache if fresh (<2s).
@@ -43,18 +55,37 @@ cache_service_states() {
 is_service_active() {
     local svc="$1"
     local now
-    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+    now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
+    local last_check=0
+    local cached_state=""
     
-    local last_check="${SERVICE_STATE_TS["$svc"]:-0}"
+    # Map service to cache var
+    case "$svc" in
+        iwd) last_check=$_SVC_TS_IWD; cached_state=$_SVC_CACHE_IWD ;;
+        systemd-networkd) last_check=$_SVC_TS_NETWORKD; cached_state=$_SVC_CACHE_NETWORKD ;;
+        systemd-resolved) last_check=$_SVC_TS_RESOLVED; cached_state=$_SVC_CACHE_RESOLVED ;;
+        avahi-daemon) last_check=$_SVC_TS_AVAHI; cached_state=$_SVC_CACHE_AVAHI ;;
+        *) 
+            # Non-cached service: check directly
+            systemctl is-active --quiet "$svc"
+            return $?
+            ;;
+    esac
+    
     local age=$((now - last_check))
     
-    if [ $age -gt 2 ]; then
-        local state
-        state=$(timeout 1s systemctl is-active "$svc" 2>/dev/null || echo "inactive")
-        SERVICE_STATE_CACHE["$svc"]="$state"
-        SERVICE_STATE_TS["$svc"]=$now
+    if [ "$age" -gt 2 ]; then
+        cached_state=$(timeout 1s systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+        # Update cache
+        case "$svc" in
+            iwd) _SVC_CACHE_IWD="$cached_state"; _SVC_TS_IWD=$now ;;
+            systemd-networkd) _SVC_CACHE_NETWORKD="$cached_state"; _SVC_TS_NETWORKD=$now ;;
+            systemd-resolved) _SVC_CACHE_RESOLVED="$cached_state"; _SVC_TS_RESOLVED=$now ;;
+            avahi-daemon) _SVC_CACHE_AVAHI="$cached_state"; _SVC_TS_AVAHI=$now ;;
+        esac
     fi
-    [[ "${SERVICE_STATE_CACHE["$svc"]}" == "active" ]]
+    
+    [ "$cached_state" = "active" ]
 }
 
 is_avahi_running() {
@@ -82,14 +113,9 @@ configure_standalone_gadget() {
     
     # Generate temporary busybox dhcpd config
     local conf="/tmp/udhcpd.${iface}.conf"
-    cat <<EOF > "$conf"
-start 169.254.10.10
-end 169.254.10.20
-interface $iface
-option subnet 255.255.255.0
-option router $ip
-option dns $ip
-EOF
+    # Use printf for safety instead of heredoc in potentially quirky shells
+    printf 'start 169.254.10.10\nend 169.254.10.20\ninterface %s\noption subnet 255.255.255.0\noption router %s\noption dns %s\n' "$iface" "$ip" "$ip" > "$conf"
+
     pkill -f "udhcpd $conf" 2>/dev/null
     udhcpd "$conf"
 }
@@ -108,12 +134,12 @@ action_setup() {
     # Boot Profile Logic
     # 1. Load profiles if available
     # 2. Sync persistent config to runtime
-    if type action_profile &>/dev/null; then
+    if command -v action_profile >/dev/null; then
         action_profile "boot"
     else
         # If sourcing order failed, try to source profiles manually
         if [ -n "${RXNM_LIB_DIR:-}" ] && [ -f "${RXNM_LIB_DIR}/rxnm-profiles.sh" ]; then
-             source "${RXNM_LIB_DIR}/rxnm-profiles.sh"
+             . "${RXNM_LIB_DIR}/rxnm-profiles.sh"
              action_profile "boot"
         fi
     fi
@@ -131,7 +157,10 @@ action_setup() {
     # RFKill Unblock Logic
     local needs_unblock=0
     for rdir in /sys/class/rfkill/rfkill*; do
-        [ -e "$rdir/soft" ] && { read -r s < "$rdir/soft"; [ "$s" -eq 1 ] && needs_unblock=1 && break; }
+        if [ -e "$rdir/soft" ]; then 
+            read -r s < "$rdir/soft"
+            if [ "$s" -eq 1 ]; then needs_unblock=1; break; fi
+        fi
     done
     if [ "$needs_unblock" -eq 1 ] && command -v rfkill >/dev/null; then
          rfkill unblock all 2>/dev/null || true
@@ -230,21 +259,17 @@ tune_network_stack() {
     fi
     
     # Legacy Path: Manual sysctl
-    # Increase connection tracking for NAT stability
     sysctl -w net.netfilter.nf_conntrack_max=16384 >/dev/null 2>&1 || true
-    # TCP Fast Open for faster web loading
     sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
-    # Lower keepalive for faster dead peer detection
     sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
     
-    # Disable bridge filtering (performance optimization for containers)
     if [ -d /proc/sys/net/bridge ]; then
         sysctl -w net.bridge.bridge-nf-call-iptables=0 \
                   net.bridge.bridge-nf-call-ip6tables=0 \
                   net.bridge.bridge-nf-call-arptables=0 >/dev/null 2>&1 || true
     fi
     
-    if [ "$profile" == "host" ]; then
+    if [ "$profile" = "host" ]; then
         # Enable forwarding for AP/Tethering
         sysctl -w net.ipv4.ip_forward=1 \
                   net.ipv4.conf.all.rp_filter=1 \
@@ -270,7 +295,7 @@ enable_nat_masquerade() {
     local fw_tool
     fw_tool=$(detect_firewall_tool)
     
-    if [ "$fw_tool" == "none" ]; then
+    if [ "$fw_tool" = "none" ]; then
         log_warn "NAT requested but no firewall tool found."
         return 0
     fi
@@ -280,12 +305,12 @@ enable_nat_masquerade() {
     wan_iface=$(ip -4 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
     [ -z "$wan_iface" ] && wan_iface=$(ip -6 route show default 2>/dev/null | awk '$1=="default" {print $5; exit}')
     
-    if [ -z "$wan_iface" ] || [ "$lan_iface" == "$wan_iface" ]; then return 0; fi
+    if [ -z "$wan_iface" ] || [ "$lan_iface" = "$wan_iface" ]; then return 0; fi
     
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
     local T="timeout 2s"
     
-    if [ "$fw_tool" == "iptables" ]; then
+    if [ "$fw_tool" = "iptables" ]; then
         # 1. Masquerade Outbound
         $T iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
         $T iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
@@ -298,11 +323,11 @@ enable_nat_masquerade() {
         $T iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
         $T iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
         
-        # 4. MSS Clamping (Crucial for MTU mismatches on LTE/PPPoE)
+        # 4. MSS Clamping
         $T iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
         $T iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
         
-    elif [ "$fw_tool" == "nft" ]; then
+    elif [ "$fw_tool" = "nft" ]; then
         # NFTables boilerplate
         $T nft add table ip rocknix_nat 2>/dev/null
         $T nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
@@ -321,21 +346,27 @@ disable_nat_masquerade() {
     local fw_tool; fw_tool=$(detect_firewall_tool)
     local T="timeout 2s"
     
-    if [ "$fw_tool" == "iptables" ]; then
+    if [ "$fw_tool" = "iptables" ]; then
         # Clean up rules marked with our comment
         for table in nat filter mangle; do
             local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
+            # shellcheck disable=SC2086
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
-                read -r _ chain rest <<< "$line"
-                # Strip the -A command to get the rule definition
-                local rule="${line#-A $chain }"
+                # Basic parsing to extract rule for deletion
+                # remove leading '-A '
+                local rule="${line#-A * }"
+                local chain
+                # Extract chain from line: -A CHAIN ...
+                chain=$(echo "$line" | awk '{print $2}')
+                
                 # Delete it
                 $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
-            done <<< "$rules"
+            done <<EOF
+$rules
+EOF
         done
-    elif [ "$fw_tool" == "nft" ]; then
-        # Simply delete our tables
+    elif [ "$fw_tool" = "nft" ]; then
         $T nft delete table ip rocknix_nat 2>/dev/null
         $T nft delete table ip rocknix_filter 2>/dev/null
     fi
