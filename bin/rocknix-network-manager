@@ -353,7 +353,7 @@ case "$CATEGORY" in
     wifi|interface|bridge|bond|vlan|vrf)
         VAL_ACTION="${1:-}"
         if [ "$CATEGORY" = "interface" ]; then
-            if ! rxnm_match "${VAL_ACTION}" '^(show|set|enable|disable|list|hotplug)$'; then
+            if ! rxnm_match "${VAL_ACTION}" '^(show|status|set|enable|disable|list|hotplug)$'; then
                  VAL_ACTION="${2:-}"
             fi
         fi
