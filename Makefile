@@ -160,6 +160,8 @@ rocknix-release: tiny
 combined-full: tiny
 	@echo "[RXNM] Building Full Combined Bundle..."
 	@BUNDLE_MODE=full bash scripts/bundle.sh
+	@echo "[RXNM] Running Bundle Fuzzer on Full Edition..."
+	@BUNDLE_BIN=build/rxnm-full bash tests/test_bundle_fuzz.sh
 	@echo "[RXNM] Deployment artifacts ready in build/"
 	@cp $(TARGET) build/rxnm-agent
 	@echo "    - build/rxnm-full  (Single Script - All Features)"

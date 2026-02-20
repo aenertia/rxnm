@@ -5,11 +5,11 @@
 set -e
 
 # ==============================================================================
-# RXNM ROCKNIX BUNDLE INTEROPERABILITY TEST SUITE (Systemd-nspawn)
+# RXNM BUNDLE INTEROPERABILITY TEST SUITE (Systemd-nspawn)
 # ==============================================================================
-# Specifically tests the 'build/rxnm' flat-file bundled executable to ensure
+# Specifically tests the generated flat-file bundled executables to ensure
 # the amalgamation process didn't break core logic, and verifies that enterprise
-# features were correctly stripped out.
+# features were correctly stripped out (or retained in the full bundle).
 # ==============================================================================
 
 # Constants
@@ -64,9 +64,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+BUNDLE_BIN="${BUNDLE_BIN:-build/rxnm}"
+
 # Pre-flight check
-if [ ! -f "build/rxnm" ] || [ ! -f "build/rxnm-agent" ]; then
-    err "Bundle artifacts not found. Run 'make rocknix-release' first."
+if [ ! -f "$BUNDLE_BIN" ] || [ ! -f "build/rxnm-agent" ]; then
+    err "Bundle artifacts not found ($BUNDLE_BIN). Run 'make rocknix-release' or 'make combined-full' first."
     exit 1
 fi
 
@@ -136,11 +138,11 @@ MOCK
     echo "$HASH" > "$ROOTFS/.rxnm_hash"
 fi
 
-info "Installing ROCKNIX Bundle into RootFS..."
+info "Installing Bundle into RootFS..."
 # Crucial Difference: We only install the single bundled file and the agent
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
 mkdir -p "$ROOTFS/usr/bin"
-cp -f build/rxnm "$ROOTFS/usr/bin/rxnm"
+cp -f "$BUNDLE_BIN" "$ROOTFS/usr/bin/rxnm"
 cp -f build/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 
@@ -176,15 +178,22 @@ if ! check_ready $CLIENT; then err "$CLIENT failed"; exit 1; fi
 m_exec $SERVER ethtool -K host0 tx off || true
 m_exec $CLIENT ethtool -K host0 tx off || true
 
-info "Testing Feature Pruning (Negative Test)..."
-# In the bundle, 'service' or 'mpls' should throw an 'Unknown command' error, not the standard 501 Not Implemented
-# because they were stripped from the CATS variable.
+info "Testing Feature Pruning (Negative/Positive Test)..."
 PRUNE_TEST=$(m_exec $SERVER rxnm service list 2>&1 || true)
-if echo "$PRUNE_TEST" | grep -q "Unknown command"; then
-    info "✓ Verified 'service' module is correctly stripped from bundle."
+if [[ "$BUNDLE_BIN" == *"rxnm-full"* ]]; then
+    if echo "$PRUNE_TEST" | grep -q "Unknown command"; then
+        err "Full bundle incorrectly pruned 'service' module. Output: $PRUNE_TEST"
+        exit 1
+    else
+        info "✓ Verified 'service' module is present in full bundle."
+    fi
 else
-    err "Pruning test failed. Output: $PRUNE_TEST"
-    exit 1
+    if echo "$PRUNE_TEST" | grep -q "Unknown command"; then
+        info "✓ Verified 'service' module is correctly stripped from minimal bundle."
+    else
+        err "Pruning test failed. Output: $PRUNE_TEST"
+        exit 1
+    fi
 fi
 
 info "Initializing Bundled RXNM..."

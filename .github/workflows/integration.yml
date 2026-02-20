@@ -118,3 +118,11 @@ jobs:
         
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo ./tests/integration/run_rocknix_interop.sh
+
+    - name: Run Full Combined Bundle Integration Tests
+      run: |
+        echo "=== PHASE 6: Full Combined Bundle Integration Tests (Systemd-Nspawn) ==="
+        make combined-full
+        
+        sudo chmod +x tests/integration/run_rocknix_interop.sh
+        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh

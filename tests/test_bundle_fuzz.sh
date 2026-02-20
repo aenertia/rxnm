@@ -7,12 +7,12 @@
 # PURPOSE: CLI Fuzzing & Regression Testing for the ROCKNIX Bundle
 # ARCHITECTURE: Test Suite
 #
-# Tests the generated single-file artifact `build/rxnm` to ensure:
+# Tests the generated single-file artifact to ensure:
 # 1. Amalgamation didn't introduce syntax/parsing errors.
-# 2. Pruned enterprise features correctly fail cleanly (no "command not found").
+# 2. Pruned enterprise features correctly fail cleanly (if minimal bundle).
 # -----------------------------------------------------------------------------
 
-RXNM="./build/rxnm"
+RXNM="${BUNDLE_BIN:-./build/rxnm}"
 
 # Colors
 GREEN='\033[0;32m'
@@ -27,8 +27,16 @@ warn() { echo -e "${YELLOW}⚠ WARN:${NC} $1"; }
 info() { echo -e "${CYAN}ℹ INFO:${NC} $1"; }
 
 if [ ! -x "$RXNM" ]; then
-    fail "Bundle binary not found at $RXNM. Run 'make rocknix-release' first."
+    fail "Bundle binary not found at $RXNM. Run 'make rocknix-release' or 'make combined-full' first."
     exit 1
+fi
+
+IS_FULL_BUNDLE=false
+if [[ "$RXNM" == *"rxnm-full"* ]]; then
+    IS_FULL_BUNDLE=true
+    info "Testing Full Combined Bundle Edition"
+else
+    info "Testing Minimal Bundle Edition"
 fi
 
 # --- ISOLATION ENVIRONMENT ---
@@ -112,7 +120,7 @@ VALID_VECTORS=(
     "--help"
 )
 
-# Features that should be explicitly rejected by the bundle as 'Unknown command'
+# Features that should be explicitly rejected by the minimal bundle, but accepted by the full bundle
 PRUNED_VECTORS=(
     "service list"
     "mpls route-list"
@@ -123,7 +131,7 @@ PRUNED_VECTORS=(
     "ha bfd-list"
 )
 
-echo "--- Starting ROCKNIX Bundle Fuzzing ---"
+echo "--- Starting Bundle Fuzzing ---"
 
 run_fuzz() {
     local args="$1"
@@ -149,7 +157,6 @@ run_fuzz() {
     fi
     
     # Check 2: Fatal Bash Errors (The Core Goal)
-    # Added "can only return" to catch the specific dash exception that caused the previous failure
     if echo "$out_content" | grep -qiE "command not found|syntax error|unbound variable|Bad substitution|No such file or directory|can only return"; then
         fail "$description (Script Error detected in bundle)"
         echo "    Output: $out_content"
@@ -158,11 +165,22 @@ run_fuzz() {
     
     # Check 3: Pruned Validation
     if [ "$expect_pruned" == "true" ]; then
-        if echo "$out_content" | grep -q "Unknown command or category"; then
-            pass "$description (Correctly rejected pruned category)"
+        if [ "$IS_FULL_BUNDLE" == "true" ]; then
+            # Full bundle should NOT reject it as pruned. It should either succeed or give a different error (like missing deps or mock output)
+            if echo "$out_content" | grep -q "Unknown command or category"; then
+                fail "$description (Incorrectly rejected as pruned in FULL bundle)"
+                echo "    Output: $out_content"
+            else
+                pass "$description (Correctly parsed in FULL bundle)"
+            fi
         else
-            fail "$description (Failed to cleanly reject pruned category)"
-            echo "    Output: $out_content"
+            # Minimal bundle
+            if echo "$out_content" | grep -q "Unknown command or category"; then
+                pass "$description (Correctly rejected pruned category)"
+            else
+                fail "$description (Failed to cleanly reject pruned category)"
+                echo "    Output: $out_content"
+            fi
         fi
         return
     fi
