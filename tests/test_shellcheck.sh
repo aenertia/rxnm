@@ -36,7 +36,6 @@ fi
 
 # 1. Define specific executables (no extension)
 SOURCES=(
-    "bin/rocknix-network-manager"
     "bin/rxnm"
     "usr/lib/systemd/system-sleep/rxnm-resume"
 )
