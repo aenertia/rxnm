@@ -64,7 +64,7 @@ echo "# --- MAIN DISPATCHER ---" >> "$TARGET"
 # FIXED: Use bin/rxnm instead of bin/rocknix-network-manager
 sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' bin/rxnm | \
 awk '
-/^\. "\$\{LIB_DIR\}/ { next } # Skip dynamic sourcing (functions are now inline)
+/^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { next } # Skip dynamic sourcing (functions are now inline)
 /^CATS=/ {
     # Constrain available CLI commands to the Retro Core
     print "CATS=\"wifi interface bluetooth vpn tun tap system config api\""
