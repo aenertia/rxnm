@@ -105,7 +105,16 @@ jobs:
 
     - name: Run Integration Tests
       run: |
-        echo "=== PHASE 2: Integration Tests (Systemd-Nspawn) ==="
+        echo "=== PHASE 4: Standard Integration Tests (Systemd-Nspawn) ==="
         # Run with sudo as creating network bridges/machines requires privileges
         sudo chmod +x tests/integration/run_interop.sh
         sudo ./tests/integration/run_interop.sh
+
+    - name: Run ROCKNIX Bundle Integration Tests
+      run: |
+        echo "=== PHASE 5: ROCKNIX Bundle Integration Tests (Systemd-Nspawn) ==="
+        # Build the minimal deployment bundle first
+        make rocknix-release
+        
+        sudo chmod +x tests/integration/run_rocknix_interop.sh
+        sudo ./tests/integration/run_rocknix_interop.sh
