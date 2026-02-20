@@ -61,7 +61,8 @@ echo "# --- MAIN DISPATCHER ---" >> "$TARGET"
 
 # Strip the file-based bootstrapping logic from the main dispatcher
 # and append the remaining code, patching out enterprise categories.
-sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' bin/rocknix-network-manager | \
+# FIXED: Use bin/rxnm instead of bin/rocknix-network-manager
+sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' bin/rxnm | \
 awk '
 /^\. "\$\{LIB_DIR\}/ { next } # Skip dynamic sourcing (functions are now inline)
 /^CATS=/ {

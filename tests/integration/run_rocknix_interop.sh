@@ -86,8 +86,16 @@ if [ ! -d "$ROOTFS" ]; then
             iproute iputils procps-ng NetworkManager firewalld \
             ethtool tcpdump hostname bash jq sed coreutils \
             --setopt=install_weak_deps=False
+    elif command -v docker >/dev/null 2>&1; then
+        # FIXED: Added docker fallback back in for Ubuntu CI runners
+        info "Using Docker to bootstrap Fedora rootfs..."
+        docker build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
+        CID=$(docker create rxnm-test-base)
+        docker export "$CID" | tar -x -C "$ROOTFS"
+        docker rm "$CID"
+        cp /etc/resolv.conf "$ROOTFS/etc/"
     else
-        err "DNF required for host bootstrap."
+        err "DNF or Docker required for host bootstrap."
         exit 1
     fi
         
