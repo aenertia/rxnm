@@ -503,8 +503,9 @@ _list_networks_posix() {
         local ssid="${fname%.*}"
         local sec="${fname##*.}"
         [ "$first" = "true" ] && first="false" || result="${result},"
-        local safe_ssid; safe_ssid=$(printf '%s' "$ssid" | sed 's/"/\\"/g')
-        result="${result}{\"ssid\":\"${safe_ssid}\",\"security\":\"${sec}\"}"
+        local safe_ssid; safe_ssid=$(json_escape "$ssid")
+        local safe_sec; safe_sec=$(json_escape "$sec")
+        result="${result}{\"ssid\":\"${safe_ssid}\",\"security\":\"${safe_sec}\"}"
     done
     json_success '{"networks":'"${result}]"'}'
 }

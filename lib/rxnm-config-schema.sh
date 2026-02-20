@@ -32,6 +32,7 @@ _get_schema_rules() {
 _check_requirement() {
     local req="$1"
     local context_iface="$2"
+    local context_states="$3"
 
     case "$req" in
         iwd)
@@ -65,8 +66,16 @@ _check_requirement() {
             fi
             ;;
         net:static_or_gateway)
-            # This is a logical check usually validated by arg parsing, strictly satisfied here
-            return 0
+            # Validates that the requested configuration includes a static IP or implies a gateway (like AP mode)
+            case ",${context_states}," in
+                *,net:static,*|*,wifi:ap,*)
+                    return 0
+                    ;;
+                *)
+                    json_error "Requirement failed: This feature requires a Static IP or Gateway mode." "1" "Configure a static IP or use AP mode."
+                    return 1
+                    ;;
+            esac
             ;;
         *)
             log_debug "Unknown schema requirement: $req"
@@ -160,7 +169,7 @@ validate_config_state() {
                 
                 case "$type" in
                     requires)
-                        if ! _check_requirement "$item" "$iface"; then return 1; fi
+                        if ! _check_requirement "$item" "$iface" "$states_str"; then return 1; fi
                         ;;
                     excludes)
                         if [ "$item" = "iface:bridge_member" ]; then

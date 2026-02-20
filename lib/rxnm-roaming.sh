@@ -29,6 +29,9 @@ log_roam() {
     fi
 }
 
+# Helper to prevent shell aborts on non-numeric RSSI strings from upstream tools
+is_integer() { case "$1" in ''|*[!0-9-]*) return 1;; esac; return 0; }
+
 # Load user configuration overrides
 load_roaming_config() {
     : "${ROAM_STRATEGY:=passive}"        # passive (events) or active (polling)
@@ -143,7 +146,8 @@ evaluate_roaming_state() {
     
     # 3. Evaluate
     local connected=0
-    if [ -n "$ssid" ] && [ -n "$rssi" ] && [ "$rssi" -ne -100 ]; then connected=1; fi
+    # Safe integer evaluation for RSSI string values
+    if [ -n "$ssid" ] && is_integer "$rssi" && [ "$rssi" -ne -100 ]; then connected=1; fi
     if [ -n "$gateway" ]; then connected=1; fi
     
     if [ "$connected" -eq 1 ]; then
@@ -237,8 +241,10 @@ _logic_signal_steering() {
     local scan_needed=0
     local scan_reason=""
     
-    # Linear Backoff (POSIX math)
-    local dynamic_cooldown=$(( SCAN_COOLDOWN_SEEK * (1 + NUDGE_COUNT) ))
+    # Linear Backoff (POSIX math) with safety cap to prevent long-running overflow
+    local safe_nudge=$NUDGE_COUNT
+    [ "$safe_nudge" -gt 1000 ] && safe_nudge=1000
+    local dynamic_cooldown=$(( SCAN_COOLDOWN_SEEK * (1 + safe_nudge) ))
     [ "$dynamic_cooldown" -gt "${MAX_NUDGE_BACKOFF:-3600}" ] && dynamic_cooldown="${MAX_NUDGE_BACKOFF:-3600}"
     
     # Check Map for better options

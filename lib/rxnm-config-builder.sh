@@ -34,8 +34,8 @@ _get_system_template_val() {
 
 # Task C-3: Sanitizes INI strings
 _ini_safe() {
-    # Strip ASCII control characters and escape backslashes before printf %b
-    printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g'
+    # Strip ASCII control characters to prevent multi-line injection
+    printf '%s' "$1" | tr -d '\000-\037\177'
 }
 
 # Description: Generates the content for a .network file
@@ -110,34 +110,34 @@ build_network_config() {
     local safe_mac_addr; safe_mac_addr=$(_ini_safe "${mac_addr}")
 
     # [Match] Section
-    local config="[Match]\nName=${safe_match_iface}\n"
-    [ -n "$safe_match_ssid" ] && config="${config}SSID=${safe_match_ssid}\n"
+    printf "[Match]\nName=%s\n" "${safe_match_iface}"
+    [ -n "$safe_match_ssid" ] && printf "SSID=%s\n" "${safe_match_ssid}"
     
     # [Link] Section (Configuration applied at link up)
     if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$safe_mac_addr" ]; then
-        config="${config}\n[Link]\n"
-        [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
-        [ -n "$safe_mac_addr" ] && config="${config}MACAddress=${safe_mac_addr}\n"
-        [ -n "$mtu" ] && config="${config}MTUBytes=${mtu}\n"
+        printf "\n[Link]\n"
+        [ -n "$mac_policy" ] && printf "MACAddressPolicy=%s\n" "${mac_policy}"
+        [ -n "$safe_mac_addr" ] && printf "MACAddress=%s\n" "${safe_mac_addr}"
+        [ -n "$mtu" ] && printf "MTUBytes=%s\n" "${mtu}"
     fi
 
     # [Network] Section (Core settings)
-    config="${config}\n[Network]\n"
-    [ -n "$safe_desc" ] && config="${config}Description=${safe_desc}\n"
-    [ -n "$dhcp" ] && config="${config}DHCP=${dhcp}\n"
+    printf "\n[Network]\n"
+    [ -n "$safe_desc" ] && printf "Description=%s\n" "${safe_desc}"
+    [ -n "$dhcp" ] && printf "DHCP=%s\n" "${dhcp}"
     
     # Virtual Memberships
-    [ -n "$bridge" ] && config="${config}Bridge=${bridge}\n"
-    [ -n "$bond" ] && config="${config}Bond=${bond}\n"
-    [ -n "$vrf" ] && config="${config}VRF=${vrf}\n"
-    [ -n "$vlan" ] && config="${config}VLAN=${vlan}\n"
+    [ -n "$bridge" ] && printf "Bridge=%s\n" "${bridge}"
+    [ -n "$bond" ] && printf "Bond=%s\n" "${bond}"
+    [ -n "$vrf" ] && printf "VRF=%s\n" "${vrf}"
+    [ -n "$vlan" ] && printf "VLAN=%s\n" "${vlan}"
     
-    config="${config}MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
+    printf "MulticastDNS=%s\nLLMNR=%s\n" "${mdns}" "${llmnr}"
     # ConfigureWithoutCarrier helps with virtual/flaky links
-    config="${config}LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
+    printf "LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ -n "$ipv6_privacy" ]; then
-        config="${config}IPv6PrivacyExtensions=${ipv6_privacy}\n"
+        printf "IPv6PrivacyExtensions=%s\n" "${ipv6_privacy}"
     fi
 
     # TASK B-2: Replace `set --` glob-risks with robust here-doc while loops
@@ -145,21 +145,21 @@ build_network_config() {
         while IFS= read -r addr; do
             addr=$(printf '%s' "$addr" | tr -d ' ')
             [ -z "$addr" ] && continue
-            config="${config}Address=${addr}\n"
+            printf "Address=%s\n" "$addr"
         done <<_ADDRS_
 $(printf '%s' "$addresses" | tr ',' '\n')
 _ADDRS_
     fi
     
     if [ -n "$gateway" ]; then
-        config="${config}Gateway=${gateway}\n"
+        printf "Gateway=%s\n" "${gateway}"
     fi
     
     if [ -n "$dns_servers" ]; then
         while IFS= read -r d; do
             d=$(printf '%s' "$d" | tr -d ' ')
             [ -z "$d" ] && continue
-            config="${config}DNS=${d}\n"
+            printf "DNS=%s\n" "$d"
         done <<_DNS_
 $(printf '%s' "$dns_servers" | tr ',' '\n')
 _DNS_
@@ -170,7 +170,7 @@ _DNS_
             d=$(printf '%s' "$d" | tr -d ' ')
             [ -z "$d" ] && continue
             local safe_d; safe_d=$(_ini_safe "$d")
-            config="${config}Domains=${safe_d}\n"
+            printf "Domains=%s\n" "${safe_d}"
         done <<_DOMAINS_
 $(printf '%s' "$domains" | tr ',' '\n')
 _DOMAINS_
@@ -178,17 +178,17 @@ _DOMAINS_
     
     # DHCP Client Options
     if [ "$dhcp" != "no" ] || [ -n "$dhcp_client_id" ]; then
-         config="${config}\n[DHCPv4]\n"
+         printf "\n[DHCPv4]\n"
          if [ -n "$dhcp_client_id" ]; then
              local safe_dhcp_id; safe_dhcp_id=$(_ini_safe "${dhcp_client_id}")
-             config="${config}ClientIdentifier=${safe_dhcp_id}\n"
+             printf "ClientIdentifier=%s\n" "${safe_dhcp_id}"
          fi
          # Fix: Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
-         [ "$dhcp" != "no" ] && [ -n "$metric" ] && config="${config}RouteMetric=${metric}\n"
+         [ "$dhcp" != "no" ] && [ -n "$metric" ] && printf "RouteMetric=%s\n" "${metric}"
     fi
     
     if [ "$ipv6_pd" = "no" ]; then
-        config="${config}\n[DHCPv6]\nUseDelegatedPrefix=no\n"
+        printf "\n[DHCPv6]\nUseDelegatedPrefix=no\n"
     fi
 
     # Static Routes
@@ -203,19 +203,17 @@ _DOMAINS_
             
             [ -z "$r_dest" ] && r_dest="$r"
             
-            config="${config}\n[Route]\nDestination=${r_dest}\n"
-            [ -n "$r_gw" ] && config="${config}Gateway=${r_gw}\n"
+            printf "\n[Route]\nDestination=%s\n" "${r_dest}"
+            [ -n "$r_gw" ] && printf "Gateway=%s\n" "${r_gw}"
             if [ -n "$r_metric" ]; then 
-                config="${config}Metric=${r_metric}\n"
+                printf "Metric=%s\n" "${r_metric}"
             elif [ -n "$metric" ] && [ "$dhcp" = "no" ]; then 
-                config="${config}Metric=${metric}\n"
+                printf "Metric=%s\n" "${metric}"
             fi
         done <<_ROUTES_
 $(printf '%s' "$routes" | tr ',' '\n')
 _ROUTES_
     fi
-
-    printf "%b" "$config"
 }
 
 # Description: Generates content for a .link file (Hardware/Udev level)
@@ -225,18 +223,16 @@ build_device_link_config() {
     local safe_iface; safe_iface=$(_ini_safe "$iface")
     local safe_mac_addr; safe_mac_addr=$(_ini_safe "$mac_addr")
     
-    local config="[Match]\nOriginalName=${safe_iface}\n"
-    config="${config}\n[Link]\nDescription=RXNM Hardware Config\n"
+    printf "[Match]\nOriginalName=%s\n" "${safe_iface}"
+    printf "\n[Link]\nDescription=RXNM Hardware Config\n"
     
-    [ -n "$speed" ] && config="${config}BitsPerSecond=${speed}M\n"
-    [ -n "$duplex" ] && config="${config}Duplex=${duplex}\n"
-    [ -n "$autoneg" ] && config="${config}AutoNegotiation=${autoneg}\n"
-    [ -n "$wol" ] && config="${config}WakeOnLan=${wol}\n"
-    [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
-    [ -n "$name_policy" ] && config="${config}NamePolicy=${name_policy}\n"
-    [ -n "$safe_mac_addr" ] && config="${config}MACAddress=${safe_mac_addr}\n"
-    
-    printf "%b" "$config"
+    [ -n "$speed" ] && printf "BitsPerSecond=%sM\n" "${speed}"
+    [ -n "$duplex" ] && printf "Duplex=%s\n" "${duplex}"
+    [ -n "$autoneg" ] && printf "AutoNegotiation=%s\n" "${autoneg}"
+    [ -n "$wol" ] && printf "WakeOnLan=%s\n" "${wol}"
+    [ -n "$mac_policy" ] && printf "MACAddressPolicy=%s\n" "${mac_policy}"
+    [ -n "$name_policy" ] && printf "NamePolicy=%s\n" "${name_policy}"
+    [ -n "$safe_mac_addr" ] && printf "MACAddress=%s\n" "${safe_mac_addr}"
 }
 
 # Description: Generates config for AP/Host modes
@@ -277,25 +273,23 @@ build_gateway_config() {
     local safe_iface; safe_iface=$(_ini_safe "$iface")
     local safe_desc; safe_desc=$(_ini_safe "$desc")
     
-    local config="[Match]\nName=${safe_iface}\n\n[Network]\nDescription=${safe_desc}\n"
-    config="${config}MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
-    [ -n "$ip" ] && config="${config}Address=${ip}\n"
-    config="${config}LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
+    printf "[Match]\nName=%s\n\n[Network]\nDescription=%s\n" "${safe_iface}" "${safe_desc}"
+    printf "MulticastDNS=%s\nLLMNR=%s\n" "${mdns}" "${llmnr}"
+    [ -n "$ip" ] && printf "Address=%s\n" "${ip}"
+    printf "LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
     
     if [ "$share" = "true" ]; then
         # Router Mode: Forwarding + RA
-        config="${config}IPForwarding=yes\nIPv6SendRA=yes\n"
-        if [ "$ipv6_pd" != "no" ]; then config="${config}DHCPPrefixDelegation=yes\n"; fi
+        printf "IPForwarding=yes\nIPv6SendRA=yes\n"
+        if [ "$ipv6_pd" != "no" ]; then printf "DHCPPrefixDelegation=yes\n"; fi
         
         # Local ULA for IPv6
-        config="${config}Address=fd00:cafe:feed::a7ca:de/64\n"
+        printf "Address=fd00:cafe:feed::a7ca:de/64\n"
         
-        config="${config}DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
-        config="${config}[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
+        printf "DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
+        printf "[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
     else
         # Local Mode: No Forwarding
-        config="${config}IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
+        printf "IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
     fi
-    
-    printf "%b" "$config"
 }

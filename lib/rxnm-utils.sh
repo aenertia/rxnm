@@ -449,7 +449,8 @@ sanitize_ssid() {
 
 json_escape() {
     local s="$1"
-    echo "$s" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/
+    # Use printf to prevent shell echo built-ins from interpreting backslashes
+    printf '%s' "$s" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/
 /\\n/g'
 }
 

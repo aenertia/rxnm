@@ -44,11 +44,11 @@ _get_wifi_fallback_json() {
                 local bssid
                 bssid=$(echo "$link_out" | awk '/Connected to/ {print $3}' | tr '[:upper:]' '[:lower:]')
                 local bssid_val="null"
-                if [ -n "$bssid" ]; then bssid_val="\"$bssid\""; fi
+                if [ -n "$bssid" ]; then bssid_val="\"$(json_escape "$bssid")\""; fi
                 
                 if [ -n "$ssid" ]; then
                     # JSON escaping
-                    ssid=$(echo "$ssid" | sed 's/\\/\\\\/g; s/"/\\"/g')
+                    ssid=$(json_escape "$ssid")
                     if [ -n "$json_items" ]; then json_items="$json_items,"; fi
                     json_items="$json_items \"$ifname\": { \"ssid\": \"$ssid\", \"frequency\": ${freq:-0}, \"rssi\": ${rssi:--100}, \"bssid\": $bssid_val, \"state\": \"connected\" }"
                 fi
@@ -74,7 +74,11 @@ _status_posix_fallback() {
         local is_wifi="false"
         { [ -d "$p/wireless" ] || [ -d "$p/phy80211" ]; } && is_wifi="true"
         
-        local entry='"'"$iface"'":{"name":"'"$iface"'","state":"'"$state"'","mac":"'"$addr"'","mtu":'"$mtu"',"wireless":'"$is_wifi"'}'
+        local safe_iface; safe_iface=$(json_escape "$iface")
+        local safe_state; safe_state=$(json_escape "$state")
+        local safe_addr; safe_addr=$(json_escape "$addr")
+        
+        local entry='"'${safe_iface}'":{"name":"'${safe_iface}'","state":"'${safe_state}'","mac":"'${safe_addr}'","mtu":'"$mtu"',"wireless":'"$is_wifi"'}'
         [ "$first" = "true" ] && first="false" || iface_entries="${iface_entries},"
         iface_entries="${iface_entries}${entry}"
     done
@@ -86,6 +90,7 @@ _status_posix_fallback() {
     
     local hn="ROCKNIX"
     [ -f /etc/hostname ] && read -r hn < /etc/hostname 2>/dev/null || true
+    hn=$(json_escape "$hn")
     
     printf '{"success":true,"source":"posix_fallback","hostname":"%s","online":%s,"interfaces":{%s}}\n' "$hn" "$online" "$iface_entries"
 }

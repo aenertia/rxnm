@@ -230,6 +230,50 @@ size_t ifaces_capacity = 0;
 /* --- Utilities --- */
 
 /**
+ * @brief Dynamic Buffer struct for flexible payload construction
+ */
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} dyn_buf_t;
+
+bool dyn_buf_append(dyn_buf_t *b, const void *data, size_t dlen) {
+    if (b->len + dlen > b->cap) {
+        size_t new_cap = b->cap == 0 ? 1024 : b->cap * 2;
+        while (b->len + dlen > new_cap) new_cap *= 2;
+        uint8_t *n = realloc(b->data, new_cap);
+        if (!n) return false;
+        b->data = n;
+        b->cap = new_cap;
+    }
+    memcpy(b->data + b->len, data, dlen);
+    b->len += dlen;
+    return true;
+}
+
+bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
+    uint32_t len = strlen(str);
+    if (!dyn_buf_append(b, &len, 4)) return false;
+    if (!dyn_buf_append(b, str, len + 1)) return false;
+    return true;
+}
+
+bool dyn_buf_align8(dyn_buf_t *b) {
+    uint8_t pad = 0;
+    while (b->len % 8 != 0) {
+        if (!dyn_buf_append(b, &pad, 1)) return false;
+    }
+    return true;
+}
+
+void dyn_buf_free(dyn_buf_t *b) {
+    if (b->data) free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+}
+
+/**
  * @brief Safely frees all dynamically allocated memory tracking the network state.
  */
 void cleanup_ifaces(void) {
@@ -290,7 +334,7 @@ iface_entry_t* get_iface(int index) {
         iface_entry_t **new_ifaces = realloc(ifaces, new_cap * sizeof(iface_entry_t*));
         if (!new_ifaces) {
             fprintf(stderr, "OOM expanding interfaces array\n");
-            exit(1);
+            return NULL; /* Graceful degradation */
         }
         ifaces = new_ifaces;
         ifaces_capacity = new_cap;
@@ -300,14 +344,15 @@ iface_entry_t* get_iface(int index) {
     iface_entry_t *entry = calloc(1, sizeof(iface_entry_t));
     if (!entry) {
         fprintf(stderr, "OOM allocating interface entry\n");
-        exit(1);
+        return NULL;
     }
     
     entry->exists = true;
     entry->index = index;
     entry->signal_dbm = -100;
     entry->speed_mbps = -1;
-    strcpy(entry->state, "unknown");
+    strncpy(entry->state, "unknown", sizeof(entry->state) - 1);
+    entry->state[sizeof(entry->state)-1] = '\0';
     
     /* Pre-allocate inner arrays with sensible defaults */
     entry->ipv4_capacity = 2;
@@ -389,7 +434,8 @@ static void apply_env_overrides(void) {
 static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src) {
     if (!src || !dest) return;
     size_t len = strlen(src);
-    if (len > 0 && src[len-1] == '\n') len--;
+    /* Safely trim trailing CR/LF */
+    while (len > 0 && (src[len-1] == '\n' || src[len-1] == '\r')) len--;
     if (len >= dest_size) len = dest_size - 1;
     memcpy(dest, src, len);
     dest[len] = '\0';
@@ -422,16 +468,6 @@ void udev_enrich(iface_entry_t *entry) {
 }
 
 /* --- DBus Implementation --- */
-
-bool append_string(uint8_t **ptr, const uint8_t *limit, const char *str) {
-    uint32_t len = strlen(str);
-    if (*ptr + 4 + len + 1 > limit) return false;
-    *((uint32_t *)*ptr) = len;
-    *ptr += 4;
-    memcpy(*ptr, str, len + 1);
-    *ptr += len + 1;
-    return true;
-}
 
 int dbus_connect_system(void) {
     long current_backoff = DBUS_BACKOFF_START_US;
@@ -533,47 +569,45 @@ int dbus_connect_system(void) {
 }
 
 /**
- * @brief Constructs and sends a DBus Method Call.
+ * @brief Constructs and sends a DBus Method Call using dynamic buffers.
  */
 int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method) {
-    uint8_t msg[2048];
-    memset(msg, 0, sizeof(msg));
-    uint8_t *limit = msg + sizeof(msg);
+    dyn_buf_t b = {0};
     
-    dbus_header_t *hdr = (dbus_header_t *)msg;
-    hdr->endian = DBUS_ENDIAN_LITTLE;
-    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr->flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
-    hdr->version = DBUS_PROTOCOL_VERSION;
-    hdr->serial = (uint32_t)time(NULL);
+    dbus_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr.flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
+    hdr.version = DBUS_PROTOCOL_VERSION;
     
-    uint8_t *ptr = msg + sizeof(dbus_header_t);
+    /* Ensure DBus Serial Number compliance (Unique per connection) */
+    static uint32_t _serial_counter = 0;
+    hdr.serial = ++_serial_counter;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, path)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!dyn_buf_append(&b, &hdr, sizeof(hdr))) { dyn_buf_free(&b); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, dest)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    uint8_t field_type;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, iface)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_PATH;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01o\x00", 3) || !dyn_buf_append_string(&b, path) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, method)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_DESTINATION;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, dest) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0; 
-    hdr->body_len = 0;
+    field_type = DBUS_HEADER_FIELD_INTERFACE;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, iface) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    return send(sock, msg, (ptr - msg), 0);
+    field_type = DBUS_HEADER_FIELD_MEMBER;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, method) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
+    
+    dbus_header_t *out_hdr = (dbus_header_t *)b.data;
+    out_hdr->fields_len = (uint32_t)(b.len - sizeof(dbus_header_t));
+    out_hdr->body_len = 0;
+    
+    int ret = send(sock, b.data, b.len, 0);
+    dyn_buf_free(&b);
+    return ret;
 }
 
 /**
@@ -618,45 +652,43 @@ int check_variant_sig_string(const char *buf, int pos) {
  */
 int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max_len) {
     /* 1. Request ObjectManager Dump */
-    uint8_t msg[512];
-    memset(msg, 0, sizeof(msg));
-    uint8_t *limit = msg + sizeof(msg);
+    dyn_buf_t req = {0};
+    dbus_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr.flags = 0; /* Expect Reply */
+    hdr.version = DBUS_PROTOCOL_VERSION;
     
-    dbus_header_t *hdr = (dbus_header_t *)msg;
-    hdr->endian = DBUS_ENDIAN_LITTLE;
-    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr->flags = 0; /* Expect Reply */
-    hdr->version = DBUS_PROTOCOL_VERSION;
-    hdr->serial = 2;
+    static uint32_t _serial_counter = 0;
+    hdr.serial = ++_serial_counter;
     
-    uint8_t *ptr = msg + sizeof(dbus_header_t);
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "/")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!dyn_buf_append(&req, &hdr, sizeof(hdr))) return -1;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "net.connman.iwd")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    uint8_t field_type;
+    field_type = DBUS_HEADER_FIELD_PATH;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01o\x00", 3) || !dyn_buf_append_string(&req, "/") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "org.freedesktop.DBus.ObjectManager")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_DESTINATION;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "net.connman.iwd") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "GetManagedObjects")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_INTERFACE;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "org.freedesktop.DBus.ObjectManager") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0;
-    hdr->body_len = 0;
+    field_type = DBUS_HEADER_FIELD_MEMBER;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "GetManagedObjects") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (send(sock, msg, (ptr - msg), 0) < 0) return -1;
+    dbus_header_t *out_hdr = (dbus_header_t *)req.data;
+    out_hdr->fields_len = (uint32_t)(req.len - sizeof(dbus_header_t));
+    out_hdr->body_len = 0;
     
-    /* 2. Read Response — heap-allocated to avoid BSS bloat and re-entrancy risk */
+    if (send(sock, req.data, req.len, 0) < 0) {
+        dyn_buf_free(&req);
+        return -1;
+    }
+    dyn_buf_free(&req);
+    
+    /* 2. Read Response — Dynamically expanded to avoid static max/malformed bloat */
     char hdr_raw[sizeof(dbus_header_t)];
     int n = recv(sock, hdr_raw, sizeof(hdr_raw), 0);
     if (n < (int)sizeof(hdr_raw)) return -1;
@@ -669,18 +701,30 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     if (total_msg_size < sizeof(dbus_header_t)) return -2;  /* underflow/malformed */
     if (total_msg_size > IWD_DBUS_MAX_BYTES)    return -2;  /* exceeds tunable cap */
     
-    char *buf = malloc(total_msg_size);
-    if (!buf) return -3;                                      /* OOM */
-    
+    size_t cap = 4096;
+    char *buf = malloc(cap);
+    if (!buf) return -3;
     memcpy(buf, hdr_raw, sizeof(hdr_raw));
     
     size_t received = (size_t)n;
     while (received < total_msg_size) {
-        size_t want = total_msg_size - received;
+        if (received >= cap) {
+            size_t new_cap = cap * 2;
+            char *new_buf = realloc(buf, new_cap);
+            if (!new_buf) { free(buf); return -3; }
+            buf = new_buf;
+            cap = new_cap;
+        }
+        size_t want = cap - received;
+        if (total_msg_size - received < want) want = total_msg_size - received;
+        
         int r = recv(sock, buf + received, want, 0);
         if (r <= 0) break;                                    /* timeout or peer close */
         received += (size_t)r;
     }
+    
+    /* RC1 FIX: Ensure the buffer wasn't truncated prematurely before parsing bounds */
+    if (received < total_msg_size) { free(buf); return -5; }
     
     /* 3. Scan for SSID */
     char last_path[256] = {0};
@@ -789,7 +833,7 @@ void process_link_msg(struct nlmsghdr *nh) {
     parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifi)));
     
     iface_entry_t *entry = get_iface(ifi->ifi_index);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     entry->hw_type = ifi->ifi_type;
     if (tb[IFLA_IFNAME]) strncpy(entry->name, (char *)RTA_DATA(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
@@ -812,12 +856,22 @@ void process_link_msg(struct nlmsghdr *nh) {
         entry->tx_bytes = stats->tx_bytes;
     }
     
-    /* Operational State Translation */
-    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
-    else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
-    else strcpy(entry->state, "off");
+    /* Operational State Translation (RC1 FIX: using strncpy) */
+    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) {
+        strncpy(entry->state, "routable", sizeof(entry->state)-1);
+    }
+    else if (ifi->ifi_flags & IFF_UP) {
+        strncpy(entry->state, "no-carrier", sizeof(entry->state)-1);
+    }
+    else {
+        strncpy(entry->state, "off", sizeof(entry->state)-1);
+    }
+    entry->state[sizeof(entry->state)-1] = '\0';
     
-    if (tb[IFLA_MASTER]) strcpy(entry->state, "enslaved");
+    if (tb[IFLA_MASTER]) {
+        strncpy(entry->state, "enslaved", sizeof(entry->state)-1);
+        entry->state[sizeof(entry->state)-1] = '\0';
+    }
     
     udev_enrich(entry);
 }
@@ -829,7 +883,7 @@ void process_addr_msg(struct nlmsghdr *nh) {
     parse_rtattr(tb, IFA_MAX, IFA_RTA(ifa), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
     
     iface_entry_t *entry = get_iface(ifa->ifa_index);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
@@ -890,7 +944,7 @@ void process_route_msg(struct nlmsghdr *nh) {
     int oif = *(int *)RTA_DATA(tb[RTA_OIF]);
     
     iface_entry_t *entry = get_iface(oif);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     /* Dynamically expand Routes array if full */
     if (entry->route_count >= entry->route_capacity) {
@@ -916,10 +970,10 @@ void process_route_msg(struct nlmsghdr *nh) {
     
     /* Default Gateway Check */
     if (rt->rtm_dst_len == 0) {
-        strcpy(route->dst, "default");
+        strcpy(route->dst, "default"); /* Safe: 40+ chars allocated */
         route->is_default = true;
         if (rt->rtm_family == AF_INET || entry->gateway[0] == '\0') {
-            if (route->gw[0] != '\0') strcpy(entry->gateway, route->gw);
+            if (route->gw[0] != '\0') strncpy(entry->gateway, route->gw, INET6_ADDRSTRLEN);
             entry->metric = route->metric;
         }
     } else if (tb[RTA_DST]) {
@@ -987,7 +1041,7 @@ int get_genl_family_id(int sock, const char *family_name) {
     struct rtattr *rta = (struct rtattr *) req.buf;
     rta->rta_type = CTRL_ATTR_FAMILY_NAME;
     rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
-    strcpy(RTA_DATA(rta), family_name);
+    strcpy(RTA_DATA(rta), family_name); // Safe, family_name is hardcoded literal
     req.n.nlmsg_len += rta->rta_len;
     send(sock, &req, req.n.nlmsg_len, 0);
     
@@ -1023,7 +1077,7 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     int ifindex = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
     
     iface_entry_t *entry = get_iface(ifindex);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     entry->is_wifi = true;
     
     if (cmd == NL80211_CMD_GET_INTERFACE) {
@@ -1560,15 +1614,15 @@ void cmd_nullify_xdp(char *iface, char *action) {
 }
 
 /**
- * @brief Atomically writes stdin to a file.
+ * @brief Atomically writes stdin to a file using dynamic re-allocation.
  */
-void cmd_atomic_write(char *path, char *perm_str) {
+int cmd_atomic_write(char *path, char *perm_str) {
     size_t capacity = 65536; // Start with 64KB
     size_t total_len = 0;
     char *buf = malloc(capacity);
     if (!buf) {
         fprintf(stderr, "OOM allocating atomic buffer\n");
-        exit(1);
+        return 1;
     }
 
     while (1) {
@@ -1580,21 +1634,16 @@ void cmd_atomic_write(char *path, char *perm_str) {
         if (ferror(stdin)) {
             fprintf(stderr, "Error reading stdin\n");
             free(buf);
-            exit(1);
+            return 1;
         }
 
         if (total_len == capacity) {
             capacity *= 2;
-            if (capacity > 16 * 1024 * 1024) { // 16MB Safety Cap
-                fprintf(stderr, "Input exceeds 16MB safety cap\n");
-                free(buf);
-                exit(1);
-            }
             char *new_buf = realloc(buf, capacity);
             if (!new_buf) {
                 fprintf(stderr, "OOM expanding atomic buffer\n");
                 free(buf);
-                exit(1);
+                return 1;
             }
             buf = new_buf;
         }
@@ -1626,7 +1675,7 @@ void cmd_atomic_write(char *path, char *perm_str) {
 
     if (!changed) {
         free(buf);
-        return;
+        return 0;
     }
 
     char tmp_path[PATH_MAX];
@@ -1636,7 +1685,7 @@ void cmd_atomic_write(char *path, char *perm_str) {
     if (fd < 0) {
         fprintf(stderr, "Error creating temp file\n");
         free(buf);
-        exit(1);
+        return 1;
     }
 
     size_t written = 0;
@@ -1648,7 +1697,7 @@ void cmd_atomic_write(char *path, char *perm_str) {
             close(fd);
             unlink(tmp_path);
             free(buf);
-            exit(1);
+            return 1;
         }
         written += w;
     }
@@ -1665,39 +1714,61 @@ void cmd_atomic_write(char *path, char *perm_str) {
          fprintf(stderr, "Error renaming temp file\n");
          unlink(tmp_path);
          free(buf);
-         exit(1);
+         return 1;
     }
     
     free(buf);
+    return 0;
 }
 
 /**
- * @brief Appends a line to a file safely (with flock).
+ * @brief Appends a line to a file safely using dynamically expanding file buffer.
  */
-void cmd_append_config(char *path, char *line) {
+int cmd_append_config(char *path, char *line) {
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
         fprintf(stderr, "Error opening config file\n");
-        exit(1);
+        return 1;
     }
     
     if (flock(fd, LOCK_EX) != 0) {
         fprintf(stderr, "Failed to lock file\n");
         close(fd);
-        exit(1);
+        return 1;
     }
     
-    char file_buf[32768];
+    size_t cap = 8192;
+    size_t len = 0;
+    char *file_buf = malloc(cap);
+    if (!file_buf) {
+        fprintf(stderr, "OOM allocating append buffer\n");
+        close(fd);
+        return 1;
+    }
+    
     ssize_t read_len = 0;
     bool found = false;
     
-    while ((read_len = read(fd, file_buf, sizeof(file_buf)-1)) > 0) {
-        file_buf[read_len] = '\0';
-        if (strstr(file_buf, line)) {
-            found = true;
-            break;
+    while ((read_len = read(fd, file_buf + len, cap - len - 1)) > 0) {
+        len += read_len;
+        if (len >= cap - 1) {
+            cap *= 2;
+            char *new_buf = realloc(file_buf, cap);
+            if (!new_buf) {
+                fprintf(stderr, "OOM expanding append buffer\n");
+                free(file_buf);
+                close(fd);
+                return 1;
+            }
+            file_buf = new_buf;
         }
     }
+    file_buf[len] = '\0';
+    
+    if (strstr(file_buf, line)) {
+        found = true;
+    }
+    free(file_buf);
     
     if (!found) {
         lseek(fd, 0, SEEK_END);
@@ -1712,6 +1783,7 @@ void cmd_append_config(char *path, char *line) {
     
     flock(fd, LOCK_UN);
     close(fd);
+    return 0;
 }
 
 static void trigger_roaming_event(const char *iface) {
@@ -2021,8 +2093,8 @@ end_args:
         }
     }
     
-    if (g_atomic_path) { cmd_atomic_write(g_atomic_path, g_perm_str); return 0; }
-    if (g_append_path && g_append_line) { cmd_append_config(g_append_path, g_append_line); return 0; }
+    if (g_atomic_path) { return cmd_atomic_write(g_atomic_path, g_perm_str); }
+    if (g_append_path && g_append_line) { return cmd_append_config(g_append_path, g_append_line); }
     if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }
     if (g_connect_ssid) { return cmd_connect(g_connect_ssid, g_connect_iface); }
     if (g_nullify_cmd) { 
