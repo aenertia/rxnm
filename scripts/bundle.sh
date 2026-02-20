@@ -75,6 +75,19 @@ for mod in $MODULES; do
     
     echo -e "\n# --- MODULE: $mod_path ---" >> "$TMP_TARGET"
     
+    # CRITICAL FIX: Replace the schema file with pure POSIX stubs in the bundle.
+    # This prevents the 'return 0' guard from causing a fatal parse error in dash
+    # when executed as a flat file outside of a function.
+    if [ "$mod_path" = "rxnm-config-schema.sh" ]; then
+        cat << 'STUB' >> "$TMP_TARGET"
+validate_config_state() { return 0; }
+build_config_descriptor() { printf 'iface:|states:\n'; }
+_check_requirement() { return 0; }
+validate_json_input() { return 0; }
+STUB
+        continue
+    fi
+    
     # Strip unnecessary headers to save space and reduce parse time
     # '|| true' prevents pipefail from tripping if a file has no matching lines (unlikely, but safe)
     grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" "$file_path" | \

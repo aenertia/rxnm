@@ -149,8 +149,8 @@ run_fuzz() {
     fi
     
     # Check 2: Fatal Bash Errors (The Core Goal)
-    # We look for "No such file" to ensure indented `source` lines were properly stripped.
-    if echo "$out_content" | grep -qiE "command not found|syntax error|unbound variable|Bad substitution|No such file or directory"; then
+    # Added "can only return" to catch the specific dash exception that caused the previous failure
+    if echo "$out_content" | grep -qiE "command not found|syntax error|unbound variable|Bad substitution|No such file or directory|can only return"; then
         fail "$description (Script Error detected in bundle)"
         echo "    Output: $out_content"
         return
