@@ -109,7 +109,7 @@ if [ ! -d "$ROOTFS" ]; then
     
     if command -v dnf >/dev/null 2>&1; then
         echo "Using host DNF to bootstrap..."
-        dnf -y --installroot="$ROOTFS" --releasever=41 install \
+        dnf -y --installroot="$ROOTFS" --releasever=43 install \
             systemd systemd-networkd systemd-resolved iwd dbus-daemon \
             iproute iputils procps-ng \
             NetworkManager firewalld \
@@ -158,9 +158,8 @@ mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/lib"
 cp -f bin/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
 cp -f lib/*.sh "$ROOTFS/usr/lib/rocknix-network-manager/lib/"
-cp -f bin/rocknix-network-manager "$ROOTFS/usr/bin/rocknix-network-manager"
 cp -f bin/rxnm "$ROOTFS/usr/bin/rxnm"
-chmod +x "$ROOTFS/usr/bin/rocknix-network-manager" "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
+chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 mkdir -p "$ROOTFS/usr/lib/systemd/network"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/"
 

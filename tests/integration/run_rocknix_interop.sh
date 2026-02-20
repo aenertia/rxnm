@@ -81,7 +81,7 @@ if [ ! -d "$ROOTFS" ]; then
     mkdir -p "$ROOTFS"
     
     if command -v dnf >/dev/null 2>&1; then
-        dnf -y --installroot="$ROOTFS" --releasever=41 install \
+        dnf -y --installroot="$ROOTFS" --releasever=43 install \
             systemd systemd-networkd systemd-resolved iwd dbus-daemon \
             iproute iputils procps-ng NetworkManager firewalld \
             ethtool tcpdump hostname bash jq sed coreutils \
