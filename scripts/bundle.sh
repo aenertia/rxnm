@@ -10,7 +10,13 @@
 # Enforce strict error handling
 set -euo pipefail
 
+BUNDLE_MODE="${BUNDLE_MODE:-minimal}"
+
 TARGET="build/rxnm"
+if [ "$BUNDLE_MODE" = "full" ]; then
+    TARGET="build/rxnm-full"
+fi
+
 TMP_TARGET="${TARGET}.tmp"
 SRC_BIN="bin/rxnm"
 SRC_LIB="lib"
@@ -29,20 +35,24 @@ fi
 mkdir -p build
 rm -f "$TMP_TARGET"
 
-echo "==> Building ROCKNIX Minimal Bundle..."
+if [ "$BUNDLE_MODE" = "full" ]; then
+    echo "==> Building RXNM Full Combined Edition..."
+else
+    echo "==> Building ROCKNIX Minimal Bundle..."
+fi
 
 # --- 1. WRITE HEADER ---
 cat << 'EOF' > "$TMP_TARGET"
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Auto-generated bundled RXNM - ROCKNIX Minimal Edition
+# Auto-generated bundled RXNM
 
 # Provide safe fallbacks for paths that still reference it (like plugins or schema)
 export LIB_DIR="/usr/lib/rocknix-network-manager/lib"
 export RXNM_LIB_DIR="${LIB_DIR}"
 EOF
 
-# List of allowed modules in exact dependency order (Strictly retro-gaming focused + VPN + Plugins)
+# List of allowed modules in exact dependency order
 MODULES="
 rxnm-constants.sh
 rxnm-utils.sh
@@ -60,6 +70,20 @@ rxnm-nullify.sh
 rxnm-vpn.sh
 rxnm-bluetooth.sh
 "
+
+if [ "$BUNDLE_MODE" = "full" ]; then
+    MODULES="${MODULES}
+rxnm-api.sh
+rxnm-profiles.sh
+rxnm-virt.sh
+rxnm-routes.sh
+rxnm-service.sh
+rxnm-tunnel.sh
+rxnm-mpls.sh
+rxnm-pppoe.sh
+rxnm-ha.sh
+"
+fi
 
 # --- 2. APPEND MODULES ---
 for mod in $MODULES; do
@@ -98,7 +122,7 @@ done
 echo -e "\n# --- MAIN DISPATCHER ---" >> "$TMP_TARGET"
 
 # Strip the file-based bootstrapping logic from the main dispatcher
-# and append the remaining code, patching out enterprise categories.
+# and append the remaining code, optionally patching out enterprise categories.
 DISPATCHER_CONTENT=$(sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' "$SRC_BIN")
 
 if [ -z "$DISPATCHER_CONTENT" ]; then
@@ -108,16 +132,18 @@ if [ -z "$DISPATCHER_CONTENT" ]; then
     exit 1
 fi
 
-echo "$DISPATCHER_CONTENT" | awk '
+echo "$DISPATCHER_CONTENT" | awk -v mode="$BUNDLE_MODE" '
 /^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { 
     # Replace dynamic sourcing with a POSIX no-op (:) to prevent syntax errors in empty if/else blocks
     print "    : # " $0
     next 
 }
 /^CATS=/ {
-    # Constrain available CLI commands to the Retro Core
-    print "CATS=\"wifi interface bluetooth vpn tun tap system config api\""
-    next
+    if (mode == "minimal") {
+        # Constrain available CLI commands to the Retro Core
+        print "CATS=\"wifi interface bluetooth vpn tun tap system config api\""
+        next
+    }
 }
 { print }
 ' >> "$TMP_TARGET"

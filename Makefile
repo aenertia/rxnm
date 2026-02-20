@@ -43,7 +43,7 @@ SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check lint dirs constants tiny test-all install verify rocknix-release
+.PHONY: all clean check lint dirs constants tiny test-all install verify rocknix-release combined-full
 
 all: dirs constants $(TARGET)
 
@@ -127,7 +127,7 @@ check: all
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
 
-# Full Phase 3 Validation (Updated for RC1)
+# Full Phase 3 Validation (Updated for Release)
 # Now includes linting as a prerequisite
 test-all: all lint
 	@echo "[TEST] Running Full Validation Suite..."
@@ -138,12 +138,12 @@ test-all: all lint
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
 	@bash tests/test_cli_fuzz.sh
-	@bash tests/verify_rc1.sh
+	@bash tests/verify_release.sh
 
 # Final Implementation Verification
 verify:
-	@echo "[VERIFY] Running RC1 Implementation Verification..."
-	@bash tests/verify_rc1.sh
+	@echo "[VERIFY] Running Implementation Verification..."
+	@bash tests/verify_release.sh
 
 # Target for ROCKNIX Minimal Edition
 rocknix-release: tiny
@@ -154,4 +154,13 @@ rocknix-release: tiny
 	@echo "[ROCKNIX] Deployment artifacts ready in build/"
 	@cp $(TARGET) build/rxnm-agent
 	@echo "    - build/rxnm       (Single Script)"
+	@echo "    - build/rxnm-agent (Tiny C Agent)"
+
+# Target for Full Combined Edition (All Features)
+combined-full: tiny
+	@echo "[RXNM] Building Full Combined Bundle..."
+	@BUNDLE_MODE=full bash scripts/bundle.sh
+	@echo "[RXNM] Deployment artifacts ready in build/"
+	@cp $(TARGET) build/rxnm-agent
+	@echo "    - build/rxnm-full  (Single Script - All Features)"
 	@echo "    - build/rxnm-agent (Tiny C Agent)"
