@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RXNM 1.0 Unified API Schema",
+  "title": "RXNM 1.1 Unified API Schema",
   "description": "Contract for RXNM interactions including Input Requests (stdin) and Output Responses (stdout).",
   "type": "object",
   "oneOf": [
@@ -53,7 +53,8 @@
         },
         "api_version": {
           "type": "string",
-          "default": "1.0"
+          "default": "1.1",
+          "enum": ["1.0", "1.1"]
         },
         "force": {
           "type": "boolean"

@@ -495,39 +495,66 @@ action_scan() {
     return 0
 }
 
+_list_networks_posix() {
+    local result="[" first="true"
+    for f in /var/lib/iwd/*.psk /var/lib/iwd/*.8021x /var/lib/iwd/*.open; do
+        [ -f "$f" ] || continue
+        local fname="${f##*/}"
+        local ssid="${fname%.*}"
+        local sec="${fname##*.}"
+        [ "$first" = "true" ] && first="false" || result="${result},"
+        local safe_ssid; safe_ssid=$(printf '%s' "$ssid" | sed 's/"/\\"/g')
+        result="${result}{\"ssid\":\"${safe_ssid}\",\"security\":\"${sec}\"}"
+    done
+    json_success '{"networks":'"${result}]"'}'
+}
+
 action_list_known_networks() {
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 0
     fi
     
-    local objects_json=""
-    if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
-        json_error "Failed to query IWD"
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        local output
+        if output=$("$RXNM_AGENT_BIN" --list-networks 2>/dev/null); then
+            json_success "$output"
+            return 0
+        fi
+    fi
+    
+    # Task A-2: Use POSIX Fallback JSON Builder if agent is unavailable
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
+        _list_networks_posix
         return 0
     fi
     
-    if [ -z "$objects_json" ]; then
-         json_success '{"networks": []}'
-         return 0
-    fi
-
-    local networks
-    networks=$(echo "$objects_json" | "$JQ_BIN" -r '
-        [
-            .data | to_entries[] |
-            select(.value["net.connman.iwd.KnownNetwork"] != null) |
-            {
-                ssid: .value["net.connman.iwd.KnownNetwork"].Name.data,
-                security: .value["net.connman.iwd.KnownNetwork"].Type.data,
-                hidden: (.value["net.connman.iwd.KnownNetwork"].Hidden.data == true),
-                last_connected: (.value["net.connman.iwd.KnownNetwork"].LastConnectedTime.data // "Never")
-            }
-        ] | sort_by(.ssid)
-    ')
-    
-    json_success "{\"networks\": $networks}"
+    # Fallback to standard human readable iwctl
+    iwctl known-networks list 2>/dev/null
     return 0
+}
+
+_ensure_wifi_netconfig() {
+    local iface="$1"
+    local found="false"
+    for f in "${STORAGE_NET_DIR}/75-config-${iface}.network" \
+             "${STORAGE_NET_DIR}/75-static-${iface}.network" \
+             "${PERSISTENT_NET_DIR}/75-config-${iface}.network" \
+             "${PERSISTENT_NET_DIR}/75-static-${iface}.network"; do
+        [ -f "$f" ] && { found="true"; break; }
+    done
+    if [ "$found" = "false" ]; then
+        log_info "No network config for $iface; applying default DHCP."
+        if type _task_set_dhcp >/dev/null 2>&1; then
+            with_iface_lock "$iface" _task_set_dhcp --iface "$iface" --mdns yes --llmnr yes
+            if is_service_active "systemd-networkd"; then
+                timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+            else
+                log_warn "networkd inactive; triggering rescue DHCP."
+                type configure_standalone_client >/dev/null 2>&1 && configure_standalone_client "$iface"
+            fi
+        fi
+    fi
 }
 
 action_connect() {
@@ -541,7 +568,13 @@ action_connect() {
     
     if [ -z "${pass:-}" ] && [ -t 0 ] && [ "$hidden" != "true" ]; then
         printf 'Passphrase for %s: ' "$ssid"
-        stty -echo; read -r pass; stty echo; echo
+        _restore_tty() { stty echo 2>/dev/null; }
+        trap '_restore_tty' INT TERM HUP
+        stty -echo
+        read -r pass
+        _restore_tty
+        trap - INT TERM HUP
+        echo
     fi
     
     if [ -n "$pass" ] && [ "${EPHEMERAL_CREDS:-false}" != "true" ]; then
@@ -572,58 +605,43 @@ action_connect() {
     local cmd="connect"
     [ "$hidden" = "true" ] && cmd="connect-hidden"
     
+    # Task B-1: Pre-check config before the retry loop
+    _ensure_wifi_netconfig "$iface"
+    
     local attempts=0
     local max_attempts=3
-    local out=""
     
     while [ "$attempts" -lt "$max_attempts" ]; do
         if [ "${EPHEMERAL_CREDS:-false}" = "true" ] && [ -n "${pass:-}" ]; then
              { set +x; } 2>/dev/null
-             out=$(printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
+             printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin >/dev/null 2>&1 || true
              set -x 2>/dev/null
         else
-             out=$(timeout 15s iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
+             timeout 15s iwctl station "$iface" "$cmd" "$ssid" >/dev/null 2>&1 || true
         fi
         
-        if [ -z "$out" ]; then
-            local config_exists="false"
-            if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
-                config_exists="true"
-            elif [ -f "${PERSISTENT_NET_DIR}/75-config-${iface}.network" ] || [ -f "${PERSISTENT_NET_DIR}/75-static-${iface}.network" ]; then
-                config_exists="true"
-            fi
-            
-            if [ "$config_exists" = "false" ]; then
-                 log_info "No network configuration found for $iface. Applying default DHCP."
-                 if type _task_set_dhcp >/dev/null 2>&1; then
-                     with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
-                     if is_service_active "systemd-networkd"; then
-                         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || timeout 5s networkctl reload >/dev/null 2>&1
-                     else
-                         log_warn "networkd missing or inactive. Triggering Rescue Mode (udhcpc)."
-                         if type configure_standalone_client >/dev/null 2>&1; then configure_standalone_client "$iface"; fi
-                     fi
-                 fi
-            fi
-            
-            audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
-            json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'"}'
-            return 0
-        fi
-        
-        if echo "$out" | grep -qi "passphrase\|password\|not correct"; then
-             json_error "Authentication failed - check password"; return 0
-        elif echo "$out" | grep -qi "not found\|no network"; then
-             json_error "Network '$ssid' not found"; return 0
-        elif echo "$out" | grep -qi "already in progress"; then
-             sleep 3
-        else
-             sleep $((2 * (attempts + 1)))
-        fi
+        # Explicit station state query instead of inferring from stdout
+        sleep 1
+        local conn_state
+        conn_state=$(iwctl station "$iface" show 2>/dev/null | \
+            grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+
+        case "$conn_state" in
+            connected)
+                audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
+                json_success '{"connected":true,"ssid":"'"$ssid"'","iface":"'"$iface"'"}'
+                return 0
+                ;;
+            *"not found"*|*"no network"*)
+                json_error "Network '$ssid' not found"; return 0 ;;
+            *"passphrase"*|*"incorrect"*)
+                json_error "Authentication failed - check password"; return 0 ;;
+        esac
+        sleep $((2 * (attempts + 1)))
         attempts=$((attempts + 1))
     done
     
-    json_error "Failed to connect: $out"
+    json_error "Failed to connect to $ssid"
     return 0
 }
 

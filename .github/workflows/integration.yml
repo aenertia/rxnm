@@ -82,18 +82,25 @@ jobs:
           lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
           lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
 
-        echo "=== Step 3: Path B smoke test (no agent, no Bash) ==="
-        # Verifies the lib sources without syntax error under dash.
-        # The 'true' exit prevents CI failure from missing agent — the goal
-        # is to catch parse errors and hard exits from missing guards.
+        echo "=== Step 3b: Full POSIX library source test ==="
         RXNM_SHELL_IS_BASH=false RXNM_AGENT_BIN="/nonexistent/rxnm-agent" \
           dash -c '
             RXNM_LIB_DIR=./lib
             for f in ./lib/rxnm-constants.sh ./lib/rxnm-utils.sh \
-                     ./lib/rxnm-system.sh ./lib/rxnm-wifi.sh; do
-              . "$f" || { echo "Failed to source $f"; exit 1; }
+                     ./lib/rxnm-system.sh ./lib/rxnm-wifi.sh \
+                     ./lib/rxnm-bluetooth.sh ./lib/rxnm-interfaces.sh \
+                     ./lib/rxnm-routes.sh ./lib/rxnm-profiles.sh \
+                     ./lib/rxnm-templates.sh ./lib/rxnm-nullify.sh \
+                     ./lib/rxnm-roaming.sh ./lib/rxnm-virt.sh \
+                     ./lib/rxnm-vpn.sh ./lib/rxnm-pppoe.sh \
+                     ./lib/rxnm-tunnel.sh ./lib/rxnm-mpls.sh \
+                     ./lib/rxnm-ha.sh ./lib/rxnm-plugins.sh \
+                     ./lib/rxnm-diagnostics.sh ./lib/rxnm-help.sh; do
+              [ -f "$f" ] || continue
+              . "$f" || { echo "FAIL: source $f"; exit 1; }
             done
-            echo "POSIX source: OK"
+            json_success "{\"test\":\"posix_source_all\"}" | grep -q "success.*true" || exit 1
+            echo "POSIX source all: OK"
           ' || exit 1
 
     - name: Run Integration Tests

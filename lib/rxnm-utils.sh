@@ -67,18 +67,23 @@ cleanup() {
     fi
     
     # Attempt to clean up stale sub-locks in RUN_DIR
+    # Phase RC0 Fix: Replace non-POSIX 'fuser' with /proc iteration
+    _try_remove_stale_lock() {
+        local lock="$1"
+        [ -f "$lock" ] || return
+        local held="false"
+        for pid_fd_dir in /proc/[0-9]*/fd; do
+            local proc_pid="${pid_fd_dir%/fd}"; proc_pid="${proc_pid##*/}"
+            [ "$proc_pid" = "$$" ] && continue
+            ls -la "$pid_fd_dir" 2>/dev/null | grep -qF "$lock" && { held="true"; break; }
+        done
+        [ "$held" = "false" ] && rm -f "$lock" 2>/dev/null
+    }
+
     if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then
-        if command -v fuser >/dev/null; then
-            find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while read -r lock; do
-                if [ -f "$lock" ]; then
-                    local lock_pid
-                    lock_pid=$(fuser "$lock" 2>/dev/null | awk '{print $1}')
-                    if [ -z "$lock_pid" ] || [ "$lock_pid" = "$$" ]; then
-                        rm -f "$lock" 2>/dev/null
-                    fi
-                fi
-            done
-        fi
+        find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while IFS= read -r lf; do
+            _try_remove_stale_lock "$lf"
+        done
     fi
     if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
         rm -rf "$TMPDIR" 2>/dev/null
@@ -115,7 +120,7 @@ acquire_global_lock() {
     # FD 9 is used by with_iface_lock; do not change either without updating both.
     exec 8>"$GLOBAL_LOCK_FILE"
     
-    if ! flock -n 8; then
+    if ! flock -w "$timeout" 8; then
         # Lock exists, check if stale
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
@@ -124,8 +129,8 @@ acquire_global_lock() {
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
                 exec 8>"$GLOBAL_LOCK_FILE"
-                if ! flock -n 8; then
-                    log_error "Failed to acquire lock even after stale-lock cleanup"
+                if ! flock -w 2 8; then
+                    log_error "Lock race on stale-lock cleanup — concurrent instance won"
                     exec 8>&-
                     return 1
                 fi
@@ -633,6 +638,9 @@ validate_dns() { _validate_ip_csv "$1"; }
 
 validate_proxy_url() {
     local url="$1"
+    case "$url" in
+        *"$(printf '\n')"*|*"$(printf '\r')"*) return 1 ;;
+    esac
     if rxnm_match "$url" '^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$'; then
         return 0
     fi

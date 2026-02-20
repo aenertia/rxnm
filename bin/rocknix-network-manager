@@ -213,7 +213,7 @@ if [ "$USE_STDIN" = "true" ]; then
                 if (.value | type) == "boolean" and .value == true then 
                     "--" + (.key | gsub("_";"-")) 
                 elif (.value | type) == "array" then
-                    "--" + (.key | gsub("_";"-")) + "\n" + (.value | join(","))
+                    (.key | gsub("_";"-")) as $k | [ .value[] | "--" + $k, tostring ] | .[]
                 else 
                     "--" + (.key | gsub("_";"-")) + "\n" + (.value | tostring) 
                 end

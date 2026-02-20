@@ -32,6 +32,12 @@ _get_system_template_val() {
     done < "$f"
 }
 
+# Task C-3: Sanitizes INI strings
+_ini_safe() {
+    # Strip ASCII control characters and escape backslashes before printf %b
+    printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g'
+}
+
 # Description: Generates the content for a .network file
 # Arguments: Named flags (e.g. --match-name eth0 --dhcp yes)
 # Refactored for RXNM 1.0.0 to replace positional arguments
@@ -98,21 +104,26 @@ build_network_config() {
         mdns="no"
     fi
 
+    local safe_match_iface; safe_match_iface=$(_ini_safe "${match_iface}")
+    local safe_match_ssid; safe_match_ssid=$(_ini_safe "${match_ssid}")
+    local safe_desc; safe_desc=$(_ini_safe "${desc}")
+    local safe_mac_addr; safe_mac_addr=$(_ini_safe "${mac_addr}")
+
     # [Match] Section
-    local config="[Match]\nName=${match_iface}\n"
-    [ -n "$match_ssid" ] && config="${config}SSID=${match_ssid}\n"
+    local config="[Match]\nName=${safe_match_iface}\n"
+    [ -n "$safe_match_ssid" ] && config="${config}SSID=${safe_match_ssid}\n"
     
     # [Link] Section (Configuration applied at link up)
-    if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$mac_addr" ]; then
+    if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$safe_mac_addr" ]; then
         config="${config}\n[Link]\n"
         [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
-        [ -n "$mac_addr" ] && config="${config}MACAddress=${mac_addr}\n"
+        [ -n "$safe_mac_addr" ] && config="${config}MACAddress=${safe_mac_addr}\n"
         [ -n "$mtu" ] && config="${config}MTUBytes=${mtu}\n"
     fi
 
     # [Network] Section (Core settings)
     config="${config}\n[Network]\n"
-    [ -n "$desc" ] && config="${config}Description=${desc}\n"
+    [ -n "$safe_desc" ] && config="${config}Description=${safe_desc}\n"
     [ -n "$dhcp" ] && config="${config}DHCP=${dhcp}\n"
     
     # Virtual Memberships
@@ -158,7 +169,8 @@ _DNS_
         while IFS= read -r d; do
             d=$(printf '%s' "$d" | tr -d ' ')
             [ -z "$d" ] && continue
-            config="${config}Domains=${d}\n"
+            local safe_d; safe_d=$(_ini_safe "$d")
+            config="${config}Domains=${safe_d}\n"
         done <<_DOMAINS_
 $(printf '%s' "$domains" | tr ',' '\n')
 _DOMAINS_
@@ -167,7 +179,10 @@ _DOMAINS_
     # DHCP Client Options
     if [ "$dhcp" != "no" ] || [ -n "$dhcp_client_id" ]; then
          config="${config}\n[DHCPv4]\n"
-         [ -n "$dhcp_client_id" ] && config="${config}ClientIdentifier=${dhcp_client_id}\n"
+         if [ -n "$dhcp_client_id" ]; then
+             local safe_dhcp_id; safe_dhcp_id=$(_ini_safe "${dhcp_client_id}")
+             config="${config}ClientIdentifier=${safe_dhcp_id}\n"
+         fi
          # Fix: Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
          [ "$dhcp" != "no" ] && [ -n "$metric" ] && config="${config}RouteMetric=${metric}\n"
     fi
@@ -207,7 +222,10 @@ _ROUTES_
 build_device_link_config() {
     local iface="$1" speed="$2" duplex="$3" autoneg="$4" wol="$5" mac_policy="$6" name_policy="$7" mac_addr="$8"
     
-    local config="[Match]\nOriginalName=${iface}\n"
+    local safe_iface; safe_iface=$(_ini_safe "$iface")
+    local safe_mac_addr; safe_mac_addr=$(_ini_safe "$mac_addr")
+    
+    local config="[Match]\nOriginalName=${safe_iface}\n"
     config="${config}\n[Link]\nDescription=RXNM Hardware Config\n"
     
     [ -n "$speed" ] && config="${config}BitsPerSecond=${speed}M\n"
@@ -216,7 +234,7 @@ build_device_link_config() {
     [ -n "$wol" ] && config="${config}WakeOnLan=${wol}\n"
     [ -n "$mac_policy" ] && config="${config}MACAddressPolicy=${mac_policy}\n"
     [ -n "$name_policy" ] && config="${config}NamePolicy=${name_policy}\n"
-    [ -n "$mac_addr" ] && config="${config}MACAddress=${mac_addr}\n"
+    [ -n "$safe_mac_addr" ] && config="${config}MACAddress=${safe_mac_addr}\n"
     
     printf "%b" "$config"
 }
@@ -256,7 +274,10 @@ build_gateway_config() {
         fi
     fi
     
-    local config="[Match]\nName=${iface}\n\n[Network]\nDescription=${desc}\n"
+    local safe_iface; safe_iface=$(_ini_safe "$iface")
+    local safe_desc; safe_desc=$(_ini_safe "$desc")
+    
+    local config="[Match]\nName=${safe_iface}\n\n[Network]\nDescription=${safe_desc}\n"
     config="${config}MulticastDNS=${mdns}\nLLMNR=${llmnr}\n"
     [ -n "$ip" ] && config="${config}Address=${ip}\n"
     config="${config}LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"

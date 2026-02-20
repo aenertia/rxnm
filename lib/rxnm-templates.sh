@@ -39,14 +39,23 @@ parse_template_metadata() {
     dhcp=$(grep -E "^DHCP=" "$file" | head -n1 | cut -d= -f2 | tr -d ' "')
 
     # Construct simple JSON object
-    "$JQ_BIN" -n \
+    local meta
+    meta=$("$JQ_BIN" -n \
         --arg name "$match_name" \
         --arg type "$match_type" \
         --arg wlan "$wlan_type" \
         --arg desc "$desc" \
         --arg masq "$ip_masq" \
         --arg dhcp "$dhcp" \
-        '{name: $name, type: $type, wlan_type: $wlan, description: $desc, masquerade: $masq, dhcp: $dhcp}'
+        '{name: $name, type: $type, wlan_type: $wlan, description: $desc, masquerade: $masq, dhcp: $dhcp}')
+        
+    # Task C-1: Actually populate the cache
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$file" ]; then
+        # Store as a compact single-line value; the cache key is the file path
+        eval 'TEMPLATE_CACHE["'"$file"'"]="'"$(printf '%s' "$meta" | tr '\n' '\035')"'"'
+    fi
+    
+    echo "$meta"
 }
 
 # Description: Identifies templates that conflict with a specific intent.
@@ -67,8 +76,14 @@ build_template_conflict_map() {
             local fname="${f##*/}"
             
             # Parse metadata
-            local meta
-            meta=$(parse_template_metadata "$f")
+            local meta=""
+            if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+                eval 'meta="${TEMPLATE_CACHE['"\"$f\""']:-}"'
+                # Restore newlines if cached
+                [ -n "$meta" ] && meta=$(printf '%s' "$meta" | tr '\035' '\n')
+            fi
+            [ -z "$meta" ] && meta=$(parse_template_metadata "$f")
+            
             local match_pattern
             match_pattern=$(echo "$meta" | "$JQ_BIN" -r '.name')
             local wlan_type

@@ -54,7 +54,7 @@ extract_sh_var() {
     fi
     
     if [ -n "$val" ]; then
-        if [ "$type" == "string" ]; then
+        if [ "$type" = "string" ]; then
             echo "#define $var_name \"$val\"" >> "$HEADER_FILE"
         else
             echo "#define $var_name $val" >> "$HEADER_FILE"

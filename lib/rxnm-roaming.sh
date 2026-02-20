@@ -19,9 +19,7 @@ LAST_MATCH_VAL=""
 CURRENT_PROFILE=""
 NUDGE_COUNT=0
 LAST_NUDGE_BSSID=""
-
-# Map Storage (Session-based in RAM)
-ROAM_MAP_FILE="${RUN_DIR:-/run/rocknix}/roaming_map.json"
+_ROAM_MAP_UPDATE_PID=""
 
 log_roam() {
     if [ -t 2 ]; then
@@ -283,8 +281,11 @@ _logic_signal_steering() {
             LAST_NUDGE_BSSID="$bssid"
             NUDGE_COUNT=$((NUDGE_COUNT + 1))
             
-            # Update our map in background
-            update_roaming_map "$iface" &
+            # Task C-2: Update our map in background (Guard against fork bombs)
+            if [ -z "${_ROAM_MAP_UPDATE_PID:-}" ] || ! kill -0 "$_ROAM_MAP_UPDATE_PID" 2>/dev/null; then
+                update_roaming_map "$iface" &
+                _ROAM_MAP_UPDATE_PID=$!
+            fi
         fi
     fi
 }

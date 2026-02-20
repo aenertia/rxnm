@@ -149,6 +149,8 @@ Examples:
   rxnm interface eth0 show --get ip
 
   # Change MAC address
+EOF
+            ;;
         route)
             cat <<'EOF'
 Usage: rxnm route <action> [destination] [options]
@@ -322,6 +324,7 @@ Examples:
   rxnm system proxy set
 
   # Power Management: Suspend all network traffic globally via XDP
+  # Nullify mode is available in RXNM 1.1.0+. Requires the rxnm-agent binary and --yes flag.
   rxnm system nullify enable --yes
 
   # Power Management: Suspend traffic on a specific interface only
