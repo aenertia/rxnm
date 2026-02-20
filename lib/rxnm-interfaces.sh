@@ -25,19 +25,19 @@ _task_set_dhcp() {
     
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --iface)     iface="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
-            --ssid)      ssid="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
-            --dns)       dns="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --domains)   domains="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
-            --routes)    routes="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
-            --mdns)      mdns="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
-            --llmnr)     llmnr="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
-            --metric)    metric="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
-            --mtu)       mtu="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --mac)       mac="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --ipv6-priv) ipv6_priv="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-            --dhcp-id)   dhcp_id="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
-            --ipv6-pd)   ipv6_pd="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --iface)     iface="$2";     shift 2 ;;
+            --ssid)      ssid="$2";      shift 2 ;;
+            --dns)       dns="$2";       shift 2 ;;
+            --domains)   domains="$2";   shift 2 ;;
+            --routes)    routes="$2";    shift 2 ;;
+            --mdns)      mdns="$2";      shift 2 ;;
+            --llmnr)     llmnr="$2";     shift 2 ;;
+            --metric)    metric="$2";    shift 2 ;;
+            --mtu)       mtu="$2";       shift 2 ;;
+            --mac)       mac="$2";       shift 2 ;;
+            --ipv6-priv) ipv6_priv="$2"; shift 2 ;;
+            --dhcp-id)   dhcp_id="$2";   shift 2 ;;
+            --ipv6-pd)   ipv6_pd="$2";   shift 2 ;;
             *) shift ;;
         esac
     done
@@ -55,21 +55,21 @@ _task_set_static() {
     
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --iface)     iface="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
-            --ip)        ip="${2:-}";        shift; [ "$#" -gt 0 ] && shift ;;
-            --gw)        gw="${2:-}";        shift; [ "$#" -gt 0 ] && shift ;;
-            --dns)       dns="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --ssid)      ssid="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
-            --domains)   domains="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
-            --routes)    routes="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
-            --mdns)      mdns="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
-            --llmnr)     llmnr="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
-            --metric)    metric="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
-            --mtu)       mtu="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --mac)       mac="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
-            --ipv6-priv) ipv6_priv="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-            --dhcp-id)   dhcp_id="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
-            --ipv6-pd)   ipv6_pd="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --iface)     iface="$2";     shift 2 ;;
+            --ip)        ip="$2";        shift 2 ;;
+            --gw)        gw="$2";        shift 2 ;;
+            --dns)       dns="$2";       shift 2 ;;
+            --ssid)      ssid="$2";      shift 2 ;;
+            --domains)   domains="$2";   shift 2 ;;
+            --routes)    routes="$2";    shift 2 ;;
+            --mdns)      mdns="$2";      shift 2 ;;
+            --llmnr)     llmnr="$2";     shift 2 ;;
+            --metric)    metric="$2";    shift 2 ;;
+            --mtu)       mtu="$2";       shift 2 ;;
+            --mac)       mac="$2";       shift 2 ;;
+            --ipv6-priv) ipv6_priv="$2"; shift 2 ;;
+            --dhcp-id)   dhcp_id="$2";   shift 2 ;;
+            --ipv6-pd)   ipv6_pd="$2";   shift 2 ;;
             *) shift ;;
         esac
     done
@@ -202,18 +202,15 @@ action_set_static() {
     [ -z "$iface" ] || [ -z "$ip" ] && return 1
     
     local final_ips=""
-    local _old_ifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2086
-    set -- $ip
-    for addr do
+    while IFS= read -r addr; do
         addr=$(echo "$addr" | tr -d ' ')
         [ -z "$addr" ] && continue
         case "$addr" in */*) ;; *) addr="${addr}/24" ;; esac
-        if ! validate_ip "$addr"; then IFS="$_old_ifs"; return 1; fi
+        if ! validate_ip "$addr"; then return 1; fi
         final_ips="${final_ips:+$final_ips,}$addr"
-    done
-    IFS="$_old_ifs"
+    done <<_IP_LIST_
+$(printf '%s' "$ip" | tr ',' '\n')
+_IP_LIST_
     
     [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
     [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }

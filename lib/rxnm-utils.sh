@@ -587,28 +587,19 @@ validate_ip() {
 # Returns 0 if every entry passes validate_ip, 1 on first failure.
 _validate_ip_csv() {
     local _list="$1"
-    local _old_ifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2086
-    set -- $_list
-    IFS="$_old_ifs"
-    for _item do
+    while IFS= read -r _item; do
         _item=$(printf '%s' "$_item" | tr -d ' \t')
         [ -z "$_item" ] && continue
         if ! validate_ip "$_item"; then return 1; fi
-    done
+    done <<_IP_CSV_
+$(printf '%s' "$_list" | tr ',' '\n')
+_IP_CSV_
     return 0
 }
 
 validate_routes() {
     local routes="$1"
-    local _oldifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2086
-    set -- $routes
-    IFS="$_oldifs"
-    
-    for r do
+    while IFS= read -r r; do
         local dest=""
         local rgw=""
         local rmet=""
@@ -631,7 +622,9 @@ validate_routes() {
         if [ -n "$rmet" ]; then
             if ! validate_integer "$rmet"; then return 1; fi
         fi
-    done
+    done <<_ROUTES_CSV_
+$(printf '%s' "$routes" | tr ',' '\n')
+_ROUTES_CSV_
     return 0
 }
 

@@ -80,10 +80,8 @@ _status_posix_fallback() {
     done
     
     local online="false"
-    if command -v ping >/dev/null 2>&1; then
-        ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && online="true"
-    elif command -v nc >/dev/null 2>&1; then
-        nc -z -w 2 8.8.8.8 53 >/dev/null 2>&1 && online="true"
+    if ip route show default 2>/dev/null | grep -q default; then
+        online="true"
     fi
     
     local hn="ROCKNIX"

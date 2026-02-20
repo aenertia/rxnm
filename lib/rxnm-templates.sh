@@ -40,14 +40,26 @@ parse_template_metadata() {
 
     # Construct simple JSON object
     local meta
-    meta=$("$JQ_BIN" -n \
-        --arg name "$match_name" \
-        --arg type "$match_type" \
-        --arg wlan "$wlan_type" \
-        --arg desc "$desc" \
-        --arg masq "$ip_masq" \
-        --arg dhcp "$dhcp" \
-        '{name: $name, type: $type, wlan_type: $wlan, description: $desc, masquerade: $masq, dhcp: $dhcp}')
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        meta=$("$JQ_BIN" -n \
+            --arg name "$match_name" \
+            --arg type "$match_type" \
+            --arg wlan "$wlan_type" \
+            --arg desc "$desc" \
+            --arg masq "$ip_masq" \
+            --arg dhcp "$dhcp" \
+            '{name: $name, type: $type, wlan_type: $wlan, description: $desc, masquerade: $masq, dhcp: $dhcp}')
+    else
+        # POSIX string fallback when JQ is missing
+        local s_name; s_name=$(printf '%s' "$match_name" | sed 's/"/\\"/g')
+        local s_type; s_type=$(printf '%s' "$match_type" | sed 's/"/\\"/g')
+        local s_wlan; s_wlan=$(printf '%s' "$wlan_type" | sed 's/"/\\"/g')
+        local s_desc; s_desc=$(printf '%s' "$desc" | sed 's/"/\\"/g')
+        local s_masq; s_masq=$(printf '%s' "$ip_masq" | sed 's/"/\\"/g')
+        local s_dhcp; s_dhcp=$(printf '%s' "$dhcp" | sed 's/"/\\"/g')
+        meta=$(printf '{"name":"%s","type":"%s","wlan_type":"%s","description":"%s","masquerade":"%s","dhcp":"%s"}' \
+            "$s_name" "$s_type" "$s_wlan" "$s_desc" "$s_masq" "$s_dhcp")
+    fi
         
     # Task C-1: Actually populate the cache
     if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$file" ]; then
@@ -85,9 +97,13 @@ build_template_conflict_map() {
             [ -z "$meta" ] && meta=$(parse_template_metadata "$f")
             
             local match_pattern
-            match_pattern=$(echo "$meta" | "$JQ_BIN" -r '.name')
-            local wlan_type
-            wlan_type=$(echo "$meta" | "$JQ_BIN" -r '.wlan_type')
+            if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+                match_pattern=$(echo "$meta" | "$JQ_BIN" -r '.name')
+                wlan_type=$(echo "$meta" | "$JQ_BIN" -r '.wlan_type')
+            else
+                match_pattern=$(printf '%s' "$meta" | grep -o '"name":"[^"]*"' | sed 's/"name":"\([^"]*\)"/\1/')
+                wlan_type=$(printf '%s' "$meta" | grep -o '"wlan_type":"[^"]*"' | sed 's/"wlan_type":"\([^"]*\)"/\1/')
+            fi
             
             # Pattern matching via case for POSIX compatibility
             # shellcheck disable=SC2254
