@@ -203,39 +203,31 @@ log_error() {
 rxnm_json_get() {
     local _json="$1"
     local _key="$2"
+    local val=""
 
-    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
-        # Use pipe instead of here-string to avoid Dash syntax errors during parse
-        echo "$_json" | "$JQ_BIN" -r ".${_key} // empty"
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        # shellcheck disable=SC2016
+        printf '%s' "$_json" | "$JQ_BIN" -r ".${_key} // empty"
         return
     fi
 
-    # Constrained Path (awk)
-    printf '%s' "$_json" | awk -v key="\"${_key}\"" '
-    {
-        gsub(/[[:space:]]+/, " ")
-        idx = index($0, key)
-        if (idx == 0) next
-        rest = substr($0, idx + length(key))
-        sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
-        if (substr(rest, 1, 1) == "\"") {
-            val = ""; rest = substr(rest, 2)
-            while (length(rest) > 0) {
-                c = substr(rest, 1, 1); rest = substr(rest, 2)
-                if (c == "\\") {
-                    nc = substr(rest, 1, 1); rest = substr(rest, 2)
-                    if (nc == "\"") val = val "\""
-                    else val = val nc
-                } else if (c == "\"") { break } else { val = val c }
-            }
-            print val
-        } else {
-            match(rest, /^[^,}[:space:]]+/)
-            bare = substr(rest, 1, RLENGTH)
-            if (bare != "null") print bare
-        }
-        exit
-    }'
+    # String: "key":"value"
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' | head -n1)
+    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+    
+    # Number: "key":123 or "key":-1.5
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*-\?[0-9][0-9.]*' | \
+        sed 's/.*:[[:space:]]*//' | head -n1)
+    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+    
+    # Boolean: "key":true|false
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*\(true\|false\)' | \
+        sed 's/.*:[[:space:]]*//' | head -n1)
+    printf '%s\n' "${val:-}"
 }
 
 # -----------------------------------------------------------------------------

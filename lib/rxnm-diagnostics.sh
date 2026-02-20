@@ -58,13 +58,47 @@ _get_wifi_fallback_json() {
     echo "{ $json_items }"
 }
 
+# Description: Fallback POSIX JSON assembly when jq and agent are missing.
+_status_posix_fallback() {
+    local iface_entries="" first="true"
+    for p in /sys/class/net/*; do
+        [ -e "$p" ] || continue
+        local iface; iface=$(basename "$p")
+        [ "$iface" = "lo" ] && continue
+        
+        local state="" addr="" mtu=""
+        read -r state < "$p/operstate" 2>/dev/null || state="unknown"
+        read -r addr  < "$p/address"   2>/dev/null || addr=""
+        read -r mtu   < "$p/mtu"       2>/dev/null || mtu="0"
+        
+        local is_wifi="false"
+        { [ -d "$p/wireless" ] || [ -d "$p/phy80211" ]; } && is_wifi="true"
+        
+        local entry='"'"$iface"'":{"name":"'"$iface"'","state":"'"$state"'","mac":"'"$addr"'","mtu":'"$mtu"',"wireless":'"$is_wifi"'}'
+        [ "$first" = "true" ] && first="false" || iface_entries="${iface_entries},"
+        iface_entries="${iface_entries}${entry}"
+    done
+    
+    local online="false"
+    if command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && online="true"
+    elif command -v nc >/dev/null 2>&1; then
+        nc -z -w 2 8.8.8.8 53 >/dev/null 2>&1 && online="true"
+    fi
+    
+    local hn="ROCKNIX"
+    [ -f /etc/hostname ] && read -r hn < /etc/hostname 2>/dev/null || true
+    
+    printf '{"success":true,"source":"posix_fallback","hostname":"%s","online":%s,"interfaces":{%s}}\n' "$hn" "$online" "$iface_entries"
+}
+
 action_status_legacy() {
     # Guard: JQ is required for legacy status aggregation
     if [ "$RXNM_HAS_JQ" != "true" ]; then
         if [ -x "$AGENT_BIN" ]; then
             "$AGENT_BIN" --dump 2>/dev/null || printf '{"success":false,"error":"agent failed and jq missing"}\n'
         else
-            printf '{"success":false,"error":"jq unavailable and agent missing"}\n'
+            _status_posix_fallback
         fi
         return
     fi
@@ -293,7 +327,11 @@ action_status() {
     
     # 3. Fallback
     if [ -z "$json_output" ]; then
-        json_output=$(action_status_legacy "$filter_iface") || json_output="{}"
+        if [ "$RXNM_HAS_JQ" = "true" ]; then
+            json_output=$(action_status_legacy "$filter_iface") || json_output="{}"
+        else
+            json_output=$(_status_posix_fallback)
+        fi
     fi
     
     # 4. Cache
