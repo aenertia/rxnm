@@ -96,7 +96,11 @@ if [ -z "$DISPATCHER_CONTENT" ]; then
 fi
 
 echo "$DISPATCHER_CONTENT" | awk '
-/^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { next } # Skip dynamic sourcing (functions are now inline)
+/^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { 
+    # Replace dynamic sourcing with a POSIX no-op (:) to prevent syntax errors in empty if/else blocks
+    print "    : # " $0
+    next 
+}
 /^CATS=/ {
     # Constrain available CLI commands to the Retro Core
     print "CATS=\"wifi interface bluetooth vpn tun tap system config api\""
