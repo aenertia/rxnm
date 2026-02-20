@@ -11,6 +11,14 @@
 #                Legacy destructive behaviors (unbind/masking) removed.
 # -----------------------------------------------------------------------------
 
+_set_nullify_state() {
+    local state="$1"
+    local file="$2"
+    if echo "$state" > "${file}.tmp" 2>/dev/null; then
+        mv -f "${file}.tmp" "$file" 2>/dev/null || true
+    fi
+}
+
 _apply_xdp_to_all() {
     local action="$1" # enable|disable
     
@@ -86,7 +94,7 @@ action_system_nullify() {
             log_info "Nullifying specific interface: $specific_iface (XDP Drop)"
             if [ -x "$RXNM_AGENT_BIN" ]; then
                 "$RXNM_AGENT_BIN" --nullify-xdp "$specific_iface" "enable"
-                echo "enabled" > "${RUN_DIR}/nullify_${specific_iface}.state.tmp" 2>/dev/null && mv -f "${RUN_DIR}/nullify_${specific_iface}.state.tmp" "${RUN_DIR}/nullify_${specific_iface}.state" 2>/dev/null || true
+                _set_nullify_state "enabled" "${RUN_DIR}/nullify_${specific_iface}.state"
                 json_success '{"action": "nullify_iface", "iface": "'"$specific_iface"'", "status": "enabled"}'
             else
                 json_error "Agent binary required for interface-specific nullify"
@@ -101,7 +109,7 @@ action_system_nullify() {
         # Legacy Sysctl/Unbind fallbacks have been removed per architectural decision.
         
         if _apply_xdp_to_all "enable"; then
-            echo "enabled" > "${NULLIFY_STATE_FILE}.tmp" 2>/dev/null && mv -f "${NULLIFY_STATE_FILE}.tmp" "$NULLIFY_STATE_FILE" 2>/dev/null || true
+            _set_nullify_state "enabled" "$NULLIFY_STATE_FILE"
             json_success '{"action": "nullify", "status": "enabled", "mode": "xdp"}'
         else
             json_error "Failed to enable XDP on any interface (Agent missing or Kernel unsupported)"
@@ -113,7 +121,7 @@ action_system_nullify() {
             log_info "Restoring interface: $specific_iface"
             if [ -x "$RXNM_AGENT_BIN" ]; then
                 "$RXNM_AGENT_BIN" --nullify-xdp "$specific_iface" "disable"
-                echo "disabled" > "${RUN_DIR}/nullify_${specific_iface}.state.tmp" 2>/dev/null && mv -f "${RUN_DIR}/nullify_${specific_iface}.state.tmp" "${RUN_DIR}/nullify_${specific_iface}.state" 2>/dev/null || true
+                _set_nullify_state "disabled" "${RUN_DIR}/nullify_${specific_iface}.state"
                 json_success '{"action": "nullify_iface", "iface": "'"$specific_iface"'", "status": "disabled"}'
             else
                 json_error "Agent binary required for restore"
@@ -126,11 +134,11 @@ action_system_nullify() {
         
         # Attempt to disable XDP on all interfaces
         if _apply_xdp_to_all "disable"; then
-            echo "disabled" > "${NULLIFY_STATE_FILE}.tmp" 2>/dev/null && mv -f "${NULLIFY_STATE_FILE}.tmp" "$NULLIFY_STATE_FILE" 2>/dev/null || true
+            _set_nullify_state "disabled" "$NULLIFY_STATE_FILE"
             json_success '{"action": "nullify", "status": "disabled"}'
         else
             # Even if it fails (e.g. nothing was enabled), we report success to not block boot scripts
-            echo "disabled" > "${NULLIFY_STATE_FILE}.tmp" 2>/dev/null && mv -f "${NULLIFY_STATE_FILE}.tmp" "$NULLIFY_STATE_FILE" 2>/dev/null || true
+            _set_nullify_state "disabled" "$NULLIFY_STATE_FILE"
             log_warn "XDP disable reported no changes"
             json_success '{"action": "nullify", "status": "disabled", "note": "no_changes"}'
         fi
