@@ -19,7 +19,29 @@ _task_set_member() {
 }
 
 _task_set_dhcp() {
-    local iface="$1" ssid="$2" dns="$3" domains="$4" routes="$5" mdns="$6" llmnr="$7" metric="$8" mtu="$9" mac="${10}" ipv6_priv="${11}" dhcp_id="${12}" ipv6_pd="${13}"
+    local iface="" ssid="" dns="" domains="" routes=""
+    local mdns="yes" llmnr="yes" metric="" mtu="" mac=""
+    local ipv6_priv="" dhcp_id="" ipv6_pd="yes"
+    
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --iface)     iface="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
+            --ssid)      ssid="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
+            --dns)       dns="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --domains)   domains="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --routes)    routes="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
+            --mdns)      mdns="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
+            --llmnr)     llmnr="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
+            --metric)    metric="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
+            --mtu)       mtu="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --mac)       mac="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --ipv6-priv) ipv6_priv="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
+            --dhcp-id)   dhcp_id="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --ipv6-pd)   ipv6_pd="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            *) shift ;;
+        esac
+    done
+
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     ensure_dirs
     set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
@@ -27,7 +49,31 @@ _task_set_dhcp() {
 }
 
 _task_set_static() {
-    local iface="$1" ip="$2" gw="$3" dns="$4" ssid="$5" domains="$6" routes="$7" mdns="$8" llmnr="$9" metric="${10}" mtu="${11}" mac="${12}" ipv6_priv="${13}" dhcp_id="${14}"
+    local iface="" ip="" gw="" dns="" ssid="" domains="" routes=""
+    local mdns="yes" llmnr="yes" metric="" mtu="" mac=""
+    local ipv6_priv="" dhcp_id="" ipv6_pd="yes"
+    
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --iface)     iface="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
+            --ip)        ip="${2:-}";        shift; [ "$#" -gt 0 ] && shift ;;
+            --gw)        gw="${2:-}";        shift; [ "$#" -gt 0 ] && shift ;;
+            --dns)       dns="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --ssid)      ssid="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
+            --domains)   domains="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --routes)    routes="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
+            --mdns)      mdns="${2:-}";      shift; [ "$#" -gt 0 ] && shift ;;
+            --llmnr)     llmnr="${2:-}";     shift; [ "$#" -gt 0 ] && shift ;;
+            --metric)    metric="${2:-}";    shift; [ "$#" -gt 0 ] && shift ;;
+            --mtu)       mtu="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --mac)       mac="${2:-}";       shift; [ "$#" -gt 0 ] && shift ;;
+            --ipv6-priv) ipv6_priv="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
+            --dhcp-id)   dhcp_id="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            --ipv6-pd)   ipv6_pd="${2:-}";   shift; [ "$#" -gt 0 ] && shift ;;
+            *) shift ;;
+        esac
+    done
+    
     rm -f "${STORAGE_NET_DIR}/75-config-${iface}.network" 2>/dev/null
     rm -f "${STORAGE_NET_DIR}/75-config-${iface}-"*.network 2>/dev/null
     ensure_dirs
@@ -60,6 +106,10 @@ _task_set_hardware() {
 
 _task_set_proxy() {
     local iface="$1" http="$2" https="$3" noproxy="$4"
+    
+    [ -n "$http" ]  && ! validate_proxy_url "$http"  && { json_error "Invalid HTTP proxy URL";  return 1; }
+    [ -n "$https" ] && ! validate_proxy_url "$https" && { json_error "Invalid HTTPS proxy URL"; return 1; }
+    
     local target_file="${iface:+${STORAGE_NET_DIR}/proxy-${iface}.conf}"
     target_file="${target_file:-$STORAGE_PROXY_GLOBAL}"
     if [ -z "$http" ] && [ -z "$https" ] && [ -z "$noproxy" ]; then [ -f "$target_file" ] && rm -f "$target_file"; else
@@ -138,7 +188,12 @@ action_set_dhcp() {
     [ -n "$mac" ] && ! validate_mac "$mac" && { json_error "Invalid MAC"; return 1; }
     [ -n "$mtu" ] && ! validate_mtu "$mtu" && { json_error "Invalid MTU"; return 1; }
     if [ -z "$metric" ]; then case "$iface" in wlan*|wlp*|uap*) metric="600" ;; eth*|en*) metric="100" ;; esac; fi
-    with_iface_lock "$iface" _task_set_dhcp "$iface" "$ssid" "$dns" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
+    
+    with_iface_lock "$iface" _task_set_dhcp \
+        --iface "$iface" --ssid "$ssid" --dns "$dns" --domains "$domains" --routes "$routes" \
+        --mdns "$mdns" --llmnr "$llmnr" --metric "$metric" --mtu "$mtu" --mac "$mac" \
+        --ipv6-priv "$ipv6_priv" --dhcp-id "$dhcp_id" --ipv6-pd "$ipv6_pd"
+        
     json_success '{"mode": "dhcp", "iface": "'"$iface"'"}'
 }
 
@@ -149,6 +204,7 @@ action_set_static() {
     local final_ips=""
     local _old_ifs="$IFS"
     IFS=','
+    # shellcheck disable=SC2086
     set -- $ip
     for addr do
         addr=$(echo "$addr" | tr -d ' ')
@@ -162,7 +218,12 @@ action_set_static() {
     [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
     [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
     if [ -z "$metric" ]; then case "$iface" in wlan*|wlp*|uap*) metric="600" ;; eth*|en*) metric="100" ;; esac; fi
-    with_iface_lock "$iface" _task_set_static "$iface" "$final_ips" "$gw" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id"
+    
+    with_iface_lock "$iface" _task_set_static \
+        --iface "$iface" --ip "$final_ips" --gw "$gw" --dns "$dns" --ssid "$ssid" \
+        --domains "$domains" --routes "$routes" --mdns "$mdns" --llmnr "$llmnr" \
+        --metric "$metric" --mtu "$mtu" --mac "$mac" --ipv6-priv "$ipv6_priv" --dhcp-id "$dhcp_id"
+        
     json_success '{"mode": "static", "iface": "'"$iface"'", "ip": "'"$final_ips"'"}'
 }
 

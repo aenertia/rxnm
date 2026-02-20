@@ -129,17 +129,15 @@ build_network_config() {
         config="${config}IPv6PrivacyExtensions=${ipv6_privacy}\n"
     fi
 
-    # Static Addresses - POSIX array emulation
+    # TASK B-2: Replace `set --` glob-risks with robust here-doc while loops
     if [ -n "$addresses" ]; then
-        # Save IFS
-        old_ifs="$IFS"
-        IFS=','
-        # Word splitting expansion
-        set -- $addresses
-        IFS="$old_ifs"
-        for addr do
+        while IFS= read -r addr; do
+            addr=$(printf '%s' "$addr" | tr -d ' ')
+            [ -z "$addr" ] && continue
             config="${config}Address=${addr}\n"
-        done
+        done <<_ADDRS_
+$(printf '%s' "$addresses" | tr ',' '\n')
+_ADDRS_
     fi
     
     if [ -n "$gateway" ]; then
@@ -147,23 +145,23 @@ build_network_config() {
     fi
     
     if [ -n "$dns_servers" ]; then
-        old_ifs="$IFS"
-        IFS=','
-        set -- $dns_servers
-        IFS="$old_ifs"
-        for d do
+        while IFS= read -r d; do
+            d=$(printf '%s' "$d" | tr -d ' ')
+            [ -z "$d" ] && continue
             config="${config}DNS=${d}\n"
-        done
+        done <<_DNS_
+$(printf '%s' "$dns_servers" | tr ',' '\n')
+_DNS_
     fi
     
     if [ -n "$domains" ]; then
-        old_ifs="$IFS"
-        IFS=','
-        set -- $domains
-        IFS="$old_ifs"
-        for d do
+        while IFS= read -r d; do
+            d=$(printf '%s' "$d" | tr -d ' ')
+            [ -z "$d" ] && continue
             config="${config}Domains=${d}\n"
-        done
+        done <<_DOMAINS_
+$(printf '%s' "$domains" | tr ',' '\n')
+_DOMAINS_
     fi
     
     # DHCP Client Options
@@ -180,19 +178,14 @@ build_network_config() {
 
     # Static Routes
     if [ -n "$routes" ]; then
-        old_ifs="$IFS"
-        IFS=','
-        set -- $routes
-        IFS="$old_ifs"
-        
-        for r do
+        while IFS= read -r r; do
+            r=$(printf '%s' "$r" | tr -d ' ')
+            [ -z "$r" ] && continue
             local r_dest="" r_gw="" r_metric=""
-            # POSIX split on @ using cut (safer than read)
             r_dest=$(echo "$r" | cut -d'@' -f1)
-            r_gw=$(echo "$r" | cut -d'@' -f2 -s) # -s to only output if delimiter found
+            r_gw=$(echo "$r" | cut -d'@' -f2 -s)
             r_metric=$(echo "$r" | cut -d'@' -f3 -s)
             
-            # If no @ found, dest is the whole string
             [ -z "$r_dest" ] && r_dest="$r"
             
             config="${config}\n[Route]\nDestination=${r_dest}\n"
@@ -200,10 +193,11 @@ build_network_config() {
             if [ -n "$r_metric" ]; then 
                 config="${config}Metric=${r_metric}\n"
             elif [ -n "$metric" ] && [ "$dhcp" = "no" ]; then 
-                # Explicitly inherit base metric for manual static routes
                 config="${config}Metric=${metric}\n"
             fi
-        done
+        done <<_ROUTES_
+$(printf '%s' "$routes" | tr ',' '\n')
+_ROUTES_
     fi
 
     printf "%b" "$config"
