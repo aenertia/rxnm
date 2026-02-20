@@ -96,6 +96,12 @@ _rxnm_completion() {
     }
 
     # --- COMPLETION LOGIC ---
+    
+    # Level 0: Global Option Value Interception
+    if [[ "$prev" == "--format" ]]; then
+        COMPREPLY=( $(compgen -W "human json simple" -- "$cur") )
+        return 0
+    fi
 
     # Level 1: Category Selection
     if [[ $cword -eq 1 ]]; then

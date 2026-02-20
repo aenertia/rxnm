@@ -72,7 +72,6 @@
           "enum": [
             "json",
             "human",
-            "table",
             "simple"
           ]
         }

@@ -289,39 +289,7 @@ audit_log() {
     logger -t rxnm-audit -p auth.notice "$event: $details"
 }
 
-# --- Output Formatting (JSON/Table) ---
-
-print_table() {
-    local json_input="$1"
-    local columns="$2"
-    local jq_query="["
-    local header_row=""
-    
-    local _oldifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2086
-    set -- $columns
-    IFS="$_oldifs"
-    
-    for col do
-        local key="${col%%:*}"
-        local hdr="${col#*:}"
-        jq_query="${jq_query} .${key} // \"-\","
-        header_row="${header_row}${hdr}\t"
-    done
-    jq_query="${jq_query%,}] | @tsv"
-    
-    local tsv_data
-    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
-        tsv_data=$(printf '%b\n' "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
-    fi
-    
-    if command -v column >/dev/null; then
-        echo "$tsv_data" | column -t -s "$(printf '\t')"
-    else
-        echo "$tsv_data"
-    fi
-}
+# --- Output Formatting ---
 
 # Description: Outputs success data in the requested format (JSON, Table, or Human).
 # Arguments: $1 = JSON payload (string)

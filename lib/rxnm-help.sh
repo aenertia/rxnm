@@ -34,7 +34,7 @@ Categories:
   tunnel        Overlay Networks (VXLAN, Geneve)
 
 Global Options:
-  --format <fmt>  Output format: human (default), json, table, simple
+  --format <fmt>  Output format: human (default), json, simple
   --simple        Shortcut for '--format simple' (Bash friendly)
   --get <key>     Extract specific value (implies --simple)
   --yes, -y       Skip confirmation prompts
@@ -47,7 +47,7 @@ Examples:
   rxnm wifi connect "MyNetwork"
   rxnm interface wlan0 set dhcp
   rxnm route add default --gateway 192.168.1.1
-  rxnm system status --format table
+  rxnm system status --format json
 
 Use 'rxnm <category> --help' for specific commands.
 EOF
