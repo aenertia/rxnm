@@ -12,9 +12,41 @@ By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory 
 
 RXNM is developed independently, targeting the **ROCKNIX** ecosystem as a primary consumer.
 
-The author is a veteran engineer with **25+ years of experience** working with Linux systems and major Network Equipment Vendors. This project was born out of necessity to address frustrations with existing management stacks (NetworkManager, ConnMan), which were found to be too heavy, slow, or opaque for low-power handhelds.
+The author is a veteran engineer with **25+ years of experience** working with Linux systems and major Network Equipment Vendors. This project was born out of a specific void in the Linux ecosystem: while `systemd-networkd` offers a gold standard for performance and stability, it has historically lacked a comprehensive, user-facing CLI wrapper equivalent to `NetworkManager`'s `nmcli`.
 
-When you have 40+ devices that need to connect to WiFi in under a second to sync save states or download boxart, every millisecond of latency and megabyte of RAM counts. RXNM exists to support the "pick up and play" nature of handheld gaming by ensuring the network is a transparent utility, not a boot-time bottleneck.
+Until now, managing `networkd` meant manually authoring INI files or relying on rigid orchestration tools. RXNM is that missing link—a frontend that provides the interactive convenience of a modern network manager without sacrificing the raw efficiency of the systemd stack.
+
+When you have 40+ devices that need to connect to WiFi in under a second to sync save states or download boxart, every millisecond of latency and megabyte of RAM counts. RXNM exists to ensure the network is a transparent utility, not a boot-time bottleneck.
+
+## 🛠️ Configuration Philosophy: Standards-First
+
+RXNM is built on the principle of transparency. Unlike other managers that hide state in proprietary databases or binary blobs, RXNM is a pure orchestrator of standard Linux interfaces.
+
+* **Standard Files:** Every action performed by RXNM results in the generation of standard `systemd-networkd` `.network` or `.netdev` files (and `udev` `.link` files for hardware properties).
+
+* **Drop-in Compatibility:** RXNM operates within the standard systemd filesystem hierarchy. It is designed to be a "good citizen" and will honor any user-supplied overrides or custom 'dropped-in' configurations.
+
+* **No Hidden State:** What you see in `/run/systemd/network` is exactly what RXNM is managing. This makes the system trivial to debug and 100% compatible with existing systemd-based automation.
+
+## 🔌 Application-Centric API: The REST-Lite Gateway
+
+RXNM is designed to be the "Networking Engine" for modern applications. It provides an application-centric API that decouples the UI from the underlying shell complexity.
+
+### The Application Gateway (Socket & STDIN)
+
+Applications (such as EmulationStation, React-based web dashboards, or Qt apps) can communicate with RXNM either **directly through STDIN** or via the `rxnm-api.socket` gateway (Unix domain socket or TCP port 29304). This gateway uses systemd socket activation to ensure it consumes **zero memory** when not actively processing a request, while direct STDIN support provides an easy path for simple integration from parent processes and scripts.
+
+### Deterministic JSON Contract
+
+RXNM enforces a strict JSON schema (`api-schema.json`) for all input and output. This eliminates the need for applications to parse fragile command-line output using `grep` or `awk`.
+
+* **Input:** Send a JSON object to `stdin` or the socket.
+
+* **Output:** Receive a structured JSON response containing success status, error hints, and data.
+
+### Unified SDK (`rxnm-api.sh`)
+
+For third-party shell scripts or internal plugins, RXNM provides a standard API library. By sourcing `rxnm-api.sh`, any script gains the ability to query the network state or apply configurations using the same optimized paths as the main binary.
 
 ## ⚡ Architecture: The Dual-Path Execution Model
 
@@ -48,8 +80,6 @@ On modern kernels, background broadcast traffic (mDNS, ARP, SSDP) frequently wak
 
 ### Network Wakeup & Battery Impact Matrix
 
-The following table compares how various strategies handle a single broadcast packet (e.g., an mDNS query) arriving during sleep.
-
 | Method | Packet Handling | CPU State during Packet | Resume Latency | Battery Life Impact | 
  | ----- | ----- | ----- | ----- | ----- | 
 | **Default Linux** | Full OS Stack Processing | **C0 (Active)** | Instant | **High Drain**: CPU wakes fully to route packet. | 
@@ -67,15 +97,19 @@ The following table compares how various strategies handle a single broadcast pa
 
 ### 🛡️ Buggy Driver & RF Chip Safety
 
-A critical advantage of XDP Nullify over legacy methods is **Hardware Stability**.
-
 Embedded devices often ship with "crappy" SDIO WiFi chips (RTL8723DS, RTL8821CS, etc.) whose drivers are notoriously fragile.
 
-* **The Danger of `modprobe -r`:** Unloading a driver on these chips often leads to kernel panics, SDIO bus hangs, or "zombie" hardware states that require a hard power cycle to fix.
+* **The Danger of `modprobe -r`:** Unloading a driver on these chips often leads to kernel panics or SDIO bus hangs.
 
-* **The Failure of `rfkill`:** Many cheap RF chips have firmware that ignores soft-blocks or fails to re-initialize correctly upon unblock, leading to the dreaded "WiFi disappeared after sleep" bug.
+* **The XDP Solution:** XDP operates strictly on the **data plane**. It does not unload the driver or alter the firmware state. The driver remains stable, but the CPU simply ignores the incoming noise. This makes XDP Nullify the only power-saving method that is truly safe for unstable hardware.
 
-* **The XDP Solution:** XDP operates strictly on the **data plane**. It does not unload the driver, power down the bus, or alter the firmware state. The driver remains "hot" and stable, but the CPU simply ignores the incoming noise. This makes XDP Nullify the only power-saving method that is truly safe for unstable hardware.
+### 🔒 Security Context: The Logical Air-Gap
+
+While Nullify Mode is designed for power management, it serves a secondary role as a **Robust Security Feature**.
+
+By utilizing eBPF to implement a data-plane drop-all filter, RXNM provides a "Logical Air-Gap." When enabled, the network interface is effectively blind and deaf to the network at the driver level. Unlike a standard firewall (which still allows the OS to process packet headers), XDP Nullify prevents the protocol stack from even seeing the traffic. This acts as a network kill-switch that prevents unsolicited telemetry, remote access, or lateral movement attacks while the system in a low-power state, all without tearing down the authenticated WiFi link or losing IP state.
+
+---
 
 ## 🚀 Performance Benchmarks
 
@@ -107,6 +141,8 @@ This comparison highlights the "Background Overhead" of each stack. RXNM achieve
 | **Idle Wakeups / sec** | **< 2** (Netlink) | **\~12** (Polling) | **\~35+** (D-Bus/Plugins) | 
 
 *Note: Internal wakeups are software-initiated interrupts (timers/polls). A lower number allows the CPU to stay in deeper sleep states longer, even if the radio is silent.*
+
+---
 
 ## 📖 Command Reference
 
@@ -146,6 +182,8 @@ This comparison highlights the "Background Overhead" of each stack. RXNM achieve
 
 * **Exec:** `rxnm service exec my-isolated-ns "ping 8.8.8.8"`
 
+---
+
 ## 🏠 User Stories & Cookbooks
 
 ### Scenario: The Retro Handheld Gamer
@@ -166,25 +204,25 @@ This comparison highlights the "Background Overhead" of each stack. RXNM achieve
 
 2. **Result:** All incoming broadcast packets are dropped by XDP. The CPU remains in deep sleep. The link remains logically "UP," so TCP sessions (SSH) don't time out on resume.
 
+---
+
 ## 🔌 API & Integration
 
-### REST-Lite Gateway
+### REST-Lite Input
 
-RXNM supports a standardized JSON schema. Pass payloads to `stdin` for integration with GUIs (React/Qt) or web frontends.
-
-```
+```bash
 echo '{"category":"wifi", "action":"connect", "ssid":"MyNet", "password":"pass"}' | rxnm --stdin
-
 ```
 
 ### Capability Discovery
 
-Query feature status (Stable, Beta, Experimental) to adjust UI elements dynamically:
+Query feature status (Stable, Beta, Experimental):
 
-```
+```bash
 rxnm api capabilities
-
 ```
+
+---
 
 ## 📦 Deployment & Build Profiles
 
@@ -196,10 +234,9 @@ rxnm api capabilities
 
 ### Installation
 
-```
+```bash
 make tiny
 sudo make install
-
 ```
 
 **Installed Paths:**
