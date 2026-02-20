@@ -1,6 +1,6 @@
 # RXNM Nullify Architecture: Power & Stability Analysis
 
-**Context:** Analysis of the "Project Silence" (XDP Nullify) feature implemented in RXNM v1.5 (Stepping Stone to v2.0).
+**Context:** Analysis of the "Project Silence" (XDP Nullify) feature implemented in RXNM v1.1 
 **Status:** Implementation Specification for RXNM v1.1.
 **Kernel Baseline:** Linux 6.18+ (Mainline).
 **Target Hardware:**
