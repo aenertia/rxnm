@@ -237,8 +237,9 @@ _task_forget() {
         fi
     done
     
+    local json_safe_ssid; json_safe_ssid=$(json_escape "$ssid")
     if [ "$removed_count" -gt 0 ]; then reload_networkd; fi
-    json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
+    json_success '{"action": "forget", "ssid": "'"$json_safe_ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
 # --- P2P (WiFi Direct) Tasks ---
@@ -594,10 +595,12 @@ action_connect() {
         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
     fi
     
+    local safe_ssid; safe_ssid=$(json_escape "$ssid")
+    
     if [ -x "$RXNM_AGENT_BIN" ]; then
         if "$RXNM_AGENT_BIN" --connect "$ssid" --iface "$iface" >/dev/null; then
              audit_log "WIFI_CONNECT" "Connected to $ssid via Agent"
-             json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'", "method": "agent"}'
+             json_success '{"connected": true, "ssid": "'"$safe_ssid"'", "iface": "'"$iface"'", "method": "agent"}'
              return 0
         fi
         log_debug "Agent connect failed, falling back to iwctl..."
@@ -630,7 +633,7 @@ action_connect() {
         case "$conn_state" in
             connected)
                 audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
-                json_success '{"connected":true,"ssid":"'"$ssid"'","iface":"'"$iface"'"}'
+                json_success '{"connected":true,"ssid":"'"$safe_ssid"'","iface":"'"$iface"'"}'
                 return 0
                 ;;
             *"not found"*|*"no network"*)
@@ -669,8 +672,10 @@ action_host() {
     [ "$mode" = "ap" ] && use_share="true"
     [ -n "$share" ] && use_share="$share"
     
+    local safe_ssid; safe_ssid=$(json_escape "$ssid")
+    
     with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"
-    json_success '{"status": "host_started", "ssid": "'"$ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
+    json_success '{"status": "host_started", "ssid": "'"$safe_ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
     return 0
 }
 
@@ -701,8 +706,11 @@ action_p2p_scan() {
 action_p2p_connect() {
     local peer_name="$1"
     [ -z "$peer_name" ] && { json_error "Peer name required"; return 0; }
+    
+    local safe_peer; safe_peer=$(json_escape "$peer_name")
+    
     if with_iface_lock "global_wifi" _task_p2p_connect "$peer_name"; then
-        json_success '{"action": "p2p_connect", "peer": "'"$peer_name"'", "status": "negotiating"}'
+        json_success '{"action": "p2p_connect", "peer": "'"$safe_peer"'", "status": "negotiating"}'
     else
         json_error "Failed to initiate P2P connection"
     fi
