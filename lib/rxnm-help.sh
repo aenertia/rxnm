@@ -143,7 +143,7 @@ Examples:
   rxnm interface eth0 set static 192.168.1.50/24 --gateway 192.168.1.1 --dns 8.8.8.8
 
   # Power Management: Suspend hardware traffic on specific interface
-  rxnm interface wlan0 nullify enable --yes
+  rxnm interface wlan0 nullify enable
 
   # Get just the IP address (useful for scripts)
   rxnm interface eth0 show --get ip
@@ -302,7 +302,7 @@ Actions:
   check portal          Check for captive portal
   reload                Reload network configuration
   proxy set             Configure global/interface proxy
-  nullify enable        Suspend hardware network traffic via XDP (requires --yes)
+  nullify enable        Suspend hardware network traffic via XDP
   nullify disable       Resume hardware network traffic
   nullify status        Show current nullify XDP status
 
@@ -324,8 +324,8 @@ Examples:
   rxnm system proxy set
 
   # Power Management: Suspend all network traffic globally via XDP
-  # Nullify mode is available in RXNM 1.1.0+. Requires the rxnm-agent binary and --yes flag.
-  rxnm system nullify enable --yes
+  # Nullify mode is available in RXNM 1.1.0+. Requires the rxnm-agent binary.
+  rxnm system nullify enable
 
   # Power Management: Suspend traffic on a specific interface only
   rxnm system nullify enable --interface wlan0

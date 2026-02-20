@@ -48,6 +48,12 @@ get_iface_sysfs() {
     echo "$data"
 }
 
+clear_sysfs_cache() {
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        eval '_sysfs_cache=()'
+    fi
+}
+
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
     exec 8>&- 2>/dev/null   # Release global lock FD (RXNM_FD_GLOBAL_LOCK)
@@ -155,9 +161,7 @@ acquire_global_lock() {
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
 # NOTE: Uses FD 9 and explicit open/close to satisfy sensitive Dash/Ash parsers.
-# POSIX SAFETY: Uses FD 9 (RXNM_FD_IFACE_LOCK). NOT reentrant — do not
-# call with_iface_lock from within a with_iface_lock-protected function.
-# The one-action-per-dispatcher-invocation model prevents this in normal use.
+# POSIX SAFETY: Uses FD 9 (RXNM_FD_IFACE_LOCK). Re-entrancy guard added via _RXNM_ACTIVE_LOCK.
 with_iface_lock() {
     local _wi_iface="$1"
     shift
@@ -165,6 +169,12 @@ with_iface_lock() {
     local _wi_lock_file="${RUN_DIR}/${_wi_iface}.lock"
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
+    
+    # Check if we already hold this lock (e.g., nested calls within the SAME process)
+    if [ "${_RXNM_ACTIVE_LOCK:-}" = "$_wi_iface" ]; then
+        "$@"
+        return $?
+    fi
     
     # Standardize on FD 9 for interface-level locks
     exec 9>"$_wi_lock_file"
@@ -175,10 +185,15 @@ with_iface_lock() {
         return 1
     fi
     
+    local _prev_lock="${_RXNM_ACTIVE_LOCK:-}"
+    # L-5 Fix: Do NOT export. Keep re-entrancy guard localized to this shell process so it does not leak to spawned sub-commands.
+    _RXNM_ACTIVE_LOCK="$_wi_iface"
+    
     # Execute protected command
     "$@"
     local _wi_ret=$?
     
+    _RXNM_ACTIVE_LOCK="$_prev_lock"
     # Release and close
     exec 9>&-
     return $_wi_ret
@@ -243,6 +258,7 @@ rxnm_json_get() {
 rxnm_match() {
     local _str="$1"
     local _pat="$2"
+    local _grep_ret
 
     if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
         # Path A: Bash native ERE — no subprocess
@@ -255,12 +271,9 @@ rxnm_match() {
     # Try it first to avoid burning an agent invocation on pattern matching.
     if printf '%s' "$_str" | grep -qE "$_pat" 2>/dev/null; then
         return 0
-    fi
-    # grep returned non-zero — could be no-match or unsupported pattern.
-    # Check exit code: grep returns 1 for no-match, 2 for bad pattern.
-    local _grep_ret=$?
-    if [ "$_grep_ret" -eq 1 ]; then
-        return 1   # Clean no-match from grep — trust it
+    else
+        _grep_ret=$?
+        [ "$_grep_ret" -eq 1 ] && return 1   # Clean no-match from grep — trust it
     fi
 
     # grep returned 2 (bad pattern) or failed — fall back to agent regex
@@ -312,9 +325,10 @@ json_success() {
         if [ "$data" = "{}" ]; then
              full_json=$(printf '{"success": true, "api_version": "%s"}' "$api_ver")
         else
-             # Primitive merge: remove opening brace of data and append
+             # Primitive merge: safely trim braces before structure merge
              local body="${data#\{}"
-             full_json=$(printf '{"success": true, "api_version": "%s", %s' "$api_ver" "$body")
+             body="${body%\}}"
+             full_json=$(printf '{"success": true, "api_version": "%s", %s}' "$api_ver" "$body")
         fi
     fi
     
@@ -412,7 +426,7 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    echo "$1" | sed 's/\//_/g'
+    printf '%s' "$1" | sed 's/[^a-zA-Z0-9_.-]/_/g'
 }
 
 json_escape() {
@@ -476,7 +490,7 @@ secure_write() {
     [ -d "$dir" ] || mkdir -p "$dir"
     
     if [ -x "${RXNM_AGENT_BIN:-}" ]; then
-        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
+        if printf "%s" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
             return 0
         fi
     fi
@@ -484,7 +498,7 @@ secure_write() {
     local tmp
     tmp=$(umask 077 && mktemp "${dest}.XXXXXX") || return 1
     
-    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
+    printf "%s" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
     if [ "$perms" != "600" ]; then chmod "$perms" "$tmp"; fi
     sync
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
@@ -549,9 +563,20 @@ validate_vlan_id() {
 
 validate_ip() {
     local ip="$1"
-    if ! rxnm_match "$ip" '^[0-9a-fA-F:.]+(/[0-9]+)?$'; then
+    
+    # Structural check
+    if ! rxnm_match "$ip" '^[0-9a-fA-F:.]+(/[0-9]{1,3})?$'; then
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
+    fi
+    
+    local addr="${ip%/*}"
+    
+    # M-2 Fix: Semantic validation for IPv4 octet bounds
+    if case "$addr" in *:*) false;; *) true;; esac; then
+        if ! rxnm_match "$addr" '^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'; then
+            return 1
+        fi
     fi
     return 0
 }

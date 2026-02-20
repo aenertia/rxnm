@@ -69,14 +69,14 @@ ensure_bluetooth_power() {
 }
 
 action_bt_scan() {
-    local timeout_sec=10
+    local timeout_sec=5
     
     if ! ensure_bluetooth_power; then
         json_error "Bluetooth hardware not found or service unreachable" "1" "Ensure BlueZ is running and adapters are visible in D-Bus"
         return 0
     fi
 
-    log_info "Scanning for Bluetooth devices (${timeout_sec}s)..."
+    log_info "Scanning for Bluetooth devices (Event-driven, up to ${timeout_sec}s)..."
     
     # Start discovery in background via busctl (low latency)
     local adapters; adapters=$(_get_dbus_adapters)
@@ -84,7 +84,14 @@ action_bt_scan() {
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
     done
 
-    sleep "$timeout_sec"
+    # M-6 Fix: Event-driven early exit architecture.
+    # Allow 1.5s for initial discovery burst of cached/nearby devices.
+    sleep 1.5
+    
+    # Monitor DBus for *new* device additions. If a new device appears,
+    # `head -n 1` consumes the signal and exits, terminating the timeout early.
+    # This prevents the socket from blocking unnecessarily if devices are found quickly.
+    timeout 3.5s busctl monitor org.bluez --match "type='signal',interface='org.freedesktop.DBus.ObjectManager',member='InterfacesAdded'" | head -n 1 >/dev/null 2>&1 || true
 
     # Stop discovery
     for adapter in $adapters; do
@@ -125,8 +132,14 @@ action_bt_pair() {
     
     ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
 
-    # Map MAC to BlueZ object path
-    local path; path="/org/bluez/hci0/dev_$(echo "$mac" | tr ':' '_')"
+    # Dynamically resolve adapter path instead of hardcoding hci0
+    local adapters; adapters=$(_get_dbus_adapters)
+    local adapter; adapter=$(echo "$adapters" | head -n1)
+    [ -z "$adapter" ] && { json_error "No Bluetooth adapter found"; return 0; }
+    
+    # Extract hciX from object path
+    local hci_name; hci_name="${adapter##*/}"
+    local path; path="/org/bluez/${hci_name}/dev_$(echo "$mac" | tr ':' '_')"
     
     log_info "Attempting to pair with $mac..."
     if busctl call org.bluez "$path" org.bluez.Device1 Pair --timeout=30s >/dev/null 2>&1; then
@@ -146,9 +159,15 @@ action_bt_unpair() {
     local mac="$1"
     [ -z "$mac" ] && { json_error "MAC address required"; return 0; }
     
-    local path; path="/org/bluez/hci0/dev_$(echo "$mac" | tr ':' '_')"
+    # Dynamically resolve adapter path instead of hardcoding hci0
+    local adapters; adapters=$(_get_dbus_adapters)
+    local adapter; adapter=$(echo "$adapters" | head -n1)
+    [ -z "$adapter" ] && { json_error "No Bluetooth adapter found"; return 0; }
     
-    if busctl call org.bluez /org/bluez/hci0 org.bluez.Adapter1 RemoveDevice o "$path" >/dev/null 2>&1; then
+    local hci_name; hci_name="${adapter##*/}"
+    local path; path="/org/bluez/${hci_name}/dev_$(echo "$mac" | tr ':' '_')"
+    
+    if busctl call org.bluez "$adapter" org.bluez.Adapter1 RemoveDevice o "$path" >/dev/null 2>&1; then
         json_success '{"action": "unpair", "mac": "'"$mac"'", "status": "removed"}'
     else
         if bluetoothctl remove "$mac" >/dev/null 2>&1; then

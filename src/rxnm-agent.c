@@ -160,7 +160,7 @@ static int bpf(int cmd, union bpf_attr *attr, unsigned int size) {
 }
 
 // XDP Drop Program: r0 = 1 (XDP_DROP), exit
-struct bpf_insn xdp_drop_prog[] = {
+static const struct bpf_insn xdp_drop_prog[] = {
     { 0xb7, 0, 0, 0, 1 },
     { 0x95, 0, 0, 0, 0 },
 };
@@ -253,8 +253,16 @@ bool dyn_buf_append(dyn_buf_t *b, const void *data, size_t dlen) {
 }
 
 bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
+    /* M-8 Fix: Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
     uint32_t len = strlen(str);
-    if (!dyn_buf_append(b, &len, 4)) return false;
+    uint8_t len_bytes[4] = {
+        (uint8_t)(len & 0xFF),
+        (uint8_t)((len >> 8) & 0xFF),
+        (uint8_t)((len >> 16) & 0xFF),
+        (uint8_t)((len >> 24) & 0xFF)
+    };
+    
+    if (!dyn_buf_append(b, len_bytes, 4)) return false;
     if (!dyn_buf_append(b, str, len + 1)) return false;
     return true;
 }
@@ -302,7 +310,7 @@ bool file_contains(const char *path, const char *search_term) {
     char buffer[4096];
     bool found = false;
     while (fgets(buffer, sizeof(buffer), f)) {
-        if (strstr(buffer, search_term)) { found = true; break; }
+        if (strcasestr(buffer, search_term)) { found = true; break; }
     }
     fclose(f);
     return found;
@@ -1084,9 +1092,9 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
         if (tb[NL80211_ATTR_SSID]) {
             char *ssid_data = (char *)RTA_DATA(tb[NL80211_ATTR_SSID]);
             int ssid_len = RTA_PAYLOAD(tb[NL80211_ATTR_SSID]);
-            if (ssid_len > 32) ssid_len = 32;
-            memcpy(entry->ssid, ssid_data, ssid_len);
-            entry->ssid[ssid_len] = '\0';
+            int safe_ssid_len = (ssid_len >= (int)sizeof(entry->ssid)) ? (int)sizeof(entry->ssid) - 1 : ssid_len;
+            memcpy(entry->ssid, ssid_data, safe_ssid_len);
+            entry->ssid[safe_ssid_len] = '\0';
             entry->wifi_connected = true;
         }
         if (tb[NL80211_ATTR_WIPHY_FREQ]) entry->frequency = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY_FREQ]);
@@ -1489,14 +1497,22 @@ void cmd_tune(char *profile) {
 int load_xdp_drop_prog() {
     // Construct bpf_attr manually to avoid libbpf dependency
     union bpf_attr attr;
+    char log_buf[4096] = {0};
     memset(&attr, 0, sizeof(attr));
     attr.prog_type = BPF_PROG_TYPE_XDP;
     attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
-    attr.insns = (unsigned long)xdp_drop_prog;
-    attr.license = (unsigned long)"GPL";
+    /* C-2 Fix: Use uintptr_t to prevent truncation on 32-bit architectures */
+    attr.insns = (__aligned_u64)(uintptr_t)xdp_drop_prog;
+    attr.license = (__aligned_u64)(uintptr_t)"GPL";
+    attr.log_buf = (__aligned_u64)(uintptr_t)log_buf;
+    attr.log_size = sizeof(log_buf);
+    attr.log_level = 1;
     
-    // Call syscall directly
-    return bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+    int fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+    if (fd < 0) {
+        fprintf(stderr, "BPF_PROG_LOAD failed: %s\nVerifier log:\n%s\n", strerror(errno), log_buf);
+    }
+    return fd;
 }
 
 int attach_xdp_prog(int ifindex, int fd, int flags) {
@@ -1506,7 +1522,7 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     struct {
         struct nlmsghdr n;
         struct ifinfomsg i;
-        char buf[256];
+        char buf[1024];
     } req;
     
     memset(&req, 0, sizeof(req));
@@ -1537,6 +1553,11 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
         flags_attr->rta_len = RTA_LENGTH(sizeof(int));
         memcpy(RTA_DATA(flags_attr), &flags, sizeof(int));
         xdp_len += RTA_ALIGN(flags_attr->rta_len);
+    }
+    
+    if (RTA_ALIGN(xdp_len) > sizeof(req.buf)) {
+        close(sock);
+        return -1;
     }
     
     xdp_attr->rta_len = xdp_len;
@@ -1737,34 +1758,30 @@ int cmd_append_config(char *path, char *line) {
         return 1;
     }
     
-    size_t cap = 8192;
-    size_t len = 0;
-    char *file_buf = malloc(cap);
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("fstat");
+        close(fd);
+        return 1;
+    }
+    
+    size_t file_size = st.st_size;
+    char *file_buf = malloc(file_size + 1);
     if (!file_buf) {
         fprintf(stderr, "OOM allocating append buffer\n");
         close(fd);
         return 1;
     }
     
-    ssize_t read_len = 0;
-    bool found = false;
-    
-    while ((read_len = read(fd, file_buf + len, cap - len - 1)) > 0) {
-        len += read_len;
-        if (len >= cap - 1) {
-            cap *= 2;
-            char *new_buf = realloc(file_buf, cap);
-            if (!new_buf) {
-                fprintf(stderr, "OOM expanding append buffer\n");
-                free(file_buf);
-                close(fd);
-                return 1;
-            }
-            file_buf = new_buf;
-        }
+    ssize_t total_read = 0;
+    while (total_read < (ssize_t)file_size) {
+        ssize_t read_len = read(fd, file_buf + total_read, file_size - total_read);
+        if (read_len <= 0) break;
+        total_read += read_len;
     }
-    file_buf[len] = '\0';
+    file_buf[total_read] = '\0';
     
+    bool found = false;
     if (strstr(file_buf, line)) {
         found = true;
     }
@@ -1804,8 +1821,6 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     (void)threshold_str;
     int sock = open_netlink_rt();
     if (sock < 0) exit(1);
-    
-    trigger_roaming_event(iface);
     
     while (1) {
         char buf[4096];
@@ -1873,16 +1888,31 @@ int cmd_ns_create(const char *name) {
     }
     close(fd);
     
-    /* Unshare network namespace */
-    if (unshare(CLONE_NEWNET) < 0) {
-        perror("unshare");
+    /* Unshare network namespace in child to protect parent process state */
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
         unlink(path);
         return 1;
     }
     
-    /* Bind mount new namespace to file */
-    if (mount("/proc/self/ns/net", path, "none", MS_BIND, NULL) < 0) {
-        perror("mount");
+    if (pid == 0) {
+        if (unshare(CLONE_NEWNET) < 0) {
+            perror("unshare");
+            exit(1);
+        }
+        
+        /* Bind mount new namespace to file */
+        if (mount("/proc/self/ns/net", path, "none", MS_BIND, NULL) < 0) {
+            perror("mount");
+            exit(1);
+        }
+        exit(0);
+    }
+    
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         unlink(path);
         return 1;
     }

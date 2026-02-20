@@ -84,12 +84,6 @@ action_system_nullify() {
     fi
     
     if [ "$cmd" = "enable" ]; then
-        if [ "$FORCE_ACTION" != "true" ]; then
-            echo "!!! DANGER: NULLIFY MODE WILL SILENCE NETWORK TRAFFIC !!!" >&2
-            echo "Confirm with --yes" >&2
-            exit 1
-        fi
-        
         if [ -n "$specific_iface" ]; then
             log_info "Nullifying specific interface: $specific_iface (XDP Drop)"
             if [ -x "$RXNM_AGENT_BIN" ]; then

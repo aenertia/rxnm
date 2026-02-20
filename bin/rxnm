@@ -82,11 +82,16 @@ expand_alias() {
 
     [ -z "$input" ] && return 0
 
+    # First pass: Exact match
     for opt do
         if [ "$opt" = "$input" ]; then
             printf '%s\n' "$opt"
             return 0
         fi
+    done
+    
+    # Second pass: Prefix match
+    for opt do
         case "$opt" in
             "${input}"*)
                 if [ -n "$match" ]; then

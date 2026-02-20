@@ -51,7 +51,7 @@ echo "--- Comparing Results ---"
 ifaces_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r '.interfaces | keys | sort | .[]')
 ifaces_agent=$(echo "$json_agent" | "$JQ_BIN" -r '.interfaces | keys | sort | .[]')
 
-if [ "$ifaces_legacy" == "$ifaces_agent" ]; then
+if [ "$ifaces_legacy" = "$ifaces_agent" ]; then
     log_pass "Interface list matches exactly"
 else
     log_fail "Interface mismatch!"
@@ -68,19 +68,22 @@ for iface in $ifaces_agent; do
     ip_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r "(.interfaces[\"$iface\"].ip | if type==\"array\" then join(\".\") else . end) // empty")
     ip_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ip // empty")
     
-    if [ -n "$ip_legacy" ] && [[ "$ip_agent" == "$ip_legacy"* ]]; then
-        log_pass "IP Match: $ip_legacy"
-    elif [ -z "$ip_legacy" ] && [ -z "$ip_agent" ]; then
-        log_pass "IP Match: (Both empty)"
-    else
-        log_warn "IP Divergence: Legacy='$ip_legacy', Agent='$ip_agent'"
-    fi
+    case "$ip_agent" in
+        "${ip_legacy}"*) log_pass "IP Match: $ip_legacy" ;;
+        *)
+            if [ -z "$ip_legacy" ] && [ -z "$ip_agent" ]; then
+                log_pass "IP Match: (Both empty)"
+            else
+                log_warn "IP Divergence: Legacy='$ip_legacy', Agent='$ip_agent'"
+            fi
+            ;;
+    esac
 
     # 2. Gateway
     gw_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].gateway // empty")
     gw_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].gateway // empty")
     
-    if [ "$gw_legacy" == "$gw_agent" ]; then
+    if [ "$gw_legacy" = "$gw_agent" ]; then
         log_pass "Gateway Match: ${gw_agent:-none}"
     else
         log_fail "Gateway Mismatch: Legacy='$gw_legacy', Agent='$gw_agent'"
@@ -89,23 +92,23 @@ for iface in $ifaces_agent; do
     # 3. MAC Address (Normalized to lowercase)
     raw_mac_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].mac // empty")
     
-    # FIX: Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) seen on Ubuntu 24.04 safely via JQ streaming
-    if [[ "$raw_mac_legacy" == \[* ]]; then
-        mac_legacy=""
-        # Safely extract elements using jq to stream them line by line
-        while IFS= read -r num; do
-            printf -v hex "%02x" "$num"
-            if [ -z "$mac_legacy" ]; then mac_legacy="$hex"; else mac_legacy="${mac_legacy}:${hex}"; fi
-        done < <(echo "$raw_mac_legacy" | "$JQ_BIN" -r '.[]')
-    else
-        mac_legacy="$raw_mac_legacy"
-    fi
+    # FIX: Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) safely
+    case "$raw_mac_legacy" in
+        \[*)
+            mac_legacy=$(echo "$raw_mac_legacy" | "$JQ_BIN" -r '.[]' | while IFS= read -r num; do
+                printf "%02x" "$num"
+            done | sed 's/\(..\)/\1:/g' | sed 's/:$//')
+            ;;
+        *)
+            mac_legacy="$raw_mac_legacy"
+            ;;
+    esac
     
     mac_legacy=$(echo "$mac_legacy" | tr '[:upper:]' '[:lower:]')
     mac_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].mac // empty" | tr '[:upper:]' '[:lower:]')
     
     # FIX: Treat empty string and zero-mac as equivalent for loopback or uninitialized virtuals
-    if [ "$mac_legacy" == "$mac_agent" ] || { [ "$iface" == "lo" ] && { [ -z "$mac_legacy" ] || [ "$mac_legacy" == "00:00:00:00:00:00" ]; }; }; then
+    if [ "$mac_legacy" = "$mac_agent" ] || { [ "$iface" = "lo" ] && { [ -z "$mac_legacy" ] || [ "$mac_legacy" = "00:00:00:00:00:00" ]; }; }; then
         log_pass "MAC Match: ${mac_agent:-none}"
     else
         log_fail "MAC Mismatch: Legacy='$raw_mac_legacy', Agent='$mac_agent'"
@@ -126,10 +129,10 @@ for iface in $ifaces_agent; do
     type_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].type // \"unknown\"")
     
     # Normalization: Map 'none' (legacy networkctl quirk) to 'unknown' (schema standard)
-    [ "$type_legacy" == "none" ] && type_legacy="unknown"
-    [ "$type_agent" == "none" ] && type_agent="unknown"
+    [ "$type_legacy" = "none" ] && type_legacy="unknown"
+    [ "$type_agent" = "none" ] && type_agent="unknown"
 
-    if [ "$type_legacy" == "$type_agent" ]; then
+    if [ "$type_legacy" = "$type_agent" ]; then
         log_pass "Type Match: $type_agent"
     else
         log_warn "Type Divergence: Legacy='$type_legacy', Agent='$type_agent'"
@@ -139,7 +142,7 @@ for iface in $ifaces_agent; do
     routes_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].routes[]? | \"\(.dst)@\(.gw // \"none\")\"" | sort | tr '\n' ',' | sed 's/,$//')
     routes_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].routes[]? | \"\(.dst)@\(.gw // \"none\")\"" | sort | tr '\n' ',' | sed 's/,$//')
     
-    if [ "$routes_legacy" == "$routes_agent" ]; then
+    if [ "$routes_legacy" = "$routes_agent" ]; then
         log_pass "Routes Match"
     else
         log_warn "Route Divergence:"
@@ -151,19 +154,21 @@ for iface in $ifaces_agent; do
     ipv6_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ipv6[]?" | sort | tr '\n' ',' | sed 's/,$//')
     ipv6_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ipv6[]?" | sort | tr '\n' ',' | sed 's/,$//')
     
-    # FIX: Detect if Legacy output corrupted by array-to-string conversion (garbage output with commas)
-    # The symptom `0,, 0,,` occurs when jq outputs arrays on newlines and we translate newlines to commas blindly.
-    if [[ "$ipv6_legacy" == *",,"* ]]; then
-        log_info "Legacy IPv6 output format is raw array (incompatible with simple diff). Skipping comparison to avoid false positive."
-    elif [ "$ipv6_legacy" == "$ipv6_agent" ]; then
-        if [ -n "$ipv6_agent" ]; then
-            log_pass "IPv6 Match: Found addresses"
-        else
-            log_pass "IPv6 Match: (None)"
-        fi
-    else
-        log_warn "IPv6 Divergence: Legacy='$ipv6_legacy', Agent='$ipv6_agent'"
-    fi
+    # FIX: Detect if Legacy output corrupted by array-to-string conversion
+    case "$ipv6_legacy" in
+        *",,"*) log_info "Legacy IPv6 output format is raw array (incompatible with simple diff). Skipping comparison." ;;
+        *)
+            if [ "$ipv6_legacy" = "$ipv6_agent" ]; then
+                if [ -n "$ipv6_agent" ]; then
+                    log_pass "IPv6 Match: Found addresses"
+                else
+                    log_pass "IPv6 Match: (None)"
+                fi
+            else
+                log_warn "IPv6 Divergence: Legacy='$ipv6_legacy', Agent='$ipv6_agent'"
+            fi
+            ;;
+    esac
 
     # 8. WiFi Metadata (If applicable)
     is_wifi_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].wifi // \"null\"")

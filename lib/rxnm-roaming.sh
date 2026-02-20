@@ -109,6 +109,8 @@ evaluate_roaming_state() {
     local iface="$1"
     local is_oneshot="${2:-false}"
     
+    if type clear_sysfs_cache >/dev/null 2>&1; then clear_sysfs_cache; fi
+    
     local rssi="" ssid="" freq="" gateway="" bssid=""
     
     # 1. Fetch Core Context (Hybrid Fastpath)
