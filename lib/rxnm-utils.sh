@@ -449,9 +449,13 @@ sanitize_ssid() {
 
 json_escape() {
     local s="$1"
-    # Use printf to prevent shell echo built-ins from interpreting backslashes
-    printf '%s' "$s" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g; s/
-/\\n/g'
+    # 1. Append newline for POSIX sed safety to prevent dropping string on strict BSD/GNU seds.
+    # 2. Replace all newlines with spaces to ensure single-line JSON format.
+    # 3. Escape backslashes, double quotes, and literal tabs.
+    local escaped
+    escaped=$(printf '%s\n' "$s" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+    # 4. Strip the trailing space that was converted from the appended newline.
+    printf '%s' "${escaped% }"
 }
 
 get_proxy_json() {
