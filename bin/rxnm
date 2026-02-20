@@ -18,6 +18,15 @@
 set -eu
 # IFS: POSIX-compatible ANSI escape via printf
 IFS="$(printf '\n\t')"
+# --- SHELL UPGRADE (RE-EXEC) ---
+# If executed via /bin/sh (Dash/Ash) but Bash is available on the system,
+# upgrade the shell to unlock performance optimizations (arrays, native regex).
+if [ -z "${BASH_VERSION:-}" ] && [ -z "${RXNM_NO_REEXEC:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        export RXNM_NO_REEXEC=1
+        exec bash "$0" "$@"
+    fi
+fi
 
 # --- BOOTSTRAP ---
 _rxnm_resolve_dir() {
