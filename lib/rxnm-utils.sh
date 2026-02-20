@@ -75,6 +75,7 @@ cleanup() {
         for pid_fd_dir in /proc/[0-9]*/fd; do
             local proc_pid="${pid_fd_dir%/fd}"; proc_pid="${proc_pid##*/}"
             [ "$proc_pid" = "$$" ] && continue
+            # shellcheck disable=SC2010
             ls -la "$pid_fd_dir" 2>/dev/null | grep -qF "$lock" && { held="true"; break; }
         done
         [ "$held" = "false" ] && rm -f "$lock" 2>/dev/null
