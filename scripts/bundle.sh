@@ -4,7 +4,7 @@
 
 # -----------------------------------------------------------------------------
 # FILE: scripts/bundle.sh
-# PURPOSE: Amalgamates RXNM into a single flat file for ROCKNIX deployment.
+# PURPOSE: Amalgamates RXNM into a single flat file for deployments.
 # -----------------------------------------------------------------------------
 
 # Enforce strict error handling
@@ -115,11 +115,9 @@ STUB
     # CRITICAL FIX 2: Strip environment validation from rxnm-api.sh when bundling.
     # The API helper is designed for external scripts to find the RXNM environment.
     # Inside a bundle, that environment is already loaded in the shell process.
+    # We use sed to strip all code prior to actual module loading to avoid range-deletion nesting bugs.
     if [ "$mod_path" = "rxnm-api.sh" ]; then
-        # Use sed to remove the path derivation and the "libraries not found" check
-        # This makes the bundle truly standalone and prevents exit-on-missing-dir.
-        sed -e '/if \[ -z "\${RXNM_LIB_DIR:-}" \]; then/,/fi/d' \
-            -e '/if \[ ! -d "\$RXNM_LIB_DIR" \]; then/,/fi/d' "$file_path" | \
+        sed -n '/# Load Core Modules/,$p' "$file_path" | \
             grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" >> "$TMP_TARGET" || true
         continue
     fi
