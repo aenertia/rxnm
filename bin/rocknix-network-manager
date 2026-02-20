@@ -404,7 +404,9 @@ case "$CATEGORY" in
                 json_success "{\"version\": \"${RXNM_VERSION}\", \"api\": \"${RXNM_API_VERSION:-1.0}\"}"
                 ;;
             capabilities)
-                netd_ver=$(networkctl --version 2>/dev/null | grep -oP 'systemd \K\d+' || echo 0)
+                netd_ver=$(networkctl --version 2>/dev/null | awk '/^systemd / {print $2; exit}' || echo 0)
+                [ -z "$netd_ver" ] && netd_ver=0
+                
                 agent_active="false"
                 if [ -x "${RXNM_AGENT_BIN}" ]; then agent_active="true"; fi
                 

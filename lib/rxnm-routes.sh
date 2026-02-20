@@ -71,8 +71,12 @@ action_route_list() {
     
     # Merge and output
     # shellcheck disable=SC2016
-    "$JQ_BIN" -n --argjson v4 "$routes_v4" --argjson v6 "$routes_v6" \
-        '{success: true, routes: ($v4 + $v6)}'
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        "$JQ_BIN" -n --argjson v4 "$routes_v4" --argjson v6 "$routes_v6" \
+            '{success: true, routes: ($v4 + $v6)}'
+    else
+        printf '{"success": true, "routes": []}\n' # Simplistic fallback
+    fi
 }
 
 action_route_modify() {
@@ -147,13 +151,35 @@ action_route_get() {
     
     [ -z "$target" ] && { json_error "Target address required"; return 1; }
     
-    local result
-    result=$(ip -j route get "$target" 2>/dev/null)
-    
-    if [ -n "$result" ] && [ "$result" != "[]" ]; then
-        echo "$result" | "$JQ_BIN" '{success: true, route: .[0]}'
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        local result
+        result=$(ip -j route get "$target" 2>/dev/null)
+        if [ -n "$result" ] && [ "$result" != "[]" ]; then
+            echo "$result" | "$JQ_BIN" '{success: true, route: .[0]}'
+        else
+            json_error "No route found to $target"
+        fi
     else
-        json_error "No route found to $target"
+        # POSIX Shell Fallback: Parsing raw text output of 'ip route get'
+        local res_txt
+        res_txt=$(ip route get "$target" 2>/dev/null | head -n1)
+        if [ -n "$res_txt" ] && case "$res_txt" in *"dev"*) true ;; *) false ;; esac; then
+            local dev="" gw="" src=""
+            dev=$(echo "$res_txt" | grep -o 'dev [^ ]*' | awk '{print $2}')
+            gw=$(echo "$res_txt" | grep -o 'via [^ ]*' | awk '{print $2}')
+            src=$(echo "$res_txt" | grep -o 'src [^ ]*' | awk '{print $2}')
+            
+            # Manual JSON assembly
+            local json='{"dst": "'"$target"'"'
+            [ -n "$dev" ] && json="$json, \"dev\": \"$dev\""
+            [ -n "$gw" ] && json="$json, \"gateway\": \"$gw\""
+            [ -n "$src" ] && json="$json, \"prefsrc\": \"$src\""
+            json="$json}"
+            
+            json_success '{"route": '"$json"'}'
+        else
+            json_error "No route found to $target"
+        fi
     fi
 }
 

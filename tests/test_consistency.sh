@@ -89,14 +89,14 @@ for iface in $ifaces_agent; do
     # 3. MAC Address (Normalized to lowercase)
     raw_mac_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].mac // empty")
     
-    # FIX: Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) seen on Ubuntu 24.04
+    # FIX: Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) seen on Ubuntu 24.04 safely via JQ streaming
     if [[ "$raw_mac_legacy" == \[* ]]; then
-        # Parse integers and convert to hex string
         mac_legacy=""
-        for num in $(echo "$raw_mac_legacy" | tr -d '[],'); do
+        # Safely extract elements using jq to stream them line by line
+        while IFS= read -r num; do
             printf -v hex "%02x" "$num"
             if [ -z "$mac_legacy" ]; then mac_legacy="$hex"; else mac_legacy="${mac_legacy}:${hex}"; fi
-        done
+        done < <(echo "$raw_mac_legacy" | "$JQ_BIN" -r '.[]')
     else
         mac_legacy="$raw_mac_legacy"
     fi
