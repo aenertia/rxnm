@@ -7,21 +7,40 @@
 # PURPOSE: Amalgamates RXNM into a single flat file for ROCKNIX deployment.
 # -----------------------------------------------------------------------------
 
-set -e
+# Enforce strict error handling
+set -euo pipefail
 
 TARGET="build/rxnm"
+TMP_TARGET="${TARGET}.tmp"
+SRC_BIN="bin/rxnm"
+SRC_LIB="lib"
+
+# --- PRE-FLIGHT CHECKS ---
+if [ ! -f "$SRC_BIN" ]; then
+    echo "ERROR: Dispatcher script not found at $SRC_BIN. Run from repository root." >&2
+    exit 1
+fi
+
+if [ ! -d "$SRC_LIB" ]; then
+    echo "ERROR: Library directory not found at $SRC_LIB. Run from repository root." >&2
+    exit 1
+fi
+
 mkdir -p build
+rm -f "$TMP_TARGET"
 
-echo "==> Building ROCKNIX Minimal Bundle at $TARGET..."
+echo "==> Building ROCKNIX Minimal Bundle..."
 
-echo "#!/bin/sh" > "$TARGET"
-echo "# SPDX-License-Identifier: GPL-2.0-or-later" >> "$TARGET"
-echo "# Auto-generated bundled RXNM - ROCKNIX Minimal Edition" >> "$TARGET"
-echo "" >> "$TARGET"
+# --- 1. WRITE HEADER ---
+cat << 'EOF' > "$TMP_TARGET"
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Auto-generated bundled RXNM - ROCKNIX Minimal Edition
 
 # Provide safe fallbacks for paths that still reference it (like plugins or schema)
-echo "export LIB_DIR=\"/usr/lib/rocknix-network-manager/lib\"" >> "$TARGET"
-echo "export RXNM_LIB_DIR=\"\${LIB_DIR}\"" >> "$TARGET"
+export LIB_DIR="/usr/lib/rocknix-network-manager/lib"
+export RXNM_LIB_DIR="${LIB_DIR}"
+EOF
 
 # List of allowed modules in exact dependency order (Strictly retro-gaming focused + VPN + Plugins)
 MODULES="
@@ -42,28 +61,41 @@ rxnm-vpn.sh
 rxnm-bluetooth.sh
 "
 
+# --- 2. APPEND MODULES ---
 for mod in $MODULES; do
     mod_path=$(echo "$mod" | tr -d ' \t\n')
     [ -z "$mod_path" ] && continue
     
-    echo "" >> "$TARGET"
-    echo "# --- MODULE: $mod_path ---" >> "$TARGET"
+    file_path="$SRC_LIB/$mod_path"
+    if [ ! -f "$file_path" ]; then
+        echo "ERROR: Required module missing: $file_path" >&2
+        rm -f "$TMP_TARGET"
+        exit 1
+    fi
+    
+    echo -e "\n# --- MODULE: $mod_path ---" >> "$TMP_TARGET"
     
     # Strip unnecessary headers to save space and reduce parse time
-    grep -v "^# SPDX-License-Identifier" "lib/$mod_path" | \
-    grep -v "^# Copyright" | \
-    grep -v "^#!/bin/sh" | \
-    grep -v "^# shellcheck" >> "$TARGET"
+    # '|| true' prevents pipefail from tripping if a file has no matching lines (unlikely, but safe)
+    grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" "$file_path" | \
+    grep -v "^#!/bin/sh" >> "$TMP_TARGET" || true
 done
 
-echo "" >> "$TARGET"
-echo "# --- MAIN DISPATCHER ---" >> "$TARGET"
+# --- 3. APPEND MAIN DISPATCHER ---
+echo -e "\n# --- MAIN DISPATCHER ---" >> "$TMP_TARGET"
 
 # Strip the file-based bootstrapping logic from the main dispatcher
 # and append the remaining code, patching out enterprise categories.
-# FIXED: Use bin/rxnm instead of bin/rocknix-network-manager
-sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' bin/rxnm | \
-awk '
+DISPATCHER_CONTENT=$(sed -n '/# --- GLOBAL VARIABLES & DEFAULTS ---/,$p' "$SRC_BIN")
+
+if [ -z "$DISPATCHER_CONTENT" ]; then
+    echo "ERROR: Failed to extract dispatcher logic from $SRC_BIN." >&2
+    echo "       Did the '# --- GLOBAL VARIABLES & DEFAULTS ---' anchor comment change?" >&2
+    rm -f "$TMP_TARGET"
+    exit 1
+fi
+
+echo "$DISPATCHER_CONTENT" | awk '
 /^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { next } # Skip dynamic sourcing (functions are now inline)
 /^CATS=/ {
     # Constrain available CLI commands to the Retro Core
@@ -71,7 +103,10 @@ awk '
     next
 }
 { print }
-' >> "$TARGET"
+' >> "$TMP_TARGET"
 
-chmod +x "$TARGET"
-echo "==> Done. Artifact size: $(du -h "$TARGET" | cut -f1)"
+# --- 4. FINALIZE (ATOMIC SWAP) ---
+chmod +x "$TMP_TARGET"
+mv "$TMP_TARGET" "$TARGET"
+
+echo "==> Done. Artifact size: $(du -h "$TARGET" | cut -f1) ($TARGET)"
