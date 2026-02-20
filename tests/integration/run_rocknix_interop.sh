@@ -103,13 +103,26 @@ fi
 if [ ! -d "$ROOTFS" ]; then
     mkdir -p "$ROOTFS"
     
-    if command -v dnf >/dev/null 2>&1; then
-        # FIXED: Added docker fallback back in for Ubuntu CI runners
+    # Robust bootstrap tool detection
+    BOOTSTRAP_TOOL=""
+    if command -v dnf >/dev/null 2>&1; then BOOTSTRAP_TOOL="dnf";
+    elif command -v docker >/dev/null 2>&1; then BOOTSTRAP_TOOL="docker";
+    elif [ -x /usr/bin/dnf ]; then BOOTSTRAP_TOOL="/usr/bin/dnf";
+    elif [ -x /usr/bin/docker ]; then BOOTSTRAP_TOOL="/usr/bin/docker";
+    fi
+
+    if [ "$BOOTSTRAP_TOOL" = "dnf" ] || [ "$BOOTSTRAP_TOOL" = "/usr/bin/dnf" ]; then
+        "$BOOTSTRAP_TOOL" -y --installroot="$ROOTFS" --releasever=43 install \
+            systemd systemd-networkd systemd-resolved iwd dbus-daemon \
+            iproute iputils procps-ng NetworkManager firewalld \
+            ethtool tcpdump hostname bash jq sed coreutils \
+            --setopt=install_weak_deps=False
+    elif [ "$BOOTSTRAP_TOOL" = "docker" ] || [ "$BOOTSTRAP_TOOL" = "/usr/bin/docker" ]; then
         info "Using Docker to bootstrap Fedora rootfs..."
-        docker build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
-        CID=$(docker create rxnm-test-base)
-        docker export "$CID" | tar -x -C "$ROOTFS"
-        docker rm "$CID"
+        "$BOOTSTRAP_TOOL" build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
+        CID=$("$BOOTSTRAP_TOOL" create rxnm-test-base)
+        "$BOOTSTRAP_TOOL" export "$CID" | tar -x -C "$ROOTFS"
+        "$BOOTSTRAP_TOOL" rm "$CID"
         cp /etc/resolv.conf "$ROOTFS/etc/"
     else
         err "DNF or Docker required for host bootstrap."

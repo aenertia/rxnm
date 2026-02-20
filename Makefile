@@ -153,7 +153,7 @@ rocknix-release: tiny
 	@bash scripts/bundle.sh
 	@cp -f $(TARGET) build/rxnm-agent
 	@echo "[ROCKNIX] Running Bundle Fuzzer..."
-	@bash tests/test_bundle_fuzz.sh
+	@BUNDLE_BIN=build/rxnm bash tests/test_bundle_fuzz.sh
 	@echo "[ROCKNIX] Deployment artifacts ready in build/"
 	@echo "    - build/rxnm       (Single Script)"
 	@echo "    - build/rxnm-agent (Tiny C Agent)"
