@@ -81,7 +81,12 @@ cleanup() {
     
     ip link delete $BRIDGE 2>/dev/null || true
     rm -f /tmp/rxnm_success
-    rm -f "$PCAP_FILE" 2>/dev/null
+    
+    if [ $EXIT_CODE -eq 0 ]; then
+        rm -f "$PCAP_FILE" 2>/dev/null
+    else
+        info "Test failed: PCAP retained at $PCAP_FILE for forensics."
+    fi
 }
 trap cleanup EXIT
 
@@ -104,6 +109,14 @@ if command -v tcpdump >/dev/null; then
 fi
 
 info "Building Test RootFS..."
+HASH=$(md5sum tests/integration/Containerfile 2>/dev/null | cut -d ' ' -f 1 || echo "nohash")
+if [ -d "$ROOTFS" ]; then
+    if [ ! -f "$ROOTFS/.rxnm_hash" ] || [ "$(cat "$ROOTFS/.rxnm_hash" 2>/dev/null)" != "$HASH" ]; then
+        info "RootFS cache invalid or stale. Rebuilding..."
+        rm -rf "$ROOTFS"
+    fi
+fi
+
 if [ ! -d "$ROOTFS" ]; then
     mkdir -p "$ROOTFS"
     
@@ -151,6 +164,8 @@ MOCK
     
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
+    
+    echo "$HASH" > "$ROOTFS/.rxnm_hash"
 fi
 
 info "Installing RXNM into RootFS..."

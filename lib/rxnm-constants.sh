@@ -87,7 +87,7 @@ else
     fi
     # Cache the result to avoid repeated greps
     if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
-         echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || true
+         echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || log_debug "Failed to write low-power cache to $_LP_CACHE"
     fi
 fi
 
@@ -157,7 +157,8 @@ NULLIFY_STATE_FILE="${RUN_DIR}/nullify.state"
 if command -v jaq >/dev/null; then
     # Ensure jaq supports --argjson (some older versions do not)
     if jaq --help 2>&1 | grep -q "\--argjson"; then export JQ_BIN="jaq"; else export JQ_BIN="jq"; fi
-elif command -v gojq >/dev/null; then export JQ_BIN="gojq";
+elif command -v gojq >/dev/null; then
+    if gojq --help 2>&1 | grep -q "\--argjson"; then export JQ_BIN="gojq"; else export JQ_BIN="jq"; fi
 else export JQ_BIN="jq"; fi
 
 # --- Shell Capability Flags ---
