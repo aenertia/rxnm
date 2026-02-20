@@ -149,6 +149,8 @@ verify:
 rocknix-release: tiny
 	@echo "[ROCKNIX] Building Minimal Bundle..."
 	@bash scripts/bundle.sh
+	@echo "[ROCKNIX] Running Bundle Fuzzer..."
+	@bash tests/test_bundle_fuzz.sh
 	@echo "[ROCKNIX] Deployment artifacts ready in build/"
 	@cp $(TARGET) build/rxnm-agent
 	@echo "    - build/rxnm       (Single Script)"

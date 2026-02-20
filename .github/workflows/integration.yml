@@ -19,8 +19,8 @@ jobs:
       run: |
         sudo apt-get update
         # Install systemd-container for machinectl/nspawn and bridge-utils for networking
-        # Added shellcheck for static analysis
-        sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck
+        # Added shellcheck for static analysis and valgrind for leak checks
+        sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck valgrind
         
         # --- CI HARDENING FIXES ---
         # 1. Disable AppArmor: It blocks nspawn mounts in nested environments
@@ -67,7 +67,7 @@ jobs:
             FAIL=1
           fi
         done
-        for f in bin/rocknix-network-manager bin/rxnm; do
+        for f in bin/rxnm; do
           [ -f "$f" ] || continue
           if ! dash -n "$f"; then
             echo "POSIX FAIL [dash -n]: $f"
