@@ -96,12 +96,6 @@ if [ ! -d "$ROOTFS" ]; then
     mkdir -p "$ROOTFS"
     
     if command -v dnf >/dev/null 2>&1; then
-        dnf -y --installroot="$ROOTFS" --releasever=43 install \
-            systemd systemd-networkd systemd-resolved iwd dbus-daemon \
-            iproute iputils procps-ng NetworkManager firewalld \
-            ethtool tcpdump hostname bash jq sed coreutils \
-            --setopt=install_weak_deps=False
-    elif command -v docker >/dev/null 2>&1; then
         # FIXED: Added docker fallback back in for Ubuntu CI runners
         info "Using Docker to bootstrap Fedora rootfs..."
         docker build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
@@ -141,6 +135,7 @@ fi
 info "Installing Bundle into RootFS..."
 # Crucial Difference: We only install the single bundled file and the agent
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
+mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/lib" # Fix: Satisfy rxnm-api directory checks in full bundle
 mkdir -p "$ROOTFS/usr/bin"
 cp -f "$BUNDLE_BIN" "$ROOTFS/usr/bin/rxnm"
 cp -f build/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
@@ -189,7 +184,7 @@ if [[ "$BUNDLE_BIN" == *"rxnm-full"* ]]; then
     fi
 else
     if echo "$PRUNE_TEST" | grep -q "Unknown command"; then
-        info "✓ Verified 'service' module is correctly stripped from minimal bundle."
+        info "✓ Verified 'service' module is correctly stripped from bundle."
     else
         err "Pruning test failed. Output: $PRUNE_TEST"
         exit 1
