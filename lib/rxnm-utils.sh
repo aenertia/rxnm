@@ -286,7 +286,7 @@ cli_error() {
 audit_log() {
     local event="$1"
     local details="$2"
-    logger -t rocknix-network-audit -p auth.notice "$event: $details"
+    logger -t rxnm-audit -p auth.notice "$event: $details"
 }
 
 # --- Output Formatting (JSON/Table) ---

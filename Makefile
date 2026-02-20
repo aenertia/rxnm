@@ -43,7 +43,7 @@ SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check lint dirs constants tiny test-all install verify
+.PHONY: all clean check lint dirs constants tiny test-all install verify rocknix-release
 
 all: dirs constants $(TARGET)
 
@@ -91,7 +91,7 @@ install: all
 	@chmod 755 $(LIBEXEC_DIR)/bin/*
 	@chmod 644 $(LIBEXEC_DIR)/lib/*
 	@echo "[LINK]    Creating symlink $(BIN_SYMLINK)..."
-	@ln -sf $(LIBEXEC_DIR)/bin/rocknix-network-manager $(BIN_SYMLINK)
+	@ln -sf $(LIBEXEC_DIR)/bin/rxnm $(BIN_SYMLINK)
 	
 	@echo "[INSTALL] Bash completion..."
 	@mkdir -p $(BASH_COMP_DIR)
@@ -101,8 +101,8 @@ install: all
 	@echo "[INSTALL] Systemd network templates..."
 	@mkdir -p $(SYSTEMD_NET_DIR)
 	@cp -f usr/lib/systemd/network/* $(SYSTEMD_NET_DIR)/
-	# Fixed: Chmod everything in target dir instead of specific extensions that might not exist
-	@chmod 644 $(SYSTEMD_NET_DIR)/*
+	# Fixed: Only apply chmod to files to prevent stripping +x from dirs
+	@find $(SYSTEMD_NET_DIR) -type f -exec chmod 644 {} +
 
 	@echo "[INSTALL] System sleep hooks..."
 	@mkdir -p $(SYSTEMD_SLEEP_DIR)
@@ -144,3 +144,12 @@ test-all: all lint
 verify:
 	@echo "[VERIFY] Running RC1 Implementation Verification..."
 	@bash tests/verify_rc1.sh
+
+# Target for ROCKNIX Minimal Edition
+rocknix-release: tiny
+	@echo "[ROCKNIX] Building Minimal Bundle..."
+	@bash scripts/bundle.sh
+	@echo "[ROCKNIX] Deployment artifacts ready in build/"
+	@cp $(TARGET) build/rxnm-agent
+	@echo "    - build/rxnm       (Single Script)"
+	@echo "    - build/rxnm-agent (Tiny C Agent)"

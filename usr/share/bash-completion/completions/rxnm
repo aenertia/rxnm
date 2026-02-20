@@ -302,4 +302,3 @@ _rxnm_completion() {
 }
 
 complete -F _rxnm_completion rxnm
-complete -F _rxnm_completion rocknix-network-manager
