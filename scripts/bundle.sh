@@ -85,6 +85,18 @@ rxnm-ha.sh
 "
 fi
 
+# Helper function to neutralize dynamic sourcing for the bundle
+neutralize_sourcing() {
+    # Replaces . "${DIR}/file.sh" with a no-op to prevent runtime file-not-found errors
+    awk '
+    /^[ \t]*\.[ \t]+"\$\{(LIB_DIR|RXNM_LIB_DIR)\}/ { 
+        print "    : # Bundled: " $0
+        next 
+    }
+    { print }
+    '
+}
+
 # --- 2. APPEND MODULES ---
 for mod in $MODULES; do
     mod_path=$(echo "$mod" | tr -d ' \t\n')
@@ -100,8 +112,6 @@ for mod in $MODULES; do
     echo -e "\n# --- MODULE: $mod_path ---" >> "$TMP_TARGET"
     
     # CRITICAL FIX 1: Replace the schema file with pure POSIX stubs in the bundle.
-    # This prevents the 'return 0' guard from causing a fatal parse error in dash
-    # when executed as a flat file outside of a function.
     if [ "$mod_path" = "rxnm-config-schema.sh" ]; then
         cat << 'STUB' >> "$TMP_TARGET"
 validate_config_state() { return 0; }
@@ -113,19 +123,18 @@ STUB
     fi
 
     # CRITICAL FIX 2: Strip environment validation from rxnm-api.sh when bundling.
-    # The API helper is designed for external scripts to find the RXNM environment.
-    # Inside a bundle, that environment is already loaded in the shell process.
-    # We use sed to strip all code prior to actual module loading to avoid range-deletion nesting bugs.
     if [ "$mod_path" = "rxnm-api.sh" ]; then
-        sed -n '/# Load Core Modules/,$p' "$file_path" | \
-            grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" >> "$TMP_TARGET" || true
+        # Start at format default to skip sourcing and derivation blocks entirely
+        sed -n '/: "\${RXNM_FORMAT:=human}"/,$p' "$file_path" | \
+            grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" | \
+            neutralize_sourcing >> "$TMP_TARGET" || true
         continue
     fi
     
-    # Strip unnecessary headers to save space and reduce parse time
-    # '|| true' prevents pipefail from tripping if a file has no matching lines (unlikely, but safe)
+    # Strip unnecessary headers and neutralize internal sourcing
     grep -vE "^# (SPDX-License-Identifier|Copyright|shellcheck)" "$file_path" | \
-    grep -v "^#!/bin/sh" >> "$TMP_TARGET" || true
+    grep -v "^#!/bin/sh" | \
+    neutralize_sourcing >> "$TMP_TARGET" || true
 done
 
 # --- 3. APPEND MAIN DISPATCHER ---
@@ -143,9 +152,9 @@ if [ -z "$DISPATCHER_CONTENT" ]; then
 fi
 
 echo "$DISPATCHER_CONTENT" | awk -v mode="$BUNDLE_MODE" '
-/^[ \t]*\.[ \t]+"\$\{LIB_DIR\}/ { 
+/^[ \t]*\.[ \t]+"\$\{(LIB_DIR|RXNM_LIB_DIR)\}/ { 
     # Replace dynamic sourcing with a POSIX no-op (:) to prevent syntax errors in empty if/else blocks
-    print "    : # " $0
+    print "    : # Bundled: " $0
     next 
 }
 /^CATS=/ {
