@@ -67,7 +67,15 @@ trap cleanup EXIT
 BUNDLE_BIN="${BUNDLE_BIN:-build/rxnm}"
 
 # Pre-flight check
-if [ ! -f "$BUNDLE_BIN" ] || [ ! -f "build/rxnm-agent" ]; then
+# Resilient check: check both build/ and bin/ for the agent
+AGENT_BIN=""
+if [ -f "build/rxnm-agent" ]; then
+    AGENT_BIN="build/rxnm-agent"
+elif [ -f "bin/rxnm-agent" ]; then
+    AGENT_BIN="bin/rxnm-agent"
+fi
+
+if [ ! -f "$BUNDLE_BIN" ] || [ -z "$AGENT_BIN" ]; then
     err "Bundle artifacts not found ($BUNDLE_BIN). Run 'make rocknix-release' or 'make combined-full' first."
     exit 1
 fi
@@ -138,7 +146,7 @@ mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/lib" # Fix: Satisfy rxnm-api directory checks in full bundle
 mkdir -p "$ROOTFS/usr/bin"
 cp -f "$BUNDLE_BIN" "$ROOTFS/usr/bin/rxnm"
-cp -f build/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
+cp -f "$AGENT_BIN" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 
 mkdir -p "$ROOTFS/usr/lib/systemd/network"

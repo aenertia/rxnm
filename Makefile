@@ -49,6 +49,7 @@ all: dirs constants $(TARGET)
 
 dirs:
 	@mkdir -p $(BIN_DIR)
+	@mkdir -p build
 
 # Step 1: Sync Constants (SSoT)
 constants: $(CONSTANTS_HEADER)
@@ -115,6 +116,7 @@ clean:
 	@echo "[CLEAN]"
 	@rm -f $(TARGET)
 	@rm -f $(CONSTANTS_HEADER)
+	@rm -rf build/
 
 # New: Static Analysis
 lint:
@@ -149,10 +151,10 @@ verify:
 rocknix-release: tiny
 	@echo "[ROCKNIX] Building Minimal Bundle..."
 	@bash scripts/bundle.sh
+	@cp -f $(TARGET) build/rxnm-agent
 	@echo "[ROCKNIX] Running Bundle Fuzzer..."
 	@bash tests/test_bundle_fuzz.sh
 	@echo "[ROCKNIX] Deployment artifacts ready in build/"
-	@cp $(TARGET) build/rxnm-agent
 	@echo "    - build/rxnm       (Single Script)"
 	@echo "    - build/rxnm-agent (Tiny C Agent)"
 
@@ -160,9 +162,9 @@ rocknix-release: tiny
 combined-full: tiny
 	@echo "[RXNM] Building Full Combined Bundle..."
 	@BUNDLE_MODE=full bash scripts/bundle.sh
+	@cp -f $(TARGET) build/rxnm-agent
 	@echo "[RXNM] Running Bundle Fuzzer on Full Edition..."
 	@BUNDLE_BIN=build/rxnm-full bash tests/test_bundle_fuzz.sh
 	@echo "[RXNM] Deployment artifacts ready in build/"
-	@cp $(TARGET) build/rxnm-agent
 	@echo "    - build/rxnm-full  (Single Script - All Features)"
 	@echo "    - build/rxnm-agent (Tiny C Agent)"
