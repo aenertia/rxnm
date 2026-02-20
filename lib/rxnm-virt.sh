@@ -69,14 +69,16 @@ _task_create_macvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "MACVLAN=${name}"
         else
             if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-                # Fallback: Correctly handle appending to [Network] section
-                if grep -q "\[Network\]" "$parent_cfg"; then
+                # Fallback: Correctly handle appending to [Network] section using atomic temp file
+                cp "$parent_cfg" "${parent_cfg}.tmp"
+                if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
                     # Section exists, just append property
-                    printf "MACVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "MACVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 else
                     # Section missing, append header and property
-                    printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 fi
+                mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -116,11 +118,14 @@ _task_create_ipvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "IPVLAN=${name}"
         else
             if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
-                 if grep -q "\[Network\]" "$parent_cfg"; then
-                    printf "IPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 # Atomic temp file update
+                 cp "$parent_cfg" "${parent_cfg}.tmp"
+                 if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
+                    printf "IPVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                  else
-                    printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                  fi
+                 mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -222,11 +227,14 @@ _task_create_vlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "VLAN=${name}"
         else
             if ! grep -q "VLAN=${name}" "$parent_cfg"; then
-                if grep -q "\[Network\]" "$parent_cfg"; then
-                    printf "VLAN=%s\n" "$name" >> "$parent_cfg"
+                # Atomic temp file update
+                cp "$parent_cfg" "${parent_cfg}.tmp"
+                if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
+                    printf "VLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 else
-                    printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 fi
+                mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -290,7 +298,7 @@ action_create_veth() {
     ! validate_interface_name "$name" && { json_error "Invalid name"; return 1; }
     ! validate_interface_name "$peer" && { json_error "Invalid peer"; return 1; }
     
-    _task_create_veth "$name" "$peer"
+    with_iface_lock "$name" _task_create_veth "$name" "$peer"
     json_success '{"type": "veth", "iface": "'"$name"'", "peer": "'"$peer"'"}'
 }
 
