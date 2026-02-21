@@ -100,7 +100,6 @@ if ! ip link show $BRIDGE >/dev/null 2>&1; then
     # CRITICAL: Disable multicast snooping to prevent IPv6 Neighbor Discovery drop failures in isolated bridges
     echo 0 > /sys/class/net/$BRIDGE/bridge/multicast_snooping 2>/dev/null || true
     sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
-    sysctl -w net.ipv6.conf.$BRIDGE.disable_ipv6=1 2>/dev/null || true
     sysctl -w net.ipv4.conf.$BRIDGE.forwarding=1 2>/dev/null || true
 fi
 
@@ -297,10 +296,20 @@ for ((i=1; i<=15; i++)); do
 done
 if [ "$CONVERGED" = "false" ]; then err "IPv6 Convergence timeout"; exit 1; fi
 
-if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::1 >/dev/null 2>&1; then
+info "Verifying IPv6 ICMP reachability..."
+PING_SUCCESS=false
+for ((i=1; i<=15; i++)); do
+    if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::1 >/dev/null 2>&1; then
+        PING_SUCCESS=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$PING_SUCCESS" = "true" ]; then
     info "✓ IPv6 Ping Successful (Dual-Stack Active)"
 else
-    err "IPv6 Ping Failed"
+    err "IPv6 Ping Failed (NDP resolution timeout)"
     exit 1
 fi
 
