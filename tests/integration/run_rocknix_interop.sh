@@ -141,7 +141,7 @@ if [ ! -d "$ROOTFS" ]; then
     # Mocking hooks
     cat <<'MOCK' > "$ROOTFS/usr/bin/sysctl"
 #!/bin/bash
-exit 0
+if [ -x /usr/sbin/sysctl ]; then /usr/sbin/sysctl "$@"; else exit 0; fi
 MOCK
     chmod +x "$ROOTFS/usr/bin/sysctl"
     cp "$ROOTFS/usr/bin/sysctl" "$ROOTFS/usr/bin/rfkill"
@@ -216,7 +216,7 @@ info "Initializing Bundled RXNM..."
 m_exec $SERVER rxnm system setup
 m_exec $CLIENT rxnm system setup
 
-info "Applying Configurations..."
+info "--- [PHASE 1] DHCP Convergence (Bundled Script) ---"
 m_exec $SERVER rxnm interface host0 set static 192.168.213.2/24
 m_exec $SERVER /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
 m_exec $SERVER networkctl reload
@@ -226,20 +226,101 @@ m_exec $CLIENT rxnm interface host0 set dhcp
 m_exec $CLIENT networkctl reload
 m_exec $CLIENT networkctl reconfigure host0
 
-info "Waiting for DHCP Convergence via Bundle..."
+CONVERGED=false
 for ((i=1; i<=30; i++)); do
-    IP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty')
+    IP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty' | head -n1)
     
     if [[ "$IP" == "192.168.213."* ]]; then
-        info "✓ IP Acquired: $IP"
-        if m_exec $CLIENT ping -c 1 192.168.213.2 >/dev/null; then
-            info "✓ Bidirectional Link Verified using Bundled Script"
-            touch /tmp/rxnm_bundle_success
-            exit 0
+        if m_exec $CLIENT ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1; then
+            info "✓ DHCP Bidirectional Link Verified using Bundled Script (IP: $IP)"
+            CONVERGED=true
+            break
         fi
     fi
     sleep 2
 done
+if [ "$CONVERGED" = "false" ]; then err "DHCP Convergence timeout"; exit 1; fi
 
-err "Convergence timeout."
-exit 1
+info "--- [PHASE 2] Advanced Interface Attributes ---"
+m_exec $CLIENT rxnm interface host0 set static 192.168.213.60/24 --gateway 192.168.213.2 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
+m_exec $CLIENT networkctl reload
+m_exec $CLIENT networkctl reconfigure host0
+sleep 3
+
+IP_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty' | head -n1)
+MAC_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].address')
+MTU_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].mtu')
+
+if [ "$IP_CHECK" != "192.168.213.60" ] || [ "$MAC_CHECK" != "02:aa:bb:cc:dd:ee" ] || [ "$MTU_CHECK" != "1420" ]; then
+    err "Attribute application failed! IP:$IP_CHECK MAC:$MAC_CHECK MTU:$MTU_CHECK"
+    exit 1
+fi
+info "✓ Attributes applied successfully (Static IP, MTU 1420, Spoofed MAC)"
+
+info "--- [PHASE 3] IPv6 Connectivity ---"
+m_exec $SERVER rxnm interface host0 set static 192.168.213.2/24,fd00:cafe::2/64
+m_exec $SERVER /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
+m_exec $SERVER networkctl reload && m_exec $SERVER networkctl reconfigure host0
+
+m_exec $CLIENT rxnm interface host0 set static 192.168.213.60/24,fd00:cafe::3/64 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
+m_exec $CLIENT networkctl reload && m_exec $CLIENT networkctl reconfigure host0
+sleep 3
+
+if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::2 >/dev/null 2>&1; then
+    info "✓ IPv6 Ping Successful (Dual-Stack Active)"
+else
+    err "IPv6 Ping Failed"
+    exit 1
+fi
+
+info "--- [PHASE 4] Project Silence (Nullify XDP) ---"
+info "Engaging Nullify on Client..."
+m_exec $CLIENT rxnm system nullify enable
+sleep 1
+
+# Ping should FAIL immediately
+if m_exec $CLIENT ping -c 1 -W 1 192.168.213.2 >/dev/null 2>&1; then
+    err "Nullify failed! Traffic was successfully routed when it should have been dropped."
+    exit 1
+else
+    info "✓ Traffic successfully dropped (XDP Drop Filter Active)"
+fi
+
+info "Restoring Network..."
+m_exec $CLIENT rxnm system nullify disable
+sleep 2
+
+# Ping should SUCCEED again
+if m_exec $CLIENT ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1; then
+    info "✓ Network restored successfully (XDP Filter Removed)"
+else
+    err "Network restoration failed! XDP filter may be stuck."
+    exit 1
+fi
+
+info "--- [PHASE 5] System Stack Tuning ---"
+info "Disabling IPv6 Stack globally..."
+m_exec $CLIENT rxnm system ipv6 disable
+sleep 2
+
+IPV6_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet6") | .local // empty' | head -n1)
+if [ -n "$IPV6_CHECK" ]; then
+    err "IPv6 addresses still present after global disable! ($IPV6_CHECK)"
+    exit 1
+else
+    info "✓ IPv6 flushed successfully from kernel structures"
+fi
+
+info "Silencing IPv4 Broadcasts..."
+m_exec $CLIENT rxnm system ipv4 disable
+SYSCTL_VAL=$(m_exec $CLIENT /usr/sbin/sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null || echo "0")
+if [ "$SYSCTL_VAL" != "1" ]; then
+    err "IPv4 sysctl tuning failed!"
+    exit 1
+else
+    info "✓ IPv4 broadcast/ARP chatter silenced"
+fi
+
+touch /tmp/rxnm_bundle_success
+info "All Bundled Integration Phases Passed."
+exit 0
