@@ -66,7 +66,8 @@ _restore_wifi_state() {
             # Run in background to prevent blocking sleep hooks
             (
                 # Use standard /bin/sh sequence to avoid missing bash in extreme environs
-                for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                # Loop variable '_' suppresses ShellCheck SC2034 (unused variable)
+                for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
                     if systemctl is-active --quiet iwd; then break; fi
                     sleep 0.5
                 done
