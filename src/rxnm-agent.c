@@ -1945,7 +1945,18 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     
     struct timespec last_trigger = {0, 0};
     unsigned int last_flags = 0;
-    bool first_event = true;
+    
+    /* C-1 FIX: Initialize last_flags to prevent spurious triggers on already-up interfaces */
+    int io_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (io_sock >= 0) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+        if (ioctl(io_sock, SIOCGIFFLAGS, &ifr) == 0) {
+            last_flags = ifr.ifr_flags;
+        }
+        close(io_sock);
+    }
     
     while (1) {
         char buf[4096];
@@ -1979,10 +1990,6 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                             bool is_running = (current_flags & IFF_RUNNING) && (current_flags & IFF_LOWER_UP);
                             bool was_running = (last_flags & IFF_RUNNING) && (last_flags & IFF_LOWER_UP);
                             
-                            if (first_event) {
-                                was_running = is_running;
-                                first_event = false;
-                            }
                             last_flags = current_flags;
                             
                             /* Only trigger on state change to running (Carrier UP) */

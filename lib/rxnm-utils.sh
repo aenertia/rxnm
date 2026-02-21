@@ -77,11 +77,13 @@ cleanup() {
         local lock="$1"
         [ -f "$lock" ] || return
         
-        # M-3 FIX: Utilize non-blocking flock to test lock vacancy.
-        # This is orders of magnitude faster and more robust than iterating /proc/*/fd
-        if flock -n "$lock" -c "true" 2>/dev/null; then
-            rm -f "$lock" 2>/dev/null
-        fi
+        # M-3 FIX: Use FD-based flock in a subshell for universal BusyBox compatibility
+        # and to avoid TOCTOU races by holding the lock while unlinking.
+        (
+            if exec 9>>"$lock" && flock -n 9; then
+                rm -f "$lock"
+            fi
+        ) 2>/dev/null
     }
 
     if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then

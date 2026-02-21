@@ -229,11 +229,11 @@ _task_forget() {
     
     local removed_count=0
     
-    # L-4 FIX: Use grep to find the exact SSID match rather than relying on sanitized glob filenames
-    # This prevents missing edge-case filenames or orphaned configs
+    # L-4 FIX: Use exact fixed-string grep (grep -qFx) rather than relying on sanitized glob filenames
+    # This completely neutralizes any regex metacharacter injection vulnerabilities embedded in SSIDs.
     for f in "${STORAGE_NET_DIR}"/75-config-*.network; do
         if [ -f "$f" ]; then
-            if grep -q "^SSID=${ssid}$" "$f" 2>/dev/null; then
+            if grep -qFx "SSID=${ssid}" "$f" 2>/dev/null; then
                 rm -f "$f"
                 removed_count=$((removed_count + 1))
             fi
