@@ -69,6 +69,9 @@ if ! ip link show $BRIDGE >/dev/null 2>&1; then
     sysctl -w net.ipv4.conf.$BRIDGE.forwarding=1 2>/dev/null || true
 fi
 
+# Ensure Host Kernel allows unprivileged BPF if restricted (helps inside container context)
+sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null || true
+
 info "Building Test RootFS..."
 HASH=$(md5sum tests/integration/Containerfile 2>/dev/null | cut -d ' ' -f 1 || echo "nohash")
 if [ -d "$ROOTFS" ]; then
@@ -114,11 +117,19 @@ chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxn
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
 
 info "Booting Bundle Machines..."
-# FIX: Appending explicit system-call-filter allowances (@default @bpf @keyring) to ensure eBPF 
-# can load in GitHub Actions ubuntu-24.04 runner despite AppArmor/Seccomp defaults.
-COMMON_ARGS="--network-bridge=$BRIDGE --boot --capability=all --private-users=no --system-call-filter=@default --system-call-filter=@bpf --system-call-filter=@keyring --ephemeral"
-systemd-nspawn -D "$ROOTFS" -M $SERVER $COMMON_ARGS > /tmp/$SERVER.log 2>&1 &
-systemd-nspawn -D "$ROOTFS" -M $CLIENT $COMMON_ARGS > /tmp/$CLIENT.log 2>&1 &
+# FIX: Use bash array to prevent word-splitting on the space-separated syscall filter list.
+# Also explicitly pass RLIMIT_MEMLOCK=infinity to nspawn to allow eBPF bytecode memory allocation.
+COMMON_ARGS=(
+    "--network-bridge=$BRIDGE"
+    "--boot"
+    "--capability=all"
+    "--private-users=no"
+    "--system-call-filter=bpf keyctl add_key"
+    "--rlimit=RLIMIT_MEMLOCK=infinity"
+    "--ephemeral"
+)
+systemd-nspawn -D "$ROOTFS" -M "$SERVER" "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
+systemd-nspawn -D "$ROOTFS" -M "$CLIENT" "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
 
 info "Waiting for systemd initialization..."
 for i in {1..30}; do
