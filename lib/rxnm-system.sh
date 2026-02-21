@@ -34,13 +34,25 @@ cache_service_states() {
     # L-3 FIX: Properly suppress stderr inside command substitution
     now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
     
-    # H-1 FIX: Query services individually to prevent line shifting.
-    # If a service (e.g., avahi-daemon) is not installed, bulk query outputs shift,
-    # corrupting the state cache. The minimal fork overhead guarantees correctness.
-    _SVC_CACHE_IWD=$(timeout 1s systemctl is-active iwd 2>/dev/null || echo "inactive")
-    _SVC_CACHE_NETWORKD=$(timeout 1s systemctl is-active systemd-networkd 2>/dev/null || echo "inactive")
-    _SVC_CACHE_RESOLVED=$(timeout 1s systemctl is-active systemd-resolved 2>/dev/null || echo "inactive")
-    _SVC_CACHE_AVAHI=$(timeout 1s systemctl is-active avahi-daemon 2>/dev/null || echo "inactive")
+    # H-1 FIX: Query services individually to prevent line shifting, but parallelise
+    # them using background subshells to cap the worst-case D-Bus hang at exactly 1 second
+    # total, rather than 4 sequential seconds.
+    local t_dir="${RUN_DIR}/.svc_cache_tmp"
+    mkdir -p "$t_dir"
+    
+    (timeout 1s systemctl is-active iwd 2>/dev/null || echo "inactive") > "$t_dir/iwd" &
+    (timeout 1s systemctl is-active systemd-networkd 2>/dev/null || echo "inactive") > "$t_dir/net" &
+    (timeout 1s systemctl is-active systemd-resolved 2>/dev/null || echo "inactive") > "$t_dir/res" &
+    (timeout 1s systemctl is-active avahi-daemon 2>/dev/null || echo "inactive") > "$t_dir/avahi" &
+    
+    # Wait for all background queries to complete or hit their 1s timeout
+    wait
+    
+    # Read back results
+    _SVC_CACHE_IWD=$(cat "$t_dir/iwd" 2>/dev/null || echo "inactive")
+    _SVC_CACHE_NETWORKD=$(cat "$t_dir/net" 2>/dev/null || echo "inactive")
+    _SVC_CACHE_RESOLVED=$(cat "$t_dir/res" 2>/dev/null || echo "inactive")
+    _SVC_CACHE_AVAHI=$(cat "$t_dir/avahi" 2>/dev/null || echo "inactive")
     
     _SVC_TS_IWD=$now
     _SVC_TS_NETWORKD=$now

@@ -84,13 +84,16 @@ _task_profile_load_global() {
     
     _sync_active_configs "${profile_dir}" "${staging_dir}"
     
-    # H-4 FIX: Verify staging successfully populated BEFORE wiping the live network configuration.
-    # Prevents total network loss if out of space or profile is empty.
     local has_files="false"
     for f in "$staging_dir"/*; do
         if [ -e "$f" ]; then has_files="true"; break; fi
     done
     
+    # We explicitly bypass the 'empty staging' block if the profile is named 'default'.
+    # This is an architectural requirement: loading an empty 'default' profile acts
+    # as a standard "Factory Reset", wiping all ephemeral state and returning the network 
+    # to its baseline condition. Non-default profiles must contain files to prevent accidental
+    # network lockouts during standard profile switching.
     if [ "$has_files" = "false" ] && [ "$name" != "default" ]; then
         rm -rf "$staging_dir"
         log_error "Profile is empty or sync failed. Aborted to prevent network loss."
