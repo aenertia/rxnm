@@ -80,6 +80,8 @@ Actions:
   roaming monitor       Start opportunistic roaming monitor (Foreground)
   roaming enable        Enable roaming background service
   roaming disable       Disable roaming background service
+  
+  nullify <cmd>         Suspend/Resume hardware traffic for WiFi (enable, disable, status)
 
 Options:
   --password <pass>     WiFi Password
@@ -302,33 +304,30 @@ Actions:
   check portal          Check for captive portal
   reload                Reload network configuration
   proxy set             Configure global/interface proxy
-  nullify enable        Suspend hardware network traffic via XDP
-  nullify disable       Resume hardware network traffic
-  nullify status        Show current nullify XDP status
+  nullify <cmd>         Suspend hardware network traffic via XDP/WoWLAN (enable, disable, status)
+  ipv4 <cmd>            Globally silence IPv4 broadcast/ARP chatter (enable, disable, status)
+  ipv6 <cmd>            Globally enable/disable the IPv6 kernel stack (enable, disable, status)
 
 Options:
   --http <url>          Set HTTP proxy
   --https <url>         Set HTTPS proxy
   --noproxy <list>      Set no_proxy exclusions
   --interface <iface>   Target a specific interface (e.g., for proxy or nullify)
+  --wowlan <yes|no>     Nullify: Toggle WoWLAN firmware filtering (Default: yes)
+  --soft-wol <yes|no>   Nullify: Expand XDP filter to allow Wake-on-LAN packets (Default: no)
+  --bt <yes|no>         Nullify: Toggle Bluetooth HCI air-gap (Default: yes)
+  --xdp <yes|no>        Nullify: Toggle XDP driver eBPF filter (Default: yes)
   --dry-run             Show actions without executing (nullify only)
 
 Examples:
   # Check Internet Connectivity
   rxnm system check internet
 
-  # Set System Proxy
-  rxnm system proxy set --http "http://proxy.example.com:8080" --noproxy "localhost,127.0.0.1"
-
-  # Remove Proxy
-  rxnm system proxy set
-
-  # Power Management: Suspend all network traffic globally via XDP
-  # Nullify mode is available in RXNM 1.1.0+. Requires the rxnm-agent binary.
+  # Power Management: Suspend all network traffic globally
   rxnm system nullify enable
 
-  # Power Management: Suspend traffic on a specific interface only
-  rxnm system nullify enable --interface wlan0
+  # Power Management: Extreme Power Profile (Silences IPv4/IPv6 kernel stacks + Hardware drops)
+  rxnm system ipv6 disable && rxnm system ipv4 disable && rxnm system nullify enable
 EOF
             ;;
         api)
@@ -354,6 +353,7 @@ Actions:
   unpair <mac>          Unpair/Remove device
   pan enable            Enable Bluetooth Tethering (PAN)
   pan disable           Disable Bluetooth Tethering
+  nullify <cmd>         Suspend/Resume Bluetooth hardware via HCI (enable, disable, status)
 
 Options:
   --mode <client|host>  PAN Mode (default: client)

@@ -347,6 +347,7 @@ case "$CATEGORY" in
         . "${LIB_DIR}/rxnm-wifi.sh" 
         . "${LIB_DIR}/rxnm-interfaces.sh" 
         . "${LIB_DIR}/rxnm-roaming.sh"
+        . "${LIB_DIR}/rxnm-nullify.sh"
         ;;
     interface|bridge) 
         . "${LIB_DIR}/rxnm-interfaces.sh" 
@@ -362,7 +363,10 @@ case "$CATEGORY" in
         . "${LIB_DIR}/rxnm-virt.sh" 
         . "${LIB_DIR}/rxnm-diagnostics.sh"
         ;;
-    bluetooth) . "${LIB_DIR}/rxnm-bluetooth.sh" ;;
+    bluetooth) 
+        . "${LIB_DIR}/rxnm-bluetooth.sh" 
+        . "${LIB_DIR}/rxnm-nullify.sh"
+        ;;
     profile) . "${LIB_DIR}/rxnm-profiles.sh" ;;
     system|config) 
         . "${LIB_DIR}/rxnm-diagnostics.sh" 
@@ -452,7 +456,7 @@ case "$CATEGORY" in
         ;;
 
     wifi)
-        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming")
+        ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming" "nullify")
         if [ "$ACTION" = "ambiguous" ]; then
             json_error "Ambiguous action for 'wifi'. Please be more specific." "1"
             exit 1
@@ -557,6 +561,11 @@ case "$CATEGORY" in
                     disable) systemctl disable --now rxnm-roaming; json_success '{"action": "roaming_disable", "status": "inactive"}' ;;
                     *) echo "Usage: rxnm wifi roaming {monitor|enable|disable}" ;;
                 esac
+                ;;
+            nullify)
+                # Context Isolated Nullify routing
+                [ -n "$ARG_IFACE" ] && set -- "$@" --interface "$ARG_IFACE"
+                action_system_nullify "$@"
                 ;;
         esac
         ;;
@@ -683,7 +692,7 @@ case "$CATEGORY" in
         ;;
         
     system)
-        ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop" "nullify")
+        ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop" "nullify" "ipv4" "ipv6")
         if [ "$ACTION" = "ambiguous" ]; then
             json_error "Ambiguous action for 'system'. Please be more specific." "1"
             exit 1
@@ -717,6 +726,14 @@ case "$CATEGORY" in
             setup|start) action_setup ;;
             stop) action_stop ;;
             nullify) action_system_nullify "$@" ;;
+            ipv4)
+                SUBCMD="${1:-status}"; [ "$#" -gt 0 ] && shift
+                action_system_ipv4 "$SUBCMD"
+                ;;
+            ipv6)
+                SUBCMD="${1:-status}"; [ "$#" -gt 0 ] && shift
+                action_system_ipv6 "$SUBCMD"
+                ;;
         esac
         ;;
         
@@ -751,6 +768,11 @@ case "$CATEGORY" in
                 MAC="${1:-}"; [ "$#" -gt 0 ] && shift
                 [ -z "$MAC" ] && { json_error "MAC address required"; exit 1; }
                 action_bt_unpair "$MAC"
+                ;;
+            nullify)
+                # Context Isolated Nullify routing for Bluetooth
+                # Force WoWLAN and XDP logic off to strictly isolate the bluetooth HCI teardown.
+                action_system_nullify "$@" --wowlan no --xdp no
                 ;;
         esac
         ;;

@@ -117,7 +117,7 @@ _rxnm_completion() {
     
     case "$category" in
         wifi)
-            local cmds="scan connect disconnect ap wps networks list forget country p2p dpp"
+            local cmds="scan connect disconnect ap wps networks list forget country p2p dpp nullify"
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
                 return 0
@@ -158,6 +158,13 @@ _rxnm_completion() {
                          COMPREPLY=( $(compgen -W "enroll stop" -- "$cur") )
                     fi
                     ;;
+                nullify)
+                    if [[ $cword -eq 3 ]]; then
+                        COMPREPLY=( $(compgen -W "enable disable status" -- "$cur") )
+                    elif [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "--wowlan --bt --soft-wol --xdp --dry-run --interface" -- "$cur") )
+                    fi
+                    ;;
                 *)
                     COMPREPLY=( $(compgen -W "--interface" -- "$cur") )
                     ;;
@@ -165,7 +172,7 @@ _rxnm_completion() {
             ;;
 
         interface)
-            local cmds="show set enable disable list hotplug"
+            local cmds="show set enable disable list hotplug nullify"
             
             local is_iface=0
             local available_ifaces=$(_rxnm_live_interfaces) 
@@ -203,7 +210,7 @@ _rxnm_completion() {
                              COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
                         fi
                         ;;
-                    enable|disable|show|list|hotplug)
+                    enable|disable|show|list|hotplug|nullify)
                         if [[ "$cur" == -* ]]; then
                              COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") )
                         else
@@ -238,8 +245,8 @@ _rxnm_completion() {
             fi
             ;;
 
-        system)
-            local cmds="status check proxy reload setup start stop nullify"
+        system|config)
+            local cmds="status check proxy reload setup start stop nullify ipv4 ipv6"
             if [[ $cword -eq 2 ]]; then
                  COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
             fi
@@ -248,7 +255,18 @@ _rxnm_completion() {
                 status) if [[ "$cur" == -* ]]; then COMPREPLY=( $(compgen -W "$GLOBAL_OPTS" -- "$cur") ); fi ;;
                 check) COMPREPLY=( $(compgen -W "internet portal" -- "$cur") ) ;;
                 proxy) if [[ "${words[3]}" == "set" ]]; then COMPREPLY=( $(compgen -W "--http --https --noproxy --interface" -- "$cur") ); fi ;;
-                nullify) if [[ $cword -eq 3 ]]; then COMPREPLY=( $(compgen -W "enable disable" -- "$cur") ); fi ;;
+                nullify)
+                    if [[ $cword -eq 3 ]]; then 
+                        COMPREPLY=( $(compgen -W "enable disable status" -- "$cur") )
+                    elif [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "--wowlan --bt --soft-wol --xdp --dry-run --interface" -- "$cur") )
+                    fi 
+                    ;;
+                ipv4|ipv6)
+                    if [[ $cword -eq 3 ]]; then
+                        COMPREPLY=( $(compgen -W "enable disable status" -- "$cur") )
+                    fi
+                    ;;
             esac
             ;;
             
@@ -279,6 +297,31 @@ _rxnm_completion() {
              if [[ $cword -eq 2 ]]; then COMPREPLY=( $(compgen -W "$cmds" -- "$cur") ); fi
              ;;
              
+        bluetooth)
+            local cmds="scan pair unpair pan nullify"
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+                return 0
+            fi
+            local action="${words[2]}"
+            case "$action" in
+                pan)
+                    if [[ $cword -eq 3 ]]; then
+                        COMPREPLY=( $(compgen -W "enable disable" -- "$cur") )
+                    elif [[ "${words[3]}" == "enable" && "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "--mode --share --ip" -- "$cur") )
+                    fi
+                    ;;
+                nullify)
+                    if [[ $cword -eq 3 ]]; then 
+                        COMPREPLY=( $(compgen -W "enable disable status" -- "$cur") )
+                    elif [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "--wowlan --bt --soft-wol --xdp --dry-run --interface" -- "$cur") )
+                    fi
+                    ;;
+            esac
+            ;;
+
         vpn)
             if [[ $cword -eq 2 ]]; then COMPREPLY=( $(compgen -W "wireguard" -- "$cur") ); fi
             ;;

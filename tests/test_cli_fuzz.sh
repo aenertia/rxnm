@@ -134,12 +134,17 @@ TEST_VECTORS=(
     "interface list --simple"
     "interface wlan0 show --get ip"
     "interface wlan0 set hardware --speed 1000" # Dry run check
+    "interface wlan0 nullify status"
     
     # Category: System
     "system status"
     "system status --simple"
     "system check internet"
     "system proxy set --http 1.2.3.4" # Should verify interface lib loaded
+    "system ipv4 status"
+    "system ipv6 status"
+    "system nullify status"
+    "system nullify enable --dry-run --soft-wol yes --bt no --wowlan yes"
     
     # Category: Bridge/Bond/Virt (Virtuals often miss deps)
     "bridge list"
@@ -155,6 +160,11 @@ TEST_VECTORS=(
     "wifi list"
     "wifi networks"
     "wifi scan"
+    "wifi nullify status"
+    
+    # Category: Bluetooth
+    "bluetooth scan"
+    "bluetooth nullify status"
     
     # Category: Profile
     "profile list"

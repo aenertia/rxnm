@@ -32,6 +32,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/select.h>
@@ -163,6 +164,32 @@ static int bpf(int cmd, union bpf_attr *attr, unsigned int size) {
 static const struct bpf_insn xdp_drop_prog[] = {
     { 0xb7, 0, 0, 0, 1 },
     { 0x95, 0, 0, 0, 0 },
+};
+
+// XDP Software WoL Program: Drop all EXCEPT UDP Port 7/9
+// Hand-crafted raw BPF assembly to avoid libbpf/clang dependency.
+// Safely bound-checks headers and reads bytes to prevent endianness bugs.
+static const struct bpf_insn xdp_soft_wol_prog[] = {
+    { 0x61, 2, 1, offsetof(struct xdp_md, data), 0 },     // r2 = ctx->data
+    { 0x61, 3, 1, offsetof(struct xdp_md, data_end), 0 }, // r3 = ctx->data_end
+    { 0xbf, 4, 2, 0, 0 },                                 // r4 = r2
+    { 0x07, 4, 0, 0, 42 },                                // r4 += 42 (Eth + IPv4 + UDP min length)
+    { 0x2d, 4, 3, 11, 0 },                                // if r4 > r3 goto DROP (offset 11)
+    { 0x71, 5, 2, 12, 0 },                                // r5 = byte[12] (Eth Proto MSB)
+    { 0x55, 5, 0, 9, 0x08 },                              // if r5 != 0x08 goto DROP (offset 9)
+    { 0x71, 5, 2, 13, 0 },                                // r5 = byte[13] (Eth Proto LSB)
+    { 0x55, 5, 0, 7, 0x00 },                              // if r5 != 0x00 goto DROP (offset 7)
+    { 0x71, 5, 2, 23, 0 },                                // r5 = byte[23] (IP Proto)
+    { 0x55, 5, 0, 5, 17 },                                // if r5 != 17 (UDP) goto DROP (offset 5)
+    { 0x71, 5, 2, 36, 0 },                                // r5 = byte[36] (UDP DPORT MSB)
+    { 0x55, 5, 0, 3, 0x00 },                              // if r5 != 0x00 goto DROP (offset 3)
+    { 0x71, 5, 2, 37, 0 },                                // r5 = byte[37] (UDP DPORT LSB)
+    { 0x15, 5, 0, 3, 0x07 },                              // if r5 == 0x07 (Port 7) goto PASS (offset 3)
+    { 0x15, 5, 0, 2, 0x09 },                              // if r5 == 0x09 (Port 9) goto PASS (offset 2)
+    { 0xb7, 0, 0, 0, 1 },                                 // DROP: r0 = 1 (XDP_DROP)
+    { 0x95, 0, 0, 0, 0 },                                 // exit
+    { 0xb7, 0, 0, 0, 2 },                                 // PASS: r0 = 2 (XDP_PASS)
+    { 0x95, 0, 0, 0, 0 }                                  // exit
 };
 
 /* --- Structures --- */
@@ -1494,15 +1521,22 @@ void cmd_tune(char *profile) {
 
 /* --- XDP/eBPF Logic --- */
 
-int load_xdp_drop_prog() {
+int load_xdp_drop_prog(bool soft_wol) {
     // Construct bpf_attr manually to avoid libbpf dependency
     union bpf_attr attr;
     char log_buf[4096] = {0};
     memset(&attr, 0, sizeof(attr));
     attr.prog_type = BPF_PROG_TYPE_XDP;
-    attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
+    
+    if (soft_wol) {
+        attr.insn_cnt = sizeof(xdp_soft_wol_prog) / sizeof(struct bpf_insn);
+        attr.insns = (__aligned_u64)(uintptr_t)xdp_soft_wol_prog;
+    } else {
+        attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
+        attr.insns = (__aligned_u64)(uintptr_t)xdp_drop_prog;
+    }
+    
     /* C-2 Fix: Use uintptr_t to prevent truncation on 32-bit architectures */
-    attr.insns = (__aligned_u64)(uintptr_t)xdp_drop_prog;
     attr.license = (__aligned_u64)(uintptr_t)"GPL";
     attr.log_buf = (__aligned_u64)(uintptr_t)log_buf;
     attr.log_size = sizeof(log_buf);
@@ -1586,7 +1620,7 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
 
 void cmd_nullify_xdp(char *iface, char *action) {
     if (!iface || !action) {
-        fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|disable>\n");
+        fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|enable-swol|disable>\n");
         exit(1);
     }
     
@@ -1596,8 +1630,9 @@ void cmd_nullify_xdp(char *iface, char *action) {
         exit(1);
     }
     
-    if (strcmp(action, "enable") == 0) {
-        int fd = load_xdp_drop_prog();
+    if (strncmp(action, "enable", 6) == 0) {
+        bool soft_wol = (strcmp(action, "enable-swol") == 0);
+        int fd = load_xdp_drop_prog(soft_wol);
         if (fd < 0) {
             perror("BPF_PROG_LOAD failed");
             exit(1);
@@ -1617,7 +1652,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             fprintf(stderr, "Failed to attach XDP: %s\n", strerror(-err));
             exit(1);
         }
-        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"enabled\", \"iface\": \"%s\"}\n", iface);
+        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"%s\", \"iface\": \"%s\"}\n", soft_wol ? "enabled-swol" : "enabled", iface);
         
     } else if (strcmp(action, "disable") == 0) {
         // Attach FD -1 to detach
@@ -2111,14 +2146,14 @@ end_args:
         return cmd_ns_exec(g_ns_exec_name, argc - optind, argv + optind);
     }
     
-    // XDP Command: requires --nullify-xdp <iface> AND a following "enable/disable"
+    // XDP Command: requires --nullify-xdp <iface> AND a following "enable/enable-swol/disable"
     if (g_nullify_xdp_iface) {
         // Look for next arg as action
         if (optind < argc) {
             cmd_nullify_xdp(g_nullify_xdp_iface, argv[optind]);
             return 0;
         } else {
-            fprintf(stderr, "Missing action for --nullify-xdp (enable|disable)\n");
+            fprintf(stderr, "Missing action for --nullify-xdp (enable|enable-swol|disable)\n");
             return 1;
         }
     }

@@ -1,73 +1,43 @@
 #!/bin/bash
-# RXNM Suspend/Resume Handler for WiFi Reconnection
+# RXNM Suspend/Resume Handler for WiFi Reconnection & Nullify States
 # Place in /usr/lib/systemd/system-sleep/ and ensure executable permissions
+
+# Load optional userspace configuration for Nullify behaviors
+NULLIFY_ON_SLEEP="false"
+if [ -f /storage/.config/network/nullify.conf ]; then
+    # shellcheck disable=SC1091
+    source /storage/.config/network/nullify.conf
+fi
 
 case "$1/$2" in
   pre/*)
-    # Before suspend - save current connection state
-    if [ -d /run/rocknix ]; then
-        mkdir -p /run/rocknix/resume_state
+    # 1. Check current Nullify state
+    current_nullify="disabled"
+    if [ -f /run/rocknix/nullify.state ]; then
+        read -r current_nullify < /run/rocknix/nullify.state 2>/dev/null || current_nullify="disabled"
+    fi
+
+    # 2. Engage "Project Silence" (Nullify) IF configured AND not already manually enabled
+    if [ "$NULLIFY_ON_SLEEP" = "true" ] && [ "$current_nullify" != "enabled" ]; then
+        logger -t rxnm-resume "Auto-engaging Nullify mode for deep sleep protection"
         
-        # Check all wireless interfaces
-        for iface in /sys/class/net/*/wireless; do
-            [ -e "$iface" ] || continue
-            iface_name=$(basename "$(dirname "$iface")")
-            
-            # If connected, save the SSID
-            if command -v iwctl >/dev/null; then
-                if iwctl station "$iface_name" show 2>/dev/null | grep -q "Connected network"; then
-                    ssid=$(iwctl station "$iface_name" show 2>/dev/null | awk '/Connected network/{$1=$2=""; sub(/^ +/, ""); print}')
-                    if [ -n "$ssid" ]; then
-                        echo "$ssid" > "/run/rocknix/resume_state/${iface_name}.ssid"
-                    fi
-                fi
-            fi
-        done
+        # Mark that the system sleep hook triggered this, so we know to undo it on resume
+        mkdir -p /run/rocknix/resume_state
+        touch /run/rocknix/resume_state/auto_nullified
+        
+        # Engage nullify (this will natively save the BT and WiFi states)
+        /usr/bin/rxnm system nullify enable >/dev/null 2>&1
     fi
     ;;
     
   post/*)
-    # After resume - restore connections
-    
-    # REMEDIATION: Missing iwctl Error Handling & Race Condition
-    # Wait for IWD service and interface availability before attempting commands.
-    
-    # Run restoration routine in an isolated subshell to prevent blocking 
-    # the systemd-sleep execution chain and ensure proper timeout handling.
-    (
-        # Hard timeout to prevent hangs
-        timeout 25s bash -c '
-        if [ -d /run/rocknix/resume_state ]; then
-            
-            # Wait up to 10 seconds for IWD to be fully active
-            for i in {1..20}; do
-                if systemctl is-active --quiet iwd; then
-                    break
-                fi
-                sleep 0.5
-            done
-            
-            for state_file in /run/rocknix/resume_state/*.ssid; do
-                [ -e "$state_file" ] || continue
-                
-                iface_name=$(basename "$state_file" .ssid)
-                ssid=$(cat "$state_file")
-                
-                if [ -n "$ssid" ] && command -v iwctl >/dev/null; then
-                    # Ensure the interface exists in sysfs before commanding it
-                    if [ -d "/sys/class/net/${iface_name}" ]; then
-                        logger -t rxnm-resume "Restoring connection to $ssid on $iface_name"
-                        # Use "--" to safely terminate options in case SSID starts with "-"
-                        iwctl station "$iface_name" connect -- "$ssid" >/dev/null 2>&1
-                    else
-                        logger -t rxnm-resume "Interface $iface_name not found after resume, skipping reconnect"
-                    fi
-                fi
-                
-                rm -f "$state_file"
-            done
-        fi
-        '
-    ) &
+    # 1. Revert Auto-Nullify ONLY if the sleep hook triggered it
+    if [ -f /run/rocknix/resume_state/auto_nullified ]; then
+        logger -t rxnm-resume "Restoring hardware network and Bluetooth stacks (Auto-Nullify Revert)"
+        
+        # Disable nullify (this will natively restore the BT and WiFi states)
+        /usr/bin/rxnm system nullify disable >/dev/null 2>&1
+        rm -f /run/rocknix/resume_state/auto_nullified
+    fi
     ;;
 esac

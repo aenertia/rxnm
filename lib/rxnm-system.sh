@@ -302,6 +302,108 @@ tune_network_stack() {
     fi
 }
 
+# --- PROTOCOL STACK TUNING (Extreme Power Profiles) ---
+
+action_system_ipv6() {
+    local action="$1"
+    
+    # Try to write to persistent config, fallback to runtime if Read-Only rootfs
+    local sysctl_dir="/etc/sysctl.d"
+    if [ ! -w "/etc/sysctl.d" ]; then
+        sysctl_dir="/run/sysctl.d"
+        mkdir -p "$sysctl_dir" 2>/dev/null || true
+    fi
+    local conf_file="${sysctl_dir}/99-rxnm-ipv6.conf"
+
+    if [ "$action" = "disable" ]; then
+        log_info "Tearing down IPv6 stack globally (Sysctl)..."
+        
+        # Apply instantly to running kernel
+        sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+        
+        # Retroactively apply to already-UP interfaces to force immediate memory/route flush
+        for iface in /sys/class/net/*; do
+            local iname
+            iname=$(basename "$iface")
+            [ "$iname" = "lo" ] && continue
+            sysctl -w "net.ipv6.conf.${iname}.disable_ipv6=1" >/dev/null 2>&1 || true
+        done
+        
+        # Persist (Use printf to guarantee POSIX compliance instead of echo -e)
+        printf "net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n" > "$conf_file" 2>/dev/null || true
+        
+        json_success '{"action": "ipv6", "status": "disabled", "note": "IPv6 addresses and routes flushed."}'
+        
+    elif [ "$action" = "enable" ]; then
+        log_info "Restoring IPv6 stack globally..."
+        
+        rm -f "$conf_file" 2>/dev/null || true
+        
+        sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
+        
+        for iface in /sys/class/net/*; do
+            local iname
+            iname=$(basename "$iface")
+            [ "$iname" = "lo" ] && continue
+            sysctl -w "net.ipv6.conf.${iname}.disable_ipv6=0" >/dev/null 2>&1 || true
+        done
+        
+        json_success '{"action": "ipv6", "status": "enabled"}'
+        
+    else
+        local status="enabled"
+        local val
+        val=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null || echo "0")
+        if [ "$val" -eq 1 ]; then status="disabled"; fi
+        json_success '{"action": "ipv6", "status": "'"$status"'"}'
+    fi
+}
+
+action_system_ipv4() {
+    local action="$1"
+    
+    local sysctl_dir="/etc/sysctl.d"
+    if [ ! -w "/etc/sysctl.d" ]; then
+        sysctl_dir="/run/sysctl.d"
+        mkdir -p "$sysctl_dir" 2>/dev/null || true
+    fi
+    local conf_file="${sysctl_dir}/99-rxnm-ipv4-silence.conf"
+
+    # IPv4 doesn't have a true 'disable' sysctl without breaking localhost.
+    # We implement this as a global broadcast/ARP silencer to save battery.
+    if [ "$action" = "disable" ]; then
+        log_info "Silencing IPv4 globally (IGMP/Broadcast tuning)..."
+        
+        sysctl -w net.ipv4.icmp_echo_ignore_broadcasts=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf.all.arp_ignore=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf.all.arp_announce=2 >/dev/null 2>&1 || true
+        
+        printf "net.ipv4.icmp_echo_ignore_broadcasts=1\nnet.ipv4.conf.all.arp_ignore=1\nnet.ipv4.conf.all.arp_announce=2\n" > "$conf_file" 2>/dev/null || true
+        
+        json_success '{"action": "ipv4", "status": "silenced", "note": "IPv4 cannot be fully disabled. Broadcasts and aggressive ARP announcements have been silenced."}'
+        
+    elif [ "$action" = "enable" ]; then
+        log_info "Restoring IPv4 global broadcast behavior..."
+        
+        rm -f "$conf_file" 2>/dev/null || true
+        
+        sysctl -w net.ipv4.icmp_echo_ignore_broadcasts=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf.all.arp_ignore=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf.all.arp_announce=0 >/dev/null 2>&1 || true
+        
+        json_success '{"action": "ipv4", "status": "enabled"}'
+        
+    else
+        local status="enabled"
+        local val
+        val=$(sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null || echo "0")
+        if [ "$val" -eq 1 ]; then status="silenced"; fi
+        json_success '{"action": "ipv4", "status": "'"$status"'"}'
+    fi
+}
+
 # --- Firewall Abstraction (NAT) ---
 
 detect_firewall_tool() {
