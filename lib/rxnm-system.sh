@@ -431,43 +431,41 @@ enable_nat_masquerade() {
     if [ -z "$wan_iface" ] || [ "$lan_iface" = "$wan_iface" ]; then return 0; fi
     
     log_info "Enabling NAT: LAN($lan_iface) -> WAN($wan_iface) using $fw_tool"
-    local T="timeout 2s"
     
     if [ "$fw_tool" = "iptables" ]; then
         # 1. Masquerade Outbound
-        $T iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
-        $T iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
+        timeout 2s iptables -t nat -C POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE 2>/dev/null || \
+        timeout 2s iptables -t nat -A POSTROUTING -o "$wan_iface" -m comment --comment "rocknix" -j MASQUERADE
         
         # 2. Forwarding LAN -> WAN
-        $T iptables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-        $T iptables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
+        timeout 2s iptables -C FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+        timeout 2s iptables -A FORWARD -i "$lan_iface" -o "$wan_iface" -m comment --comment "rocknix" -j ACCEPT
         
         # 3. Forwarding WAN -> LAN (Established)
-        $T iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
-        $T iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
+        timeout 2s iptables -C FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT 2>/dev/null || \
+        timeout 2s iptables -A FORWARD -i "$wan_iface" -o "$lan_iface" -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "rocknix" -j ACCEPT
         
         # 4. MSS Clamping
-        $T iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
-        $T iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
+        timeout 2s iptables -t mangle -C FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+        timeout 2s iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "rocknix" -j TCPMSS --clamp-mss-to-pmtu
         
     elif [ "$fw_tool" = "nft" ]; then
         # NFTables boilerplate
-        $T nft add table ip rocknix_nat 2>/dev/null
-        $T nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
-        $T nft flush chain ip rocknix_nat postrouting
-        $T nft add rule ip rocknix_nat postrouting oifname "$wan_iface" masquerade
+        timeout 2s nft add table ip rocknix_nat 2>/dev/null
+        timeout 2s nft add chain ip rocknix_nat postrouting "{ type nat hook postrouting priority 100 ; }" 2>/dev/null
+        timeout 2s nft flush chain ip rocknix_nat postrouting
+        timeout 2s nft add rule ip rocknix_nat postrouting oifname "$wan_iface" masquerade
         
-        $T nft add table ip rocknix_filter 2>/dev/null
-        $T nft add chain ip rocknix_filter forward "{ type filter hook forward priority 0 ; }" 2>/dev/null
-        $T nft flush chain ip rocknix_filter forward
-        $T nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
-        $T nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
+        timeout 2s nft add table ip rocknix_filter 2>/dev/null
+        timeout 2s nft add chain ip rocknix_filter forward "{ type filter hook forward priority 0 ; }" 2>/dev/null
+        timeout 2s nft flush chain ip rocknix_filter forward
+        timeout 2s nft add rule ip rocknix_filter forward iifname "$lan_iface" oifname "$wan_iface" accept
+        timeout 2s nft add rule ip rocknix_filter forward iifname "$wan_iface" oifname "$lan_iface" ct state established,related accept
     fi
 }
 
 disable_nat_masquerade() {
     local fw_tool; fw_tool=$(detect_firewall_tool)
-    local T="timeout 2s"
     
     if [ "$fw_tool" = "iptables" ]; then
         # Clean up rules marked with our comment
@@ -479,6 +477,7 @@ disable_nat_masquerade() {
                 # Safe POSIX newline split
                 IFS='
 '
+                # shellcheck disable=SC2086
                 for line in $rules; do
                     [ -z "$line" ] && continue
                     # Basic parsing to extract rule for deletion
@@ -489,14 +488,15 @@ disable_nat_masquerade() {
                     chain=$(echo "$line" | awk '{print $2}')
                     
                     # Delete it
-                    $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
+                    # shellcheck disable=SC2086
+                    timeout 2s iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
                 done
                 IFS="$_old_ifs"
                 set +f
             fi
         done
     elif [ "$fw_tool" = "nft" ]; then
-        $T nft delete table ip rocknix_nat 2>/dev/null
-        $T nft delete table ip rocknix_filter 2>/dev/null
+        timeout 2s nft delete table ip rocknix_nat 2>/dev/null
+        timeout 2s nft delete table ip rocknix_filter 2>/dev/null
     fi
 }
