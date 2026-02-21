@@ -15,7 +15,7 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.1.0-dev}"
+: "${RXNM_VERSION:=1.1.0}"
 : "${RXNM_API_VERSION:=1.1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
@@ -71,13 +71,13 @@ _LP_CACHE="${RUN_DIR}/.is_low_power"
 
 if [ -f "$_LP_CACHE" ]; then
     # Fast path: Read from runtime cache
-    [ "$(cat "$_LP_CACHE")" == "true" ] && IS_LOW_POWER=true
+    if [ "$(cat "$_LP_CACHE")" = "true" ]; then IS_LOW_POWER=true; fi
 else
     # Slow path: Detection logic
     if [ -x "$RXNM_AGENT_BIN" ]; then
         # Prefer Agent detection if available
         _lp=$("$RXNM_AGENT_BIN" --is-low-power 2>/dev/null || echo "false")
-        [ "$_lp" == "true" ] && IS_LOW_POWER=true
+        if [ "$_lp" = "true" ]; then IS_LOW_POWER=true; fi
     else
         # Fallback: Grep cpuinfo for known low-power chipsets
         # This list includes Rockchip, Allwinner, Broadcom, Amlogic, and MIPS variants common in handhelds.
@@ -87,7 +87,7 @@ else
     fi
     # Cache the result to avoid repeated greps
     if [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR" 2>/dev/null; then
-         echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || true
+         echo "$IS_LOW_POWER" > "$_LP_CACHE" 2>/dev/null || log_debug "Failed to write low-power cache to $_LP_CACHE"
     fi
 fi
 
@@ -116,6 +116,18 @@ else
     SCAN_POLL_MS=100
 fi
 
+# Maximum bytes accepted from IWD GetManagedObjects DBus response.
+# 512KB covers ~1000 BSSIDs with full metadata. Tune up for dense
+# enterprise environments; tune down for very memory-constrained targets.
+: "${IWD_DBUS_MAX_KB:=512}"
+
+# --- FD Reservations ---
+# POSIX only guarantees exec N>file works for single-digit N (0-9).
+# These constants document the reservation; do not use FD 8 or 9 elsewhere.
+RXNM_FD_GLOBAL_LOCK=8    # acquire_global_lock — singleton process lock
+RXNM_FD_IFACE_LOCK=9     # with_iface_lock — per-interface serialisation (Legacy/Fallback, dynamically allocated now)
+export RXNM_FD_GLOBAL_LOCK RXNM_FD_IFACE_LOCK
+
 # --- Logic Constants ---
 : "${MIN_CHANNEL:=1}"
 : "${WIFI_CHANNEL_MAX:=177}"
@@ -139,19 +151,33 @@ GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
 GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
 # v1.1.0: State caching for robust nullify restoration
 NULLIFY_STATE_FILE="${RUN_DIR}/nullify.state"
+# C-3 FIX: Define roaming map file globally to prevent set -eu crash in roaming module
+ROAM_MAP_FILE="${RUN_DIR}/roaming-bssid-map.json"
 
 # --- JSON Processor Detection ---
 # Detects the fastest available JSON processor (jaq > gojq > jq).
 if command -v jaq >/dev/null; then
     # Ensure jaq supports --argjson (some older versions do not)
     if jaq --help 2>&1 | grep -q "\--argjson"; then export JQ_BIN="jaq"; else export JQ_BIN="jq"; fi
-elif command -v gojq >/dev/null; then export JQ_BIN="gojq";
+elif command -v gojq >/dev/null; then
+    if gojq --help 2>&1 | grep -q "\--argjson"; then export JQ_BIN="gojq"; else export JQ_BIN="jq"; fi
 else export JQ_BIN="jq"; fi
 
-# --- State Caches ---
-declare -A SERVICE_STATE_CACHE
-declare -A SERVICE_STATE_TS
+# --- Shell Capability Flags ---
+# Detected once at startup; used by guard wrappers in rxnm-utils.sh.
+# These are exported so sourced libraries see them without re-detection.
+RXNM_SHELL_IS_BASH=false
+[ -n "${BASH_VERSION:-}" ] && RXNM_SHELL_IS_BASH=true
+export RXNM_SHELL_IS_BASH
 
-# --- Nullify Mode Constants ---
-export NULLIFY_SERVICES="systemd-networkd NetworkManager connman iwd wpa_supplicant bluetooth bluez ifupdown dhcpcd systemd-resolved avahi-daemon cups-browsed sshd dropbear telnetd ntpd chrony systemd-timesyncd smbd nmbd wsdd rpcbind nfs-common nginx lighttpd apache2 nftables iptables ufw firewalld docker docker.socket containerd podman podman.socket lxc lxc-net libvirtd virtlogd tailscaled zerotier-one tinc nebula warpgate"
-export NULLIFY_MODULES="nf_tables x_tables ip_tables ip6_tables nf_conntrack nf_nat cfg80211 mac80211 bluetooth bnep rfcomm dwmac_rk stmmac ath11k_pci ath12k rmnet qrtr g_ether usb_f_rndis ipv6 wireguard bridge bonding veth macvlan ipvlan tun tap overlay br_netfilter dummy vxlan geneve ax25 netrom sctp dccp appletalk"
+RXNM_HAS_JQ=false
+command -v "${JQ_BIN:-jq}" >/dev/null 2>&1 && RXNM_HAS_JQ=true
+export RXNM_HAS_JQ
+
+# --- State Caches ---
+# NOTE: Bash associative arrays (declare -A) are guarded to avoid syntax errors in sh.
+# rxnm-system.sh handles the constrained path via flat variables.
+if [ "${RXNM_SHELL_IS_BASH}" = "true" ]; then
+    declare -A SERVICE_STATE_CACHE
+    declare -A SERVICE_STATE_TS
+fi

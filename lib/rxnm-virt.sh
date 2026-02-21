@@ -69,14 +69,16 @@ _task_create_macvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "MACVLAN=${name}"
         else
             if ! grep -q "MACVLAN=${name}" "$parent_cfg"; then
-                # Fallback: Correctly handle appending to [Network] section
-                if grep -q "\[Network\]" "$parent_cfg"; then
+                # Fallback: Correctly handle appending to [Network] section using atomic temp file
+                cp "$parent_cfg" "${parent_cfg}.tmp"
+                if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
                     # Section exists, just append property
-                    printf "MACVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "MACVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 else
                     # Section missing, append header and property
-                    printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nMACVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 fi
+                mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -90,7 +92,8 @@ _task_create_macvlan() {
             --mdns "yes" \
             --llmnr "yes")
             
-        content="${content/\[Network\]/[Network]\nMACVLAN=${name}}"
+        # Replaces POSIX string replacement
+        content="$(echo "$content" | sed "s/\[Network\]/[Network]\nMACVLAN=${name}/")"
         secure_write "$parent_cfg" "$content" "644"
     fi
     
@@ -115,11 +118,14 @@ _task_create_ipvlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "IPVLAN=${name}"
         else
             if ! grep -q "IPVLAN=${name}" "$parent_cfg"; then
-                 if grep -q "\[Network\]" "$parent_cfg"; then
-                    printf "IPVLAN=%s\n" "$name" >> "$parent_cfg"
+                 # Atomic temp file update
+                 cp "$parent_cfg" "${parent_cfg}.tmp"
+                 if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
+                    printf "IPVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                  else
-                    printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nIPVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                  fi
+                 mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -132,7 +138,7 @@ _task_create_ipvlan() {
             --mdns "yes" \
             --llmnr "yes")
             
-        content="${content/\[Network\]/[Network]\nIPVLAN=${name}}"
+        content="$(echo "$content" | sed "s/\[Network\]/[Network]\nIPVLAN=${name}/")"
         secure_write "$parent_cfg" "$content" "644"
     fi
     
@@ -164,8 +170,8 @@ _task_create_bond() {
     local netdev_file="${STORAGE_NET_DIR}/60-bond-${name}.netdev"
     local netdev_content="[NetDev]\nName=${name}\nKind=bond\n[Bond]\nMode=${mode}\nMIIMonitorSec=100ms\n"
     
-    if [ "$mode" == "802.3ad" ]; then
-        netdev_content+="LACPTransmitRate=fast\nTransmitHashPolicy=layer2+3\n"
+    if [ "$mode" = "802.3ad" ]; then
+        netdev_content="${netdev_content}LACPTransmitRate=fast\nTransmitHashPolicy=layer2+3\n"
     fi
     secure_write "$netdev_file" "$netdev_content" "644"
     
@@ -221,11 +227,14 @@ _task_create_vlan() {
             "$RXNM_AGENT_BIN" --append-config "$parent_cfg" --line "VLAN=${name}"
         else
             if ! grep -q "VLAN=${name}" "$parent_cfg"; then
-                if grep -q "\[Network\]" "$parent_cfg"; then
-                    printf "VLAN=%s\n" "$name" >> "$parent_cfg"
+                # Atomic temp file update
+                cp "$parent_cfg" "${parent_cfg}.tmp"
+                if grep -q "\[Network\]" "${parent_cfg}.tmp"; then
+                    printf "VLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 else
-                    printf "\n[Network]\nVLAN=%s\n" "$name" >> "$parent_cfg"
+                    printf "\n[Network]\nVLAN=%s\n" "$name" >> "${parent_cfg}.tmp"
                 fi
+                mv -f "${parent_cfg}.tmp" "$parent_cfg"
             fi
         fi
     else
@@ -289,7 +298,7 @@ action_create_veth() {
     ! validate_interface_name "$name" && { json_error "Invalid name"; return 1; }
     ! validate_interface_name "$peer" && { json_error "Invalid peer"; return 1; }
     
-    _task_create_veth "$name" "$peer"
+    with_iface_lock "$name" _task_create_veth "$name" "$peer"
     json_success '{"type": "veth", "iface": "'"$name"'", "peer": "'"$peer"'"}'
 }
 
@@ -304,7 +313,10 @@ action_create_bond() {
 
 action_set_bond_slave() {
     local iface="$1"; local bond="$2"
-    [ -z "$iface" ] || [ -z "$bond" ] && { json_error "Interface and Bond required"; return 1; }
+    if [ -z "$iface" ] || [ -z "$bond" ]; then
+        json_error "Interface and Bond required"
+        return 1
+    fi
     ! validate_interface_name "$iface" && { json_error "Invalid interface"; return 1; }
     
     with_iface_lock "$iface" _task_set_bond_slave "$iface" "$bond"

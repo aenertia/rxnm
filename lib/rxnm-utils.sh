@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
 # -----------------------------------------------------------------------------
 # FILE: rxnm-utils.sh
 # PURPOSE: Standard Library for RXNM
@@ -14,47 +16,82 @@
 # Description: Caches sysfs reads to reduce I/O overhead in tight loops.
 # Arguments: $1 = Interface Name
 # Returns: String containing operstate:address:mtu
-declare -A _sysfs_cache
+# Optimization: Restored Bash Associative Arrays (Hidden from POSIX parser via eval)
+if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+    eval 'declare -A _sysfs_cache'
+fi
+
 get_iface_sysfs() {
-    local iface=$1
-    [ -n "${_sysfs_cache[$iface]}" ] && echo "${_sysfs_cache[$iface]}" && return
+    local iface="$1"
     local data=""
-    if [ -d "/sys/class/net/$iface" ]; then
-        data=$(paste -d: /sys/class/net/$iface/operstate /sys/class/net/$iface/address /sys/class/net/$iface/mtu 2>/dev/null)
+    
+    # Fast Path: Bash Cache (eval-guarded)
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        eval 'data="${_sysfs_cache['"$iface"']:-}"'
+        if [ -n "$data" ]; then
+             echo "$data"
+             return
+        fi
     fi
-    _sysfs_cache[$iface]="$data"
+    
+    if [ -d "/sys/class/net/$iface" ]; then
+        if [ -r "/sys/class/net/$iface/operstate" ] && [ -r "/sys/class/net/$iface/address" ] && [ -r "/sys/class/net/$iface/mtu" ]; then
+             data=$(paste -d: "/sys/class/net/$iface/operstate" "/sys/class/net/$iface/address" "/sys/class/net/$iface/mtu" 2>/dev/null)
+        fi
+    fi
+    
+    # Store in Cache (Bash only, eval-guarded)
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$data" ]; then
+        eval '_sysfs_cache['"$iface"']="$data"'
+    fi
+    
     echo "$data"
+}
+
+clear_sysfs_cache() {
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        eval '_sysfs_cache=()'
+    fi
 }
 
 # Description: Cleans up temporary files and stale locks on exit.
 cleanup() {
-    local temp_files=("${STORAGE_NET_DIR}"/*.XXXXXX)
-    if [ ${#temp_files[@]} -gt 0 ]; then
-        rm -f "${temp_files[@]}" 2>/dev/null
+    exec 8>&- 2>/dev/null   # Release global lock FD (RXNM_FD_GLOBAL_LOCK)
+    
+    # POSIX compliant cleanup using find instead of array globs
+    if [ -n "${STORAGE_NET_DIR:-}" ] && [ -d "$STORAGE_NET_DIR" ]; then
+        find "$STORAGE_NET_DIR" -maxdepth 1 -name "*.XXXXXX" -exec rm -f {} + 2>/dev/null
     fi
+    
     # Release global lock if owned by this process
-    if [ -f "$GLOBAL_PID_FILE" ]; then
+    if [ -f "${GLOBAL_PID_FILE:-}" ]; then
         local pid
         pid=$(cat "$GLOBAL_PID_FILE" 2>/dev/null || echo "")
-        if [ "$pid" == "$$" ]; then
+        if [ "$pid" = "$$" ]; then
             rm -f "$GLOBAL_PID_FILE" "$GLOBAL_LOCK_FILE" 2>/dev/null
         fi
     fi
+    
     # Attempt to clean up stale sub-locks in RUN_DIR
-    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then
-        if command -v fuser >/dev/null; then
-            find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while read -r lock; do
-                if [ -f "$lock" ]; then
-                    local lock_pid
-                    lock_pid=$(fuser "$lock" 2>/dev/null | awk '{print $1}')
-                    if [ -z "$lock_pid" ] || [ "$lock_pid" == "$$" ]; then
-                        rm -f "$lock" 2>/dev/null
-                    fi
-                fi
-            done
-        fi
+    _try_remove_stale_lock() {
+        local lock="$1"
+        [ -f "$lock" ] || return
+        
+        # M-3 FIX: Use FD-based flock in a subshell for universal BusyBox compatibility
+        # and to avoid TOCTOU races by holding the lock while unlinking.
+        (
+            if exec 9>>"$lock" && flock -n 9; then
+                rm -f "$lock"
+            fi
+        ) 2>/dev/null
+    }
+
+    if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then
+        find "$RUN_DIR" -name "*.lock" -type f 2>/dev/null | while IFS= read -r lf; do
+            _try_remove_stale_lock "$lf"
+        done
     fi
-    if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
+    if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
         rm -rf "$TMPDIR" 2>/dev/null
     fi
 }
@@ -66,7 +103,7 @@ cleanup() {
 secure_exec() {
     local was_x=0
     # Check if xtrace is currently enabled
-    if [[ $- == *x* ]]; then was_x=1; set +x; fi
+    if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
     
     # Execute the command
     "$@"
@@ -81,11 +118,14 @@ secure_exec() {
 # Arguments: $1 = Timeout (seconds)
 # Returns: 0 on success, 1 on failure.
 acquire_global_lock() {
+    # shellcheck disable=SC2034
     local timeout="${1:-5}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
-    exec 200>"$GLOBAL_LOCK_FILE"
     
-    if ! flock -n 200; then
+    # FD 8 reserved for global lock — see RXNM_FD_GLOBAL_LOCK in rxnm-constants.sh.
+    exec 8>"$GLOBAL_LOCK_FILE"
+    
+    if ! flock -w "$timeout" 8; then
         # Lock exists, check if stale
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
@@ -93,21 +133,24 @@ acquire_global_lock() {
             if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
-                exec 200>"$GLOBAL_LOCK_FILE"
-                if ! flock -n 200; then
-                    log_error "Failed to acquire lock even after cleanup"
+                exec 8>"$GLOBAL_LOCK_FILE"
+                if ! flock -w 2 8; then
+                    log_error "Lock race on stale-lock cleanup — concurrent instance won"
+                    exec 8>&-
                     return 1
                 fi
             else
-                log_error "Another instance is running (PID $old_pid)"
+                log_error "Another instance is running (PID ${old_pid:-unknown})"
+                exec 8>&-
                 return 1
             fi
         else
-            log_error "Another instance is running (Lock held)"
+            log_error "Another instance is running (no PID file)"
+            exec 8>&-
             return 1
         fi
     fi
-    echo $$ > "$GLOBAL_PID_FILE"
+    echo "$$" > "$GLOBAL_PID_FILE"
     trap cleanup EXIT INT TERM
     return 0
 }
@@ -116,46 +159,65 @@ acquire_global_lock() {
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
 with_iface_lock() {
-    local iface="$1"; shift
-    local timeout="${TIMEOUT:-10}"
-    local lock_file="${RUN_DIR}/${iface}.lock"
-    local lock_fd
+    local _wi_iface="$1"
+    shift
+    local _wi_timeout="${TIMEOUT:-10}"
+    local _wi_lock_file="${RUN_DIR}/${_wi_iface}.lock"
     
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
-    # Open lock file descriptor
-    exec {lock_fd}>"$lock_file" || {
-        log_error "Failed to open lock file for $iface"
-        return 1
-    }
+    # Check if we already hold this lock (e.g., nested calls within the SAME process)
+    if [ "${_RXNM_ACTIVE_LOCK:-}" = "$_wi_iface" ]; then
+        "$@"
+        return $?
+    fi
     
-    # Attempt to acquire lock with timeout
-    if ! flock -w "$timeout" "$lock_fd"; then
-        log_error "Failed to acquire lock for $iface after ${timeout}s"
-        exec {lock_fd}>&-
+    # C-6 FIX: Dynamically allocate FDs to prevent lock clobbering when 
+    # concurrent backgrounded RXNM tasks run within the same parent shell.
+    # N-1 NOTE: This counter persists across sourced invocations in long-running 
+    # parent shells. It safely wraps at 200, which may reuse FDs in extreme cases.
+    : "${_RXNM_FD_COUNTER:=10}"
+    
+    # N-4 FIX: Export the counter so subshells don't reset to 10 and clobber parent FDs.
+    export _RXNM_FD_COUNTER
+    local _wi_fd="$_RXNM_FD_COUNTER"
+    _RXNM_FD_COUNTER=$((_RXNM_FD_COUNTER + 1))
+    
+    # Reset bounds safely within POSIX spec to prevent max fd limits
+    if [ "$_RXNM_FD_COUNTER" -gt 200 ]; then _RXNM_FD_COUNTER=10; fi
+    
+    eval "exec ${_wi_fd}>\"$_wi_lock_file\""
+    
+    if ! flock -w "$_wi_timeout" "$_wi_fd"; then
+        log_error "Failed to acquire lock for $_wi_iface after ${_wi_timeout}s"
+        eval "exec ${_wi_fd}>&-"
         return 1
     fi
     
-    # Execute the protected command
-    local ret=0
-    "$@" || ret=$?
+    local _prev_lock="${_RXNM_ACTIVE_LOCK:-}"
+    _RXNM_ACTIVE_LOCK="$_wi_iface"
+    
+    # Execute protected command
+    "$@"
+    local _wi_ret=$?
+    
+    _RXNM_ACTIVE_LOCK="$_prev_lock"
     
     # Release and close
-    flock -u "$lock_fd"
-    exec {lock_fd}>&-
-    return $ret
+    eval "exec ${_wi_fd}>&-"
+    return $_wi_ret
 }
 
 # --- Logging ---
 
 log_debug() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
 }
 log_info() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
 }
 log_warn() {
-    [ "$LOG_LEVEL" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
 }
 log_error() {
     echo "[ERROR] $*" >&2
@@ -164,11 +226,78 @@ log_error() {
     fi
 }
 
-# Description: Exits the script with an error message formatted correctly for the requested output mode.
-# Arguments: $1 = Message
+# -----------------------------------------------------------------------------
+# Function: rxnm_json_get
+# Description: Extracts a single top-level key from a flat JSON object.
+# -----------------------------------------------------------------------------
+rxnm_json_get() {
+    local _json="$1"
+    local _key="$2"
+    local val=""
+
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        # shellcheck disable=SC2016
+        printf '%s' "$_json" | "$JQ_BIN" -r ".${_key} // empty"
+        return
+    fi
+
+    # String: "key":"value"
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' | head -n1)
+    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+    
+    # Number: "key":123 or "key":-1.5
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*-\?[0-9][0-9.]*' | \
+        sed 's/.*:[[:space:]]*//' | head -n1)
+    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+    
+    # Boolean: "key":true|false
+    val=$(printf '%s' "$_json" | \
+        grep -o '"'"$_key"'"[[:space:]]*:[[:space:]]*\(true\|false\)' | \
+        sed 's/.*:[[:space:]]*//' | head -n1)
+    printf '%s\n' "${val:-}"
+}
+
+# -----------------------------------------------------------------------------
+# Function: rxnm_match
+# Description: POSIX regex matcher wrapper
+# -----------------------------------------------------------------------------
+rxnm_match() {
+    local _str="$1"
+    local _pat="$2"
+    local _grep_ret
+
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        # Path A: Bash native ERE — no subprocess
+        # Hide [[ =~ ]] from POSIX parsers via eval
+        eval '[[ "$_str" =~ $_pat ]]'
+        return
+    fi
+
+    # Path B: grep -qE is universally available (BusyBox, musl, glibc).
+    # Try it first to avoid burning an agent invocation on pattern matching.
+    if printf '%s' "$_str" | grep -qE "$_pat" 2>/dev/null; then
+        return 0
+    else
+        _grep_ret=$?
+        [ "$_grep_ret" -eq 1 ] && return 1   # Clean no-match from grep — trust it
+    fi
+
+    # grep returned 2 (bad pattern) or failed — fall back to agent regex
+    if [ -x "${RXNM_AGENT_BIN:-}" ]; then
+        "$RXNM_AGENT_BIN" --match "$_str" "$_pat"
+        return
+    fi
+
+    # No agent, bad grep pattern: conservatively return 1 (no-match)
+    return 1
+}
+
 cli_error() {
     local msg="$1"
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         json_error "$msg"
     else
         echo "Error: $msg" >&2
@@ -179,65 +308,16 @@ cli_error() {
 audit_log() {
     local event="$1"
     local details="$2"
-    logger -t rocknix-network-audit -p auth.notice "$event: $details"
+    logger -t rxnm-audit -p auth.notice "$event: $details"
 }
 
-# --- Output Formatting (JSON/Table) ---
-
-# Description: Prints a TSV-based table from JSON input using awk/column.
-# Arguments: $1 = JSON Input, $2 = Column Definition (key:HEADER,key:HEADER)
-print_table() {
-    local json_input="$1"
-    local columns="$2"
-    local jq_query="["
-    local header_row=""
-    
-    IFS=',' read -ra COLS <<< "$columns"
-    for col in "${COLS[@]}"; do
-        local key="${col%%:*}"
-        local hdr="${col#*:}"
-        jq_query+=" .${key} // \"-\","
-        header_row+="${hdr}\t"
-    done
-    jq_query="${jq_query%,}] | @tsv"
-    
-    local tsv_data
-    tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r ".[]? | $jq_query" 2>/dev/null)
-    
-    # Fallback if first query empty
-    if [ -z "$tsv_data" ] && [ "${RXNM_FORMAT:-human}" != "json" ]; then
-        tsv_data=$(echo -e "${header_row}"; echo "$json_input" | "$JQ_BIN" -r "$jq_query" 2>/dev/null)
-    fi
-    
-    if command -v column >/dev/null; then
-        echo "$tsv_data" | column -t -s $'\t'
-    else
-        # BusyBox awk fallback for alignment
-        echo "$tsv_data" | awk -F'\t' '{
-            for(i=1;i<=NF;i++) {
-                if(length($i) > max[i]) max[i] = length($i)
-            }
-            lines[NR] = $0
-        }
-        END {
-            for(i=1;i<=NR;i++) {
-                split(lines[i], fields, "\t")
-                for(j=1;j<=NF;j++) {
-                    printf "%-" (max[j]+2) "s", fields[j]
-                }
-                printf "\n"
-            }
-        }'
-    fi
-}
+# --- Output Formatting ---
 
 # Description: Outputs success data in the requested format (JSON, Table, or Human).
 # Arguments: $1 = JSON payload (string)
 json_success() {
     local data="${1:-}"
     
-    # Prioritize argument if provided. Only check stdin if arg is empty.
-    # This prevents accidental consumption of stdin pipes in CI environments.
     if [ -z "$data" ] && [ -p /dev/stdin ]; then
         data=$(cat)
     fi
@@ -245,9 +325,21 @@ json_success() {
     
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
-    # REFINED: Inject api_version into every success response
+    # Corrected: Use POSIX fallback if JQ missing
     local full_json
-    full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
+    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+        # shellcheck disable=SC2016
+        full_json=$("$JQ_BIN" -n --argjson data "$data" --arg ver "$api_ver" '{success:true, api_version:$ver} + $data')
+    else
+        if [ "$data" = "{}" ]; then
+             full_json=$(printf '{"success": true, "api_version": "%s"}' "$api_ver")
+        else
+             # Primitive merge: safely trim braces before structure merge
+             local body="${data#\{}"
+             body="${body%\}}"
+             full_json=$(printf '{"success": true, "api_version": "%s", %s}' "$api_ver" "$body")
+        fi
+    fi
     
     case "${RXNM_FORMAT:-human}" in
         json)
@@ -255,117 +347,14 @@ json_success() {
             ;;
         simple)
             if [ -n "${RXNM_GET_KEY:-}" ]; then
-                # Use jq to extract specific path
-                local query="${RXNM_GET_KEY}"
-                
-                # If the key provided doesn't look like a path, try direct top-level access
-                if [[ "$query" != .* ]]; then query=".${query}"; fi
-                
-                local val
-                val=$(echo "$full_json" | "$JQ_BIN" -r "$query // empty")
-                
-                # If extraction failed but user looked for typical interface props, search inside interfaces map
-                if [ -z "$val" ]; then
-                     val=$(echo "$full_json" | "$JQ_BIN" -r ".interfaces[]? | $query // empty" | head -n1)
-                fi
-                
-                echo "$val"
+                rxnm_json_get "$full_json" "$RXNM_GET_KEY"
             else
-                # Heuristic fallback for --simple without --get
-                # Returns IP (v4), SSID, Status or Message if found
-                # Prioritizes clean single-line output for scripting (IP only)
-                echo "$full_json" | "$JQ_BIN" -r '
-                    if .interfaces and (.interfaces | length == 1) then
-                        (.interfaces | to_entries[0].value | (.ip // .ipv4[0] // .state))
-                    elif .ip and .ip != null then .ip
-                    elif .ssid and .ssid != null then .ssid
-                    elif .status and .status != null then .status
-                    elif .result and .result != null then .result
-                    elif .message then .message
-                    else "OK" end
-                '
+                # Very rough heuristic without JQ
+                echo "OK"
             fi
             ;;
-        table)
-            # Detect data type to format table correctly
-            local type_detect
-            type_detect=$(echo "$full_json" | "$JQ_BIN" -r '
-                if .results then "results"
-                elif .networks then "networks"
-                elif .interfaces then "interfaces"
-                elif .profiles then "profiles"
-                elif .devices then "devices"
-                else "unknown" end')
-            
-            case "$type_detect" in
-                results)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIGNAL(%),security:SECURITY,connected:CONNECTED,channel:CH"
-                    ;;
-                networks)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SECURITY,last_connected:LAST_SEEN,hidden:HIDDEN"
-                    ;;
-                interfaces)
-                    local arr_data
-                    arr_data=$(echo "$full_json" | "$JQ_BIN" '[.interfaces[]]')
-                    print_table "$arr_data" "name:NAME,type:TYPE,connected:STATE,ip:IP_ADDRESS,ssid:SSID/DETAILS"
-                    ;;
-                profiles)
-                    if echo "$full_json" | "$JQ_BIN" -e '.profiles[0] | type == "string"' >/dev/null 2>&1; then
-                         echo "$full_json" | "$JQ_BIN" -r '.profiles[]' | sed '1iPROFILE_NAME'
-                    else
-                         print_table "$(echo "$full_json" | "$JQ_BIN" '.profiles')" "name:NAME,iface:INTERFACE"
-                    fi
-                    ;;
-                devices)
-                    print_table "$(echo "$full_json" | "$JQ_BIN" '.devices')" "mac:MAC_ADDRESS,name:DEVICE_NAME"
-                    ;;
-                *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
-                    ;;
-            esac
-            ;;
         *)
-            # Human readable output logic
-            local key_detect
-            key_detect=$(echo "$full_json" | "$JQ_BIN" -r '
-                if .message then "message"
-                elif .action then "action"
-                elif .connected == true then "connected"
-                elif .results then "results"
-                elif .networks then "networks"
-                elif .interfaces then "interfaces"
-                else "unknown" end')
-            
-            case "$key_detect" in
-                message)
-                    echo "$full_json" | "$JQ_BIN" -r '.message'
-                    ;;
-                action)
-                    local action_str
-                    action_str=$(echo "$full_json" | "$JQ_BIN" -r '"✓ Success: " + .action + " performed on " + (.iface // .ssid // .name // "system")')
-                    echo "$action_str"
-                    ;;
-                connected)
-                    local ssid
-                    ssid=$(echo "$full_json" | "$JQ_BIN" -r '.ssid')
-                    echo "✓ Successfully connected to $ssid."
-                    ;;
-                results)
-                     print_table "$(echo "$full_json" | "$JQ_BIN" '.results')" "ssid:SSID,strength_pct:SIG,security:SEC,connected:CONN"
-                     ;;
-                networks)
-                     print_table "$(echo "$full_json" | "$JQ_BIN" '.networks')" "ssid:SSID,security:SEC,last_connected:LAST_SEEN"
-                     ;;
-                interfaces)
-                     echo "--- Network Status ---"
-                     # Force output of IPv6 and Routes if available
-                     # Uses string interpolation to ensure fields are printed even if empty/null
-                     echo "$full_json" | "$JQ_BIN" -r '.interfaces[] | "Interface: \(.name)\n  Type: \(.type)\n  State: \(if .connected then "UP" else "DOWN" end)\n  IP: \(.ip // "-")\n  IPv6: \((.ipv6 // []) | join(", "))\n  Routes: \((.routes // []) | map(.dst + " via " + (.gw // "on-link")) | join(", "))\n  Details: \(.ssid // .members // "-")\n"'
-                     ;;
-                *)
-                    echo "$full_json" | "$JQ_BIN" -r 'del(.success, .api_version) | to_entries | .[] | "\(.key): \(.value)"'
-                    ;;
-            esac
+            echo "$full_json"
             ;;
     esac
 }
@@ -378,9 +367,14 @@ json_error() {
     local hint="${3:-}"
     local api_ver="${RXNM_API_VERSION:-1.0}"
     
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then
-        "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
-            '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
+        if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+            # shellcheck disable=SC2016
+            "$JQ_BIN" -n --arg msg "$msg" --arg code "$code" --arg hint "$hint" --arg ver "$api_ver" \
+                '{success:false, api_version:$ver, error:$msg, hint:(if $hint=="" then null else $hint end), exit_code:($code|tonumber)}'
+        else
+            printf '{"success": false, "api_version": "%s", "error": "%s", "exit_code": %s}\n' "$api_ver" "$msg" "$code"
+        fi
     else
         echo "✗ Error: $msg" >&2
         [ -n "$hint" ] && echo "  hint: $hint" >&2
@@ -394,20 +388,20 @@ confirm_action() {
     local msg="$1"
     local force="${2:-false}"
     
-    if [ "$force" == "true" ]; then return 0; fi
-    if [ "${RXNM_FORMAT:-human}" == "json" ]; then return 0; fi # Implicit yes in JSON mode
+    if [ "$force" = "true" ]; then return 0; fi
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then return 0; fi # Implicit yes in JSON mode
     
-    if [ ! -t 0 ]; then
+    if ! [ -t 0 ]; then
         log_error "Destructive action requires confirmation or --yes flag."
         return 1
     fi
     
-    read -p "⚠ $msg [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Cancelled."
-        exit 0
-    fi
+    printf '⚠ %s [y/N] ' "$msg"
+    read -r REPLY
+    case "$REPLY" in
+        [Yy]*) ;;
+        *) echo "Cancelled."; exit 0 ;;
+    esac
     return 0
 }
 
@@ -417,17 +411,23 @@ auto_select_interface() {
     local type="$1"
     local count=0
     local candidate=""
-    local ifaces=(/sys/class/net/*)
-    for iface_path in "${ifaces[@]}"; do
-        local ifname=$(basename "$iface_path")
-        if [[ "$type" == "wifi" ]]; then
+    local ifaces
+    # POSIX safe expansion of glob
+    set -- /sys/class/net/*
+    ifaces="$*"
+    
+    for iface_path in $ifaces; do
+        if [ ! -e "$iface_path" ]; then continue; fi
+        local ifname
+        ifname=$(basename "$iface_path")
+        if [ "$type" = "wifi" ]; then
             if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
                 candidate="$ifname"
                 count=$((count + 1))
             fi
         fi
     done
-    if [ $count -eq 1 ]; then
+    if [ "$count" -eq 1 ]; then
         echo "$candidate"
         return 0
     fi
@@ -435,104 +435,103 @@ auto_select_interface() {
 }
 
 sanitize_ssid() {
-    # Preserves UTF-8, Emojis, and Spaces for readability in filenames.
-    # Only replaces the directory separator '/' with underscore '_' to ensure filesystem safety.
-    # Note: Bash variable replacement ${var//\//_} handles UTF-8 correctly on modern Linux systems.
-    # Example: "Café 🚀/5G" -> "Café 🚀_5G"
-    printf '%s\n' "${1//\//_}"
+    printf '%s' "$1" | sed 's/[^a-zA-Z0-9_.-]/_/g'
 }
 
 json_escape() {
     local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    s="${s//$'\b'/\\b}"
-    s="${s//$'\f'/\\f}"
-    printf '%s' "$s"
+    # 1. Append newline for POSIX sed safety to prevent dropping string on strict BSD/GNU seds.
+    # 2. Replace all newlines with spaces to ensure single-line JSON format.
+    # 3. Escape backslashes, double quotes, and literal tabs.
+    local escaped
+    escaped=$(printf '%s\n' "$s" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+    # 4. Strip the trailing space that was converted from the appended newline.
+    printf '%s' "${escaped% }"
 }
 
 get_proxy_json() {
     local file="$1"
     if [ -f "$file" ]; then
         local http="" https="" noproxy=""
-        while IFS='=' read -r key value; do
-            value="${value//\"/}"
-            value="${value//\'/}"
+        while read -r line; do
+            [ -z "$line" ] && continue
+            
+            # H-3 FIX: Robustly parse config without truncating embedded '=' signs
+            local key="${line%%=*}"
+            local value="${line#*=}"
+            value=$(echo "$value" | tr -d "\"'")
+            
             case "$key" in
-                http_proxy|export\ http_proxy) http="$value" ;;
-                https_proxy|export\ https_proxy) https="$value" ;;
-                no_proxy|export\ no_proxy) noproxy="$value" ;;
+                http_proxy|'export http_proxy') http="$value" ;;
+                https_proxy|'export https_proxy') https="$value" ;;
+                no_proxy|'export no_proxy') noproxy="$value" ;;
             esac
         done < "$file"
-        [ -n "$http" ] && ! validate_proxy_url "$http" && http=""
-        [ -n "$https" ] && ! validate_proxy_url "$https" && https=""
-        "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
-            '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
+        
+        if [ -n "$http" ] && ! validate_proxy_url "$http"; then http=""; fi
+        if [ -n "$https" ] && ! validate_proxy_url "$https"; then https=""; fi
+        
+        if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+            # shellcheck disable=SC2016
+            "$JQ_BIN" -n --arg h "$http" --arg s "$https" --arg n "$noproxy" \
+                '{http: (if $h!="" then $h else null end), https: (if $s!="" then $s else null end), noproxy: (if $n!="" then $n else null end)}'
+        else
+            printf '{"http": "%s", "https": "%s", "noproxy": "%s"}' "$http" "$https" "$noproxy"
+        fi
     else
         echo "null"
     fi
 }
 
-# Description: Writes content to a file safely and atomically.
-# Uses the C agent if available, otherwise falls back to mktemp/mv.
-# Arguments: $1 = Destination, $2 = Content, $3 = Octal Permissions
 secure_write() {
     local dest="$1"
     local content="$2"
     local perms="${3:-644}"
     
-    # Security: Prevent writing outside allowed RXNM directories
-    if [[ "$dest" != "${EPHEMERAL_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${PERSISTENT_NET_DIR}/"* ]] && \
-       [[ "$dest" != "${STATE_DIR}/"* ]] && \
-       [[ "$dest" != "${CONF_DIR}/"* ]] && \
-       [[ "$dest" != "${RUN_DIR}/"* ]]; then
+    case "$dest" in
+       "${EPHEMERAL_NET_DIR}/"*) ;;
+       "${PERSISTENT_NET_DIR}/"*) ;;
+       "${STATE_DIR}/"*) ;;
+       "${CONF_DIR}/"*) ;;
+       "${RUN_DIR}/"*) ;;
+       *)
          log_error "Illegal file write attempted: $dest"
          return 1
-    fi
+         ;;
+    esac
     
-    [ -d "$(dirname "$dest")" ] || mkdir -p "$(dirname "$dest")"
+    local dir
+    dir=$(dirname "$dest")
+    [ -d "$dir" ] || mkdir -p "$dir"
     
-    # Accelerator Path: Use Native Agent if available (Atomic/Idempotent)
-    if [ -x "${RXNM_AGENT_BIN}" ]; then
-        if printf "%b" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
+    if [ -x "${RXNM_AGENT_BIN:-}" ]; then
+        if printf "%s" "$content" | "${RXNM_AGENT_BIN}" --atomic-write "$dest" --perm "$perms" 2>/dev/null; then
             return 0
         fi
     fi
     
-    # Fallback Path: Shell implementation
     local tmp
-    # Fix: Force umask 077 for the temp file creation to prevent race condition window
     tmp=$(umask 077 && mktemp "${dest}.XXXXXX") || return 1
     
-    printf "%b" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
-    
-    # Apply requested permissions (only if wider than 600 needed)
+    printf "%s" "$content" > "$tmp" || { rm -f "$tmp"; return 1; }
     if [ "$perms" != "600" ]; then chmod "$perms" "$tmp"; fi
-    
     sync
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
 }
 
-# --- Validation Functions ---
-
 validate_ssid() {
     local ssid="$1"
     local len=${#ssid}
-    if (( len < 1 || len > 32 )); then
+    if [ "$len" -lt 1 ] || [ "$len" -gt 32 ]; then
         json_error "Invalid SSID length: $len" "1" "SSID must be 1-32 chars"
         return 1
     fi
-    # Removed character restriction check to allow for UTF-8/Emoji/Special Chars
     return 0
 }
 
 validate_interface_name() {
     local iface="$1"
-    if [[ ! "$iface" =~ ^[a-zA-Z0-9_:.-]{1,15}$ ]]; then
+    if ! rxnm_match "$iface" '^[a-zA-Z0-9_:.-]{1,15}$'; then
         json_error "Invalid interface name: $iface" "1" "Must be alphanumeric, max 15 chars"
         return 1
     fi
@@ -554,21 +553,20 @@ validate_bluetooth_name() {
     local name="$1"
     local len=${#name}
     if [ "$len" -gt 248 ]; then return 1; fi
-    if [[ "$name" =~ [[:cntrl:]] ]]; then return 1; fi
+    if rxnm_match "$name" '[[:cntrl:]]'; then return 1; fi
     return 0
 }
 
 validate_channel() {
     local ch="$1"
-    if [[ ! "$ch" =~ ^[0-9]+$ ]]; then return 1; fi
-    if [ "$ch" -lt "$MIN_CHANNEL" ] || [ "$ch" -gt "$WIFI_CHANNEL_MAX" ]; then return 1; fi
+    if ! rxnm_match "$ch" '^[0-9]+$'; then return 1; fi
+    if [ "$ch" -lt "${MIN_CHANNEL:-1}" ] || [ "$ch" -gt "${WIFI_CHANNEL_MAX:-177}" ]; then return 1; fi
     return 0
 }
 
 validate_integer() {
     local val="$1"
-    if [[ "$val" =~ ^[0-9]+$ ]]; then return 0; fi
-    return 1
+    rxnm_match "$val" '^[0-9]+$'
 }
 
 validate_vlan_id() {
@@ -580,58 +578,101 @@ validate_vlan_id() {
 
 validate_ip() {
     local ip="$1"
-    local clean_ip="${ip%/*}"
-    if [[ ! "$ip" =~ ^[0-9a-fA-F:.]+(/[0-9]+)?$ ]]; then
+    
+    # Structural check
+    if ! rxnm_match "$ip" '^[0-9a-fA-F:.]+(/[0-9]{1,3})?$'; then
         json_error "Invalid IP syntax: $ip" "1" "Expected format: x.x.x.x/CIDR or x:x::x/CIDR"
         return 1
     fi
-    # REMOVED: ip route get check.
-    # In isolated namespaces (like during tests or early boot), routing tables are empty.
-    # 'ip route get' fails with 'Network is unreachable', preventing valid static IP assignment.
-    # We rely on regex validation above.
+    
+    local addr="${ip%/*}"
+    local prefix="${ip##*/}"
+    
+    # M-2 Fix: Strict Semantic Validation for IPv4 Octets and IPv6 CIDR Lengths
+    if case "$addr" in *:*) false;; *) true;; esac; then
+        # IPv4
+        if ! rxnm_match "$addr" '^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'; then
+            return 1
+        fi
+        if [ "$prefix" != "$ip" ] && [ "$prefix" -gt 32 ] 2>/dev/null; then
+            return 1
+        fi
+    else
+        # IPv6
+        if [ "$prefix" != "$ip" ] && [ "$prefix" -gt 128 ] 2>/dev/null; then
+            json_error "Invalid IPv6 CIDR: prefix > 128" "1"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# _validate_ip_csv <comma-separated-ip-list>
+# Returns 0 if every entry passes validate_ip, 1 on first failure.
+_validate_ip_csv() {
+    local _list="$1"
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for _item in $_list; do
+        _item=$(printf '%s' "$_item" | tr -d ' \t')
+        [ -z "$_item" ] && continue
+        if ! validate_ip "$_item"; then IFS="$_old_ifs"; set +f; return 1; fi
+    done
+    IFS="$_old_ifs"
+    set +f
     return 0
 }
 
 validate_routes() {
     local routes="$1"
-    IFS=',' read -ra RTS <<< "$routes"
-    for r in "${RTS[@]}"; do
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for r in $routes; do
         local dest=""
         local rgw=""
         local rmet=""
-        # Split by @
-        IFS='@' read -r dest rgw rmet <<< "$r"
-        if [ -z "$dest" ]; then return 1; fi
-        if ! validate_ip "$dest"; then return 1; fi
+        
+        dest="${r%%@*}"
+        local rest="${r#*@}"
+        if [ "$rest" = "$r" ]; then rest=""; fi
+        
+        if [ -n "$rest" ]; then
+            rgw="${rest%%@*}"
+            rmet="${rest#*@}"
+            if [ "$rmet" = "$rest" ]; then rmet=""; fi
+        fi
+        
+        if [ -z "$dest" ]; then IFS="$_old_ifs"; set +f; return 1; fi
+        if ! validate_ip "$dest"; then IFS="$_old_ifs"; set +f; return 1; fi
         if [ -n "$rgw" ]; then
-            if ! validate_ip "$rgw"; then return 1; fi
+            if ! validate_ip "$rgw"; then IFS="$_old_ifs"; set +f; return 1; fi
         fi
         if [ -n "$rmet" ]; then
-            if ! validate_integer "$rmet"; then return 1; fi
+            if ! validate_integer "$rmet"; then IFS="$_old_ifs"; set +f; return 1; fi
         fi
     done
+    IFS="$_old_ifs"
+    set +f
     return 0
 }
 
-validate_dns() {
-    local dns_list="$1"
-    IFS=',' read -ra SERVERS <<< "$dns_list"
-    for server in "${SERVERS[@]}"; do
-        if ! validate_ip "$server"; then
-            return 1
-        fi
-    done
-    return 0
-}
+validate_dns() { _validate_ip_csv "$1"; }
 
 validate_proxy_url() {
     local url="$1"
-    if [[ "$url" =~ ^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]; then return 0; fi
-    if [[ "$url" =~ ^([0-9.]+):([0-9]+)$ ]]; then
-        local ip="${BASH_REMATCH[1]}"
-        local port="${BASH_REMATCH[2]}"
-        if validate_ip "$ip"; then
-             if [ "$port" -le 65535 ]; then return 0; fi
+    case "$url" in
+        *"$(printf '\n')"*|*"$(printf '\r')"*) return 1 ;;
+    esac
+    if rxnm_match "$url" '^(http|https|socks4|socks5)://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$'; then
+        return 0
+    fi
+    if rxnm_match "$url" '^[0-9.]+:[0-9]+$'; then
+        local ip="${url%%:*}"
+        local port="${url##*:}"
+        if validate_ip "$ip" && [ "$port" -le 65535 ]; then
+            return 0
         fi
     fi
     return 1
@@ -639,7 +680,7 @@ validate_proxy_url() {
 
 validate_country() {
     local code="$1"
-    if [[ ! "$code" =~ ^[A-Z]{2}$ ]]; then
+    if ! rxnm_match "$code" '^[A-Z]{2}$'; then
         json_error "Invalid country code: $code" "1" "Use ISO 3166-1 alpha-2 format (e.g., US, JP, DE)"
         return 1
     fi
@@ -648,35 +689,45 @@ validate_country() {
 
 validate_mac() {
     local mac="$1"
-    if [[ "$mac" =~ ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$ ]]; then return 0; fi
-    json_error "Invalid MAC address format" "1" "Expected XX:XX:XX:XX:XX:XX"
-    return 1
+    if ! rxnm_match "$mac" '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'; then
+        json_error "Invalid MAC address format" "1" "Expected XX:XX:XX:XX:XX:XX"
+        return 1
+    fi
+    return 0
 }
 
 validate_mtu() {
     local mtu="$1"
-    if [[ "$mtu" =~ ^[0-9]+$ ]] && [ "$mtu" -ge 68 ] && [ "$mtu" -le 65535 ]; then return 0; fi
-    json_error "Invalid MTU" "1" "Must be integer between 68 and 65535"
-    return 1
+    if ! rxnm_match "$mtu" '^[0-9]+$' || [ "$mtu" -lt 68 ] || [ "$mtu" -gt 65535 ]; then
+        json_error "Invalid MTU" "1" "Must be integer between 68 and 65535"
+        return 1
+    fi
+    return 0
 }
 
 validate_link_speed() {
     local spd="$1"
-    if [[ "$spd" =~ ^[0-9]+$ ]] && [ "$spd" -ge 10 ]; then return 0; fi
-    json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
-    return 1
+    if ! rxnm_match "$spd" '^[0-9]+$' || [ "$spd" -lt 10 ]; then
+        json_error "Invalid link speed: $spd" "1" "Must be integer (Mbps)"
+        return 1
+    fi
+    return 0
 }
 
 validate_duplex() {
     local dup="$1"
-    if [[ "$dup" =~ ^(half|full)$ ]]; then return 0; fi
-    json_error "Invalid duplex mode: $dup" "1" "Must be 'half' or 'full'"
-    return 1
+    if ! rxnm_match "$dup" '^(half|full)$'; then
+        json_error "Invalid duplex mode: $dup" "1" "Must be 'half' or 'full'"
+        return 1
+    fi
+    return 0
 }
 
 validate_autoneg() {
     local auto="$1"
-    if [[ "$auto" =~ ^(yes|no)$ ]]; then return 0; fi
-    json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
-    return 1
+    if ! rxnm_match "$auto" '^(yes|no)$'; then
+        json_error "Invalid autonegotiation: $auto" "1" "Must be 'yes' or 'no'"
+        return 1
+    fi
+    return 0
 }

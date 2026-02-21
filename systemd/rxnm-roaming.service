@@ -12,6 +12,7 @@ ExecStart=/usr/bin/rxnm wifi roaming monitor
 # Recovery settings
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=15
 # Low priority to prevent interfering with gaming/foreground tasks
 Nice=10
 

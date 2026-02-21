@@ -7,13 +7,11 @@
 # ARCHITECTURE: Logic / Plugins
 #
 # Allows extending RXNM without modifying core code.
-# Looks for executables in configuration directories.
+# Refactored for POSIX compatibility (no Bash arrays).
 # -----------------------------------------------------------------------------
 
-PLUGIN_SEARCH_PATHS=(
-    "${CONF_DIR}/network/plugins"
-    "/usr/lib/rocknix-network-manager/plugins"
-)
+# Space-separated string for POSIX compatibility
+PLUGIN_SEARCH_PATHS="${CONF_DIR}/network/plugins /usr/lib/rocknix-network-manager/plugins"
 
 # Description: Finds a plugin executable by name.
 # Arguments: $1 = Plugin Name
@@ -21,7 +19,8 @@ find_plugin() {
     local name="$1"
     [ -z "$name" ] && return 1
     
-    for path in "${PLUGIN_SEARCH_PATHS[@]}"; do
+    # Iterate over space-separated string
+    for path in $PLUGIN_SEARCH_PATHS; do
         [ ! -d "$path" ] && continue
         
         # Check for binary file
@@ -40,20 +39,28 @@ find_plugin() {
 }
 
 list_plugins() {
-    local plugins=()
-    for path in "${PLUGIN_SEARCH_PATHS[@]}"; do
+    local _p_list=""
+    
+    for path in $PLUGIN_SEARCH_PATHS; do
         [ ! -d "$path" ] && continue
-        local found_files=("$path"/*)
-        for f in "${found_files[@]}"; do
+        
+        # POSIX compliant glob iteration
+        for f in "$path"/*; do
             [ ! -e "$f" ] && continue
-            local name=$(basename "$f")
-            if [ -f "$f" ] && [ -x "$f" ]; then plugins+=("$name");
-            elif [ -d "$f" ] && [ -x "$f/run" ]; then plugins+=("$name"); fi
+            
+            local p_name="${f##*/}"
+            if [ -f "$f" ] && [ -x "$f" ]; then
+                _p_list="${_p_list}${p_name} "
+            elif [ -d "$f" ] && [ -x "$f/run" ]; then
+                _p_list="${_p_list}${p_name} "
+            fi
         done
     done
     
-    if [ ${#plugins[@]} -gt 0 ]; then
-        printf '%s\n' "${plugins[@]}" | sort -u
+    if [ -n "$_p_list" ]; then
+        # Use word-splitting to feed list to sort (POSIX safe)
+        # shellcheck disable=SC2086
+        printf '%s\n' $_p_list | sort -u
     fi
 }
 
@@ -74,13 +81,13 @@ exec_plugin() {
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
-             if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+             if [ "${RXNM_FORMAT:-human}" = "json" ]; then
                 echo "{\"success\": false, \"error\": \"Plugin execution timed out\", \"plugin\": \"$plugin_path\"}"
             else
                 echo "Error: Plugin timed out." >&2
             fi
         else
-             if [ "${RXNM_FORMAT:-human}" == "json" ]; then
+             if [ "${RXNM_FORMAT:-human}" = "json" ]; then
                 echo "{\"success\": false, \"error\": \"Plugin exited with error code $exit_code\", \"plugin\": \"$plugin_path\"}"
             else
                 echo "Error: Plugin failed (exit code $exit_code)." >&2

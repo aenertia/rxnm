@@ -45,13 +45,14 @@ action_status_legacy > /dev/null
 
 echo "Measuring Legacy Shell..."
 total_legacy=0
-for ((i=1; i<=ITERATIONS; i++)); do
+i=1
+while [ "$i" -le "$ITERATIONS" ]; do
     start=$(get_time)
     action_status_legacy > /dev/null
     end=$(get_time)
     diff=$((end - start))
     total_legacy=$((total_legacy + diff))
-    # echo -n "."
+    i=$((i + 1))
 done
 avg_legacy_ns=$((total_legacy / ITERATIONS))
 avg_legacy=$((avg_legacy_ns / 1000000))
@@ -63,13 +64,14 @@ echo "Legacy Avg: ${avg_legacy} ms ($avg_legacy_ns ns)"
 
 echo "Measuring Native Agent..."
 total_agent=0
-for ((i=1; i<=ITERATIONS; i++)); do
+i=1
+while [ "$i" -le "$ITERATIONS" ]; do
     start=$(get_time)
     "$AGENT_BIN" --dump > /dev/null
     end=$(get_time)
     diff=$((end - start))
     total_agent=$((total_agent + diff))
-    # echo -n "."
+    i=$((i + 1))
 done
 avg_agent_ns=$((total_agent / ITERATIONS))
 avg_agent=$((avg_agent_ns / 1000000))

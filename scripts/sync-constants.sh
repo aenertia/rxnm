@@ -54,7 +54,7 @@ extract_sh_var() {
     fi
     
     if [ -n "$val" ]; then
-        if [ "$type" == "string" ]; then
+        if [ "$type" = "string" ]; then
             echo "#define $var_name \"$val\"" >> "$HEADER_FILE"
         else
             echo "#define $var_name $val" >> "$HEADER_FILE"
@@ -88,6 +88,15 @@ extract_sh_var "CURL_TIMEOUT" "int" "$CONSTANTS_SH"
 extract_sh_var "WIFI_CHANNEL_MAX" "int" "$CONSTANTS_SH"
 echo "" >> "$HEADER_FILE"
 
+echo "// --- DBus Limits ---" >> "$HEADER_FILE"
+extract_sh_var "IWD_DBUS_MAX_KB" "int" "$CONSTANTS_SH"
+echo "" >> "$HEADER_FILE"
+
+echo "// --- FD Reservations ---" >> "$HEADER_FILE"
+extract_sh_var "RXNM_FD_GLOBAL_LOCK" "int" "$CONSTANTS_SH"
+extract_sh_var "RXNM_FD_IFACE_LOCK"  "int" "$CONSTANTS_SH"
+echo "" >> "$HEADER_FILE"
+
 echo "// --- API Schema Keys ---" >> "$HEADER_FILE"
 if [ -f "$SCHEMA_JSON" ] && command -v jq >/dev/null; then
     # Extracts top-level properties as keys (KEY_SUCCESS="success", etc)
@@ -113,7 +122,8 @@ cpu_regex=$(grep -h "grep -qEi" "$CONSTANTS_SH" | grep "/proc/cpuinfo" | sed -n 
 
 if [ -n "$cpu_regex" ]; then
     # Convert pipes to C array format: "RK3326", "RK3566", ...
-    c_list=$(echo "$cpu_regex" | sed 's/|/", "/g')
+    # M-7 Fix: Lowercase the strings for guaranteed deterministic matching alongside Agent's strcasestr
+    c_list=$(echo "$cpu_regex" | tr '[:upper:]' '[:lower:]' | sed 's/|/", "/g')
     echo "#define LOW_POWER_SOCS { \"$c_list\", NULL }" >> "$HEADER_FILE"
 else
     echo "// Warning: Could not extract LOW_POWER_SOCS regex" >> "$HEADER_FILE"

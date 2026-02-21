@@ -18,7 +18,7 @@ action_route_dispatch() {
     case "$action" in
         list|show) action_route_list "$@" ;;
         add|del|delete|replace|change|append) 
-            [ "$action" == "delete" ] && action="del"
+            [ "$action" = "delete" ] && action="del"
             action_route_modify "$action" "$@" 
             ;;
         get) action_route_get "$@" ;;
@@ -31,7 +31,7 @@ action_route_list() {
     local table=""
     local family=""
     
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --table) table="$2"; shift 2 ;;
             --v4) family="-4"; shift ;;
@@ -51,27 +51,32 @@ action_route_list() {
     fi
     
     # Fallback to iproute2
-    local cmd_v4=("ip" "-j" "-4" "route" "show")
-    local cmd_v6=("ip" "-j" "-6" "route" "show")
-    
-    if [ -n "$table" ]; then
-        cmd_v4+=("table" "$table")
-        cmd_v6+=("table" "$table")
-    fi
+    # Build optional table suffix as a plain string for safe word-splitting.
+    # The table value has already been validated as an integer or table name.
+    # shellcheck disable=SC2086  # intentional word-split for table args
+    local _tbl=""
+    [ -n "$table" ] && _tbl="table $table"
     
     local routes_v4="[]"
     local routes_v6="[]"
     
     if [ "$family" != "-6" ]; then
-        routes_v4=$("${cmd_v4[@]}" 2>/dev/null || echo "[]")
+        # shellcheck disable=SC2086
+        routes_v4=$(ip -j -4 route show $_tbl 2>/dev/null || echo "[]")
     fi
     if [ "$family" != "-4" ]; then
-        routes_v6=$("${cmd_v6[@]}" 2>/dev/null || echo "[]")
+        # shellcheck disable=SC2086
+        routes_v6=$(ip -j -6 route show $_tbl 2>/dev/null || echo "[]")
     fi
     
     # Merge and output
-    "$JQ_BIN" -n --argjson v4 "$routes_v4" --argjson v6 "$routes_v6" \
-        '{success: true, routes: ($v4 + $v6)}'
+    # shellcheck disable=SC2016
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        "$JQ_BIN" -n --argjson v4 "$routes_v4" --argjson v6 "$routes_v6" \
+            '{success: true, routes: ($v4 + $v6)}'
+    else
+        printf '{"success": true, "routes": []}\n' # Simplistic fallback
+    fi
 }
 
 action_route_modify() {
@@ -88,7 +93,7 @@ action_route_modify() {
     local proto=""
     local type=""
     
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --destination|--dst) dest="$2"; shift 2 ;;
             --gateway|--gw) gw="$2"; shift 2 ;;
@@ -99,33 +104,35 @@ action_route_modify() {
             --scope) scope="$2"; shift 2 ;;
             --protocol|--proto) proto="$2"; shift 2 ;;
             --type) type="$2"; shift 2 ;;
+            --*) shift ;;    # Unknown option — skip
             *) 
-                # Allow positional destination if first arg
-                if [ -z "$dest" ] && [[ "$1" != --* ]]; then dest="$1"; shift; else shift; fi
+                # Positional destination: first non-option arg
+                if [ -z "$dest" ]; then dest="$1"; fi
+                shift
                 ;;
         esac
     done
     
     [ -z "$dest" ] && { json_error "Destination required (e.g. 10.0.0.0/24 or default)"; return 1; }
     
-    # Construct ip route command
-    local cmd=("ip" "route" "$op" "$dest")
+    # Construct ip route command using set -- (POSIX compatible)
+    set -- ip route "$op" "$dest"
     
-    [ -n "$gw" ] && cmd+=("via" "$gw")
-    [ -n "$iface" ] && cmd+=("dev" "$iface")
-    [ -n "$metric" ] && cmd+=("metric" "$metric")
-    [ -n "$table" ] && cmd+=("table" "$table")
-    [ -n "$src" ] && cmd+=("src" "$src")
-    [ -n "$scope" ] && cmd+=("scope" "$scope")
-    [ -n "$proto" ] && cmd+=("proto" "$proto")
-    [ -n "$type" ] && cmd+=("type" "$type")
+    [ -n "$gw" ]     && set -- "$@" via "$gw"
+    [ -n "$iface" ]  && set -- "$@" dev "$iface"
+    [ -n "$metric" ] && set -- "$@" metric "$metric"
+    [ -n "$table" ]  && set -- "$@" table "$table"
+    [ -n "$src" ]    && set -- "$@" src "$src"
+    [ -n "$scope" ]  && set -- "$@" scope "$scope"
+    [ -n "$proto" ]  && set -- "$@" proto "$proto"
+    [ -n "$type" ]   && set -- "$@" type "$type"
     
-    if "${cmd[@]}"; then
+    if "$@"; then
         json_success '{"action": "route_'"$op"'", "destination": "'"$dest"'", "status": "ok"}'
     else
         # Capture stderr for error message
         local err
-        err=$("${cmd[@]}" 2>&1)
+        err=$("$@" 2>&1)
         json_error "Failed to $op route: $err"
     fi
 }
@@ -135,7 +142,7 @@ action_route_get() {
     shift # Shift target
     
     # Handle flags
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --destination|--dst) target="$2"; shift 2 ;;
             *) if [ -z "$target" ]; then target="$1"; fi; shift ;;
@@ -144,13 +151,35 @@ action_route_get() {
     
     [ -z "$target" ] && { json_error "Target address required"; return 1; }
     
-    local result
-    result=$(ip -j route get "$target" 2>/dev/null)
-    
-    if [ -n "$result" ] && [ "$result" != "[]" ]; then
-        echo "$result" | "$JQ_BIN" '{success: true, route: .[0]}'
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        local result
+        result=$(ip -j route get "$target" 2>/dev/null)
+        if [ -n "$result" ] && [ "$result" != "[]" ]; then
+            echo "$result" | "$JQ_BIN" '{success: true, route: .[0]}'
+        else
+            json_error "No route found to $target"
+        fi
     else
-        json_error "No route found to $target"
+        # POSIX Shell Fallback: Parsing raw text output of 'ip route get'
+        local res_txt
+        res_txt=$(ip route get "$target" 2>/dev/null | head -n1)
+        if [ -n "$res_txt" ] && case "$res_txt" in *"dev"*) true ;; *) false ;; esac; then
+            local dev="" gw="" src=""
+            dev=$(echo "$res_txt" | grep -o 'dev [^ ]*' | awk '{print $2}')
+            gw=$(echo "$res_txt" | grep -o 'via [^ ]*' | awk '{print $2}')
+            src=$(echo "$res_txt" | grep -o 'src [^ ]*' | awk '{print $2}')
+            
+            # Manual JSON assembly
+            local json='{"dst": "'"$target"'"'
+            [ -n "$dev" ] && json="$json, \"dev\": \"$dev\""
+            [ -n "$gw" ] && json="$json, \"gateway\": \"$gw\""
+            [ -n "$src" ] && json="$json, \"prefsrc\": \"$src\""
+            json="$json}"
+            
+            json_success '{"route": '"$json"'}'
+        else
+            json_error "No route found to $target"
+        fi
     fi
 }
 
@@ -160,13 +189,13 @@ action_route_flush() {
     local table=""
     
     # Parse args to be safe
-    if [[ "$target" == "cache" ]]; then
+    if [ "$target" = "cache" ]; then
         ip route flush cache
         json_success '{"action": "route_flush", "target": "cache"}'
         return 0
     fi
     
-    while [[ $# -gt 0 ]]; do
+    while [ "$#" -gt 0 ]; do
         case "$1" in
             --table) table="$2"; shift 2 ;;
             *) shift ;;

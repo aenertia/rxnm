@@ -5,25 +5,26 @@
 # FILE: rxnm-wifi.sh
 # PURPOSE: Wireless Interface Management & IWD Abstraction
 # ARCHITECTURE: Logic / Wireless
-#
-# Handles all WiFi operations including Station (Client), Access Point (AP),
-# P2P (WiFi Direct), WPS, and DPP (Easy Connect).
-# Heavily relies on 'iwctl' and raw DBus calls via 'busctl' for speed.
 # -----------------------------------------------------------------------------
 
-# Cache variables to avoid repeated sysfs lookups
+# Cache variables to avoid repeated sysfs lookups.
+# SCOPE: In-process only. Each 'rxnm wifi ...' invocation forks a new
+# shell process — this cache provides no benefit across CLI calls.
+# Value is in long-lived daemon contexts (rxnm-roaming.service) where
+# get_wifi_iface() is called in a monitor loop.
+# DO NOT write this to disk — cross-process interface state is provided
+# by 'rxnm-agent --get interfaces.<iface>.state' or '--dump'.
 : "${WIFI_IFACE_CACHE:=}"
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 # Description: Auto-detects the primary wireless interface.
-# Logic: Checks sysfs for phy80211/wireless folders. Prioritizes interfaces that are UP.
-# Returns: Interface name (string)
+# shellcheck disable=SC2120
 get_wifi_iface() {
     local preferred="${1:-}"
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
     
     local now
-    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+    now=$(printf '%(%s)T' -1 2>/dev/null) || now=$(date +%s)
     local cache_ttl=30
     
     # Check cache validity
@@ -36,20 +37,20 @@ get_wifi_iface() {
     
     local best_iface=""
     local first_iface=""
-    local interfaces=(/sys/class/net/*)
     
-    for iface in "${interfaces[@]}"; do
-        [ ! -e "$iface" ] && continue
+    # POSIX safe iteration over network interfaces
+    for iface_path in /sys/class/net/*; do
+        [ ! -e "$iface_path" ] && continue
+        
         # Detect if wireless
-        if [ -d "$iface/wireless" ] || [ -d "$iface/phy80211" ]; then
-            local ifname
-            ifname=$(basename "$iface")
+        if [ -d "$iface_path/wireless" ] || [ -d "$iface_path/phy80211" ]; then
+            local ifname="${iface_path##*/}"
             [ -z "$first_iface" ] && first_iface="$ifname"
             
             # Prefer UP interfaces
             local operstate
-            read -r operstate < "$iface/operstate" 2>/dev/null || operstate="unknown"
-            if [[ "$operstate" != "down" ]]; then
+            read -r operstate < "$iface_path/operstate" 2>/dev/null || operstate="unknown"
+            if [ "$operstate" != "down" ]; then
                 best_iface="$ifname"
                 break
             fi
@@ -67,8 +68,6 @@ get_wifi_iface() {
     return 1
 }
 
-# Description: Ensures a wireless interface is unblocked (rfkill) and UP.
-# Arguments: $1 = Interface Name
 ensure_interface_active() {
     local iface="$1"
     local needs_wake=0
@@ -77,7 +76,8 @@ ensure_interface_active() {
     if [ -e "/sys/class/net/$iface/flags" ]; then
         local flags
         read -r flags < "/sys/class/net/$iface/flags"
-        if (( !(flags & 1) )); then
+        # Bitwise logic for POSIX
+        if [ "$((flags & 1))" -eq 0 ]; then
             needs_wake=1
         fi
     fi
@@ -88,7 +88,7 @@ ensure_interface_active() {
             [ -e "$rdir/type" ] || continue
             local rtype
             read -r rtype < "$rdir/type" 2>/dev/null || rtype=""
-            if [ "$rtype" == "wlan" ]; then
+            if [ "$rtype" = "wlan" ]; then
                 local soft
                 read -r soft < "$rdir/soft" 2>/dev/null || soft=0
                 if [ "$soft" -eq 1 ]; then
@@ -105,7 +105,7 @@ ensure_interface_active() {
         fi
         if [ -e "/sys/class/net/$iface/flags" ]; then
              read -r flags < "/sys/class/net/$iface/flags"
-             if (( !(flags & 1) )); then
+             if [ "$((flags & 1))" -eq 0 ]; then
                 ip link set "$iface" up 2>/dev/null || true
                 sleep 0.5
              fi
@@ -116,71 +116,57 @@ ensure_interface_active() {
 # --- Host Mode Tasks (AP/AdHoc) ---
 
 _task_host_mode() {
-    local iface="$1"
-    local ip="$2"
-    local use_share="$3"
-    local mode="$4"
-    local ssid="$5"
-    local pass="$6"
-    local channel="$7"
-    local ipv6_pd="${8:-yes}"
+    local iface="$1" ip="$2" use_share="$3" mode="$4" ssid="$5" pass="$6" channel="$7" ipv6_pd="${8:-yes}"
     
     ensure_interface_active "$iface"
     ensure_dirs
     
-    # 0. Mask conflicting templates (Batch 3)
-    # Identify files that match this interface but are for station mode
-    if type build_template_conflict_map &>/dev/null; then
-        local conflicts=$(build_template_conflict_map "$iface" "ap")
+    # Mask conflicting templates (Batch 3)
+    if type build_template_conflict_map >/dev/null 2>&1; then
+        local conflicts
+        conflicts=$(build_template_conflict_map "$iface" "ap")
         for t in $conflicts; do mask_system_template "$t"; done
     fi
     
-    # 1. Configure Network Interface (L3)
     local host_file="${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     local content
     content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes" "$ipv6_pd")
     secure_write "$host_file" "$content" "644"
     
-    # 2. Reload Systemd (L3 Up)
     reload_networkd
     if is_service_active "systemd-networkd"; then
         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
     fi
     
     tune_network_stack "host"
-    if [ "$use_share" == "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
+    if [ "$use_share" = "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
     
-    # 3. Configure Wireless (L2) via IWD
     if [ "${RXNM_TEST_MODE:-0}" -ne 1 ] && ! is_service_active "iwd"; then
         echo "IWD not running" >&2; exit 1
     fi
     
-    # Ensure clean slate
     timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
     
-    # Generate AP config for IWD
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
     local ap_data="[General]\nChannel=${channel:-1}\n"
     if [ -n "$pass" ]; then
-        ap_data+="[Security]\nPassphrase=${pass}\n"
+        ap_data="${ap_data}[Security]\nPassphrase=${pass}\n"
     fi
     
-    # Only write AP file for AP mode (Ad-Hoc doesn't use .ap files in IWD generally)
     if [ "$mode" != "adhoc" ]; then
-         # Prevent credential leak in logs
-         { set +x; } 2>/dev/null
+         # M-6 FIX: Safely toggle set -x state to prevent debug trace pollution
+         local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
          secure_write "$ap_conf" "$ap_data" "600"
-         set -x 2>/dev/null
+         if [ "$was_x" -eq 1 ]; then set -x; fi
     fi
     
     case "$mode" in
         adhoc)
              if [ -n "$pass" ]; then
-                # Prevent credential leak in logs
-                { set +x; } 2>/dev/null
+                local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
                 printf "%s" "$pass" | timeout 10s iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
-                set -x 2>/dev/null
+                if [ "$was_x" -eq 1 ]; then set -x; fi
              else
                 timeout 10s iwctl ad-hoc "$iface" start "$ssid" 2>&1
              fi
@@ -193,16 +179,13 @@ _task_host_mode() {
 
 _task_client_mode() {
     local iface="$1"
-    # Remove host-specific configs
     rm -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     rm -f "${STORAGE_NET_DIR}/70-share-${iface}.network"
     rm -f "$STORAGE_HOST_NET_FILE"
     
-    # Unmask conflicts (Batch 3)
-    if type build_template_conflict_map &>/dev/null; then
-        # If we are going to client mode, we should unmask the station templates
-        # We query for what conflicts with "ap" mode, which are usually "station" templates
-        local conflicts=$(build_template_conflict_map "$iface" "ap")
+    if type build_template_conflict_map >/dev/null 2>&1; then
+        local conflicts
+        conflicts=$(build_template_conflict_map "$iface" "ap")
         for t in $conflicts; do unmask_system_template "$t"; done
     fi
     
@@ -210,7 +193,6 @@ _task_client_mode() {
     reconfigure_iface "$iface"
     disable_nat_masquerade
     
-    # Ensure IWD is not stuck in AP mode
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             timeout 5s iwctl ap "$iface" stop >/dev/null 2>&1 || true
@@ -221,15 +203,12 @@ _task_client_mode() {
 }
 
 _task_save_wifi_creds() {
-    local ssid="$1"
-    local pass="$2"
+    local ssid="$1" pass="$2"
     ensure_dirs
-    # IWD stores PSKs in /var/lib/iwd/<SSID>.psk
-    
-    # Prevent credential leak in logs
-    { set +x; } 2>/dev/null
+    # M-6 FIX: Safely toggle set -x state to prevent credential leakage
+    local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
     secure_write "${STATE_DIR}/iwd/${ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
-    set -x 2>/dev/null
+    if [ "$was_x" -eq 1 ]; then set -x; fi
 }
 
 _task_set_country() {
@@ -244,25 +223,26 @@ _task_set_country() {
 
 _task_forget() {
     local ssid="$1"
-    # 1. Forget in IWD
     if is_service_active "iwd"; then
         timeout 5s iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
     fi
     
-    # 2. Cleanup any static RXNM configs associated with this SSID
-    local safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
-    local config_files=("${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network)
     
-    for f in "${config_files[@]}"; do
+    # L-4 FIX: Use exact fixed-string grep (grep -qFx) rather than relying on sanitized glob filenames
+    # This completely neutralizes any regex metacharacter injection vulnerabilities embedded in SSIDs.
+    for f in "${STORAGE_NET_DIR}"/75-config-*.network; do
         if [ -f "$f" ]; then
-            rm -f "$f"
-            removed_count=$((removed_count + 1))
+            if grep -qFx "SSID=${ssid}" "$f" 2>/dev/null; then
+                rm -f "$f"
+                removed_count=$((removed_count + 1))
+            fi
         fi
     done
     
-    if [ $removed_count -gt 0 ]; then reload_networkd; fi
-    json_success '{"action": "forget", "ssid": "'"$ssid"'", "removed_configs": '"$removed_count"'}'
+    local json_safe_ssid; json_safe_ssid=$(json_escape "$ssid")
+    if [ "$removed_count" -gt 0 ]; then reload_networkd; fi
+    json_success '{"action": "forget", "ssid": "'"$json_safe_ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
 # --- P2P (WiFi Direct) Tasks ---
@@ -275,26 +255,24 @@ _task_p2p_scan() {
         return 1
     fi
     
-    # Find a P2P-capable device interface
     local p2p_dev_path
     p2p_dev_path=$(echo "$objects_json" | "$JQ_BIN" -r '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Device"] != null) | .key' | head -n1)
     
     [ -z "$p2p_dev_path" ] && { echo "No P2P-capable device found" >&2; return 1; }
     
-    # Trigger Discovery
     busctl --timeout=5s call net.connman.iwd "$p2p_dev_path" net.connman.iwd.p2p.Device RequestDiscovery >/dev/null 2>&1
     
-    # Wait for results (polling)
     local sleep_sec
-    if (( SCAN_POLL_MS < 1000 )); then sleep_sec="0.${SCAN_POLL_MS}"; else sleep_sec=$((SCAN_POLL_MS / 1000)); fi
+    if [ "$SCAN_POLL_MS" -lt 1000 ]; then sleep_sec="0.${SCAN_POLL_MS}"; else sleep_sec=$((SCAN_POLL_MS / 1000)); fi
     local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
     
-    for ((i=1; i<=max_polls; i++)); do
+    local i=1
+    while [ "$i" -le "$max_polls" ]; do
         sleep "$sleep_sec"
+        i=$((i + 1))
     done
-    sleep 0.5 # Extra grace
+    sleep 0.5
     
-    # Fetch results
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local peers
     peers=$(echo "$objects_json" | "$JQ_BIN" -r '
@@ -315,12 +293,11 @@ _task_p2p_scan() {
 
 _task_p2p_connect() {
     local peer_name="$1"
-    
-    # Find peer object path by name
     local objects_json
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
     local peer_path
+    # shellcheck disable=SC2016
     peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
@@ -336,9 +313,7 @@ _task_p2p_connect() {
 
 _task_p2p_disconnect() {
     local objects_json
-    objects_json=$(busctl --timeout=2s call net.connman.iwd / \
-                   org.freedesktop.DBus.ObjectManager GetManagedObjects \
-                   --json=short 2>/dev/null)
+    objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
                    
     local connected_peer
     connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '
@@ -353,8 +328,7 @@ _task_p2p_disconnect() {
         return 1
     fi
     
-    if busctl --timeout=10s call net.connman.iwd "$connected_peer" \
-        net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1; then
+    if busctl --timeout=10s call net.connman.iwd "$connected_peer" net.connman.iwd.p2p.Peer Disconnect >/dev/null 2>&1; then
         echo "OK"
         return 0
     else
@@ -364,7 +338,6 @@ _task_p2p_disconnect() {
 }
 
 _task_p2p_status() {
-    # Combine IWD Peer status with Networkd Interface status
     local objects_json
     objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     
@@ -373,14 +346,13 @@ _task_p2p_status() {
         net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]")
     fi
     
+    # shellcheck disable=SC2016
     "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$objects_json" '
-        # Find Connected P2P Peers
         ($iwd.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) |
          select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
          {name: .value["net.connman.iwd.p2p.Peer"].Name.data, mac: .value["net.connman.iwd.p2p.Peer"].DeviceAddress.data}
         ) as $peers |
         
-        # Check Networkd for P2P-GO interfaces
         ($net | map(select(.Type == "wlan" or .Name | startswith("p2p"))) |
          map({name: .Name, type: .Type, state: .OperationalState})
         ) as $ifaces |
@@ -394,11 +366,8 @@ _task_p2p_status() {
     '
 }
 
-# --- DPP (Easy Connect) Tasks ---
-
 _task_dpp_enroll() {
-    local iface="$1"
-    local uri="$2"
+    local iface="$1" uri="$2"
     ensure_interface_active "$iface"
     timeout 10s iwctl station "$iface" dpp-start "$uri" >/dev/null 2>&1
 }
@@ -433,6 +402,7 @@ action_forget() {
     local ssid="$1"
     [ -z "$ssid" ] && { json_error "SSID required"; return 0; }
     local iface
+    # shellcheck disable=SC2119
     iface=$(get_wifi_iface || echo "global_wifi")
     with_iface_lock "$iface" _task_forget "$ssid"
     return 0
@@ -441,10 +411,7 @@ action_forget() {
 action_scan() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    if [ -z "$iface" ]; then
-        json_error "No WiFi interface found"
-        return 0
-    fi
+    if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
     
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
@@ -452,7 +419,6 @@ action_scan() {
     fi
     ensure_interface_active "$iface"
     
-    # Get DBus path for the interface
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to query IWD via DBus"
@@ -465,40 +431,35 @@ action_scan() {
     fi
 
     local device_path
+    # shellcheck disable=SC2016
     device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
-    # Trigger Scan (Async)
     busctl --timeout=2s call net.connman.iwd "$device_path" net.connman.iwd.Station Scan >/dev/null 2>&1 || true
     
-    # Poll for completion
     local sleep_sec
-    if (( SCAN_POLL_MS < 1000 )); then
-        sleep_sec="0.${SCAN_POLL_MS}"
-    else
-        sleep_sec=$((SCAN_POLL_MS / 1000))
-    fi
+    if [ "$SCAN_POLL_MS" -lt 1000 ]; then sleep_sec="0.${SCAN_POLL_MS}"; else sleep_sec=$((SCAN_POLL_MS / 1000)); fi
     local max_polls=$((SCAN_TIMEOUT * 1000 / SCAN_POLL_MS))
     
-    for ((i=1; i<=max_polls; i++)); do
+    local i=1
+    while [ "$i" -le "$max_polls" ]; do
         local scanning
         scanning=$(busctl --timeout=1s get-property net.connman.iwd "$device_path" net.connman.iwd.Station Scanning --json=short 2>/dev/null | "$JQ_BIN" -r '.data')
         [ "$scanning" != "true" ] && break
         sleep "$sleep_sec"
+        i=$((i + 1))
     done
     
-    # Fetch results
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         json_error "Failed to fetch scan results"
         return 0
     fi
     
     local result
+    # shellcheck disable=SC2016
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
-        # 1. Build Map of Access Points (BSSIDs) grouped by Network Path
-        (
-            [
+        ([
                 .data | to_entries[] |
                 select(.value["net.connman.iwd.AccessPoint"] != null) |
                 select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) |
@@ -511,7 +472,6 @@ action_scan() {
             ] | group_by(.network) | map({key: .[0].network, value: .}) | from_entries
         ) as $ap_map |
         
-        # 2. Extract Networks and merge with the AP Map
         [
             .data | to_entries[] |
             select(.value["net.connman.iwd.Network"] != null) |
@@ -521,13 +481,10 @@ action_scan() {
                 security: .value["net.connman.iwd.Network"].Type.data,
                 connected: (.value["net.connman.iwd.Network"].Connected.data == true),
                 known: (if .value["net.connman.iwd.Network"].KnownNetwork.data then true else false end),
-                # Signal is usually averaged by iwd on the Network object
                 signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100),
-                # Attach the list of specific BSSIDs visible for this SSID
                 bssids: ($ap_map[.key] // [])
             }
         ] |
-        # Calculate percentage based on main signal
         map(. + {
             strength_pct: (
                 (.signal) as $sig |
@@ -542,43 +499,71 @@ action_scan() {
     return 0
 }
 
+_list_networks_posix() {
+    local result="[" first="true"
+    for f in /var/lib/iwd/*.psk /var/lib/iwd/*.8021x /var/lib/iwd/*.open; do
+        [ -f "$f" ] || continue
+        local fname="${f##*/}"
+        local ssid="${fname%.*}"
+        local sec="${fname##*.}"
+        [ "$first" = "true" ] && first="false" || result="${result},"
+        local safe_ssid; safe_ssid=$(json_escape "$ssid")
+        local safe_sec; safe_sec=$(json_escape "$sec")
+        result="${result}{\"ssid\":\"${safe_ssid}\",\"security\":\"${safe_sec}\"}"
+    done
+    json_success '{"networks":'"${result}]"'}'
+}
+
 action_list_known_networks() {
     if ! is_service_active "iwd"; then
         json_error "IWD service not running"
         return 0
     fi
     
-    local objects_json=""
-    if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
-        json_error "Failed to query IWD"
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        local output
+        if output=$("$RXNM_AGENT_BIN" --list-networks 2>/dev/null); then
+            json_success "$output"
+            return 0
+        fi
+    fi
+    
+    # Task A-2: Use POSIX Fallback JSON Builder if agent is unavailable
+    if [ "${RXNM_FORMAT:-human}" = "json" ]; then
+        _list_networks_posix
         return 0
     fi
     
-    if [ -z "$objects_json" ]; then
-         json_success '{"networks": []}'
-         return 0
-    fi
-
-    local networks
-    networks=$(echo "$objects_json" | "$JQ_BIN" -r '
-        [
-            .data | to_entries[] |
-            select(.value["net.connman.iwd.KnownNetwork"] != null) |
-            {
-                ssid: .value["net.connman.iwd.KnownNetwork"].Name.data,
-                security: .value["net.connman.iwd.KnownNetwork"].Type.data,
-                hidden: (.value["net.connman.iwd.KnownNetwork"].Hidden.data == true),
-                last_connected: (.value["net.connman.iwd.KnownNetwork"].LastConnectedTime.data // "Never")
-            }
-        ] | sort_by(.ssid)
-    ')
-    
-    json_success "{\"networks\": $networks}"
+    # Fallback to standard human readable iwctl
+    iwctl known-networks list 2>/dev/null
     return 0
 }
 
+_ensure_wifi_netconfig() {
+    local iface="$1"
+    local found="false"
+    for f in "${STORAGE_NET_DIR}/75-config-${iface}.network" \
+             "${STORAGE_NET_DIR}/75-static-${iface}.network" \
+             "${PERSISTENT_NET_DIR}/75-config-${iface}.network" \
+             "${PERSISTENT_NET_DIR}/75-static-${iface}.network"; do
+        [ -f "$f" ] && { found="true"; break; }
+    done
+    if [ "$found" = "false" ]; then
+        log_info "No network config for $iface; applying default DHCP."
+        if type _task_set_dhcp >/dev/null 2>&1; then
+            with_iface_lock "$iface" _task_set_dhcp --iface "$iface" --mdns yes --llmnr yes
+            if is_service_active "systemd-networkd"; then
+                timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+            else
+                log_warn "networkd inactive; triggering rescue DHCP."
+                type configure_standalone_client >/dev/null 2>&1 && configure_standalone_client "$iface"
+            fi
+        fi
+    fi
+}
+
 action_connect() {
-    local ssid="$1"; local pass="$2"; local iface="$3"; local hidden="$4"
+    local ssid="$1" pass="$2" iface="$3" hidden="$4"
     
     [ -n "$ssid" ] || return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
@@ -586,12 +571,23 @@ action_connect() {
     
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
     
-    # Prompt for password if missing
-    if [ -z "${pass:-}" ] && [ -t 0 ] && [[ "$hidden" != "true" ]]; then
-        read -r -p "Passphrase for $ssid: " pass
+    if [ -z "${pass:-}" ] && [ -t 0 ] && [ "$hidden" != "true" ]; then
+        printf 'Passphrase for %s: ' "$ssid"
+        _restore_tty() { stty echo 2>/dev/null; }
+        trap '_restore_tty' INT TERM HUP
+        stty -echo
+        read -r pass
+        _restore_tty
+        trap - INT TERM HUP
+        echo
     fi
     
-    # Save creds first (unless ephemeral mode)
+    # C-4 FIX: Validate passphrase BEFORE allowing it to be saved to disk
+    # This prevents short/malformed passphrases from breaking IWD state files forever.
+    if [ -n "$pass" ]; then
+        if ! validate_passphrase "$pass"; then return 0; fi
+    fi
+    
     if [ -n "$pass" ] && [ "${EPHEMERAL_CREDS:-false}" != "true" ]; then
         with_iface_lock "$iface" _task_save_wifi_creds "$ssid" "$pass"
     fi
@@ -602,110 +598,88 @@ action_connect() {
     fi
     
     ensure_interface_active "$iface"
-    
     log_info "Connecting to $ssid on $iface..."
     
-    # Force networkd to ingest any new config BEFORE we bring up the link layer via IWD
     if is_service_active "systemd-networkd"; then
         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
     fi
     
-    # --- Acceleration: Try C Agent first ---
-    # The agent uses direct DBus calls to IWD which is significantly faster and cleaner
-    # than spawning an interactive iwctl shell process.
+    local safe_ssid; safe_ssid=$(json_escape "$ssid")
+    
     if [ -x "$RXNM_AGENT_BIN" ]; then
         if "$RXNM_AGENT_BIN" --connect "$ssid" --iface "$iface" >/dev/null; then
              audit_log "WIFI_CONNECT" "Connected to $ssid via Agent"
-             json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'", "method": "agent"}'
+             json_success '{"connected": true, "ssid": "'"$safe_ssid"'", "iface": "'"$iface"'", "method": "agent"}'
              return 0
         fi
-        # If Agent fails (e.g. network not found yet), fall through to robust legacy loop
         log_debug "Agent connect failed, falling back to iwctl..."
     fi
     
-    # --- Legacy Fallback: iwctl loop ---
     local cmd="connect"
-    [[ "$hidden" == "true" ]] && cmd="connect-hidden"
+    [ "$hidden" = "true" ] && cmd="connect-hidden"
+    
+    # Task B-1: Pre-check config before the retry loop
+    _ensure_wifi_netconfig "$iface"
     
     local attempts=0
     local max_attempts=3
-    local retry_delay=2
-    local out=""
     
-    while [ $attempts -lt $max_attempts ]; do
-        if [ "${EPHEMERAL_CREDS:-false}" == "true" ] && [ -n "${pass:-}" ]; then
-             # Prevent credential leak in logs
-             { set +x; } 2>/dev/null
-             out=$(printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin 2>&1 || true)
-             set -x 2>/dev/null
-        else
-             out=$(timeout 15s iwctl station "$iface" "$cmd" "$ssid" 2>&1 || true)
+    while [ "$attempts" -lt "$max_attempts" ]; do
+        
+        # H-2 FIX: Check current state BEFORE issuing a connect command.
+        # If IWD is actively performing a WPA handshake, issuing another connect
+        # will cause it to abort and error out.
+        local skip_cmd="false"
+        if [ "$attempts" -gt 0 ]; then
+            local current_state
+            current_state=$(iwctl station "$iface" show 2>/dev/null | grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+            case "$current_state" in connecting|authenticating) skip_cmd="true" ;; esac
+        fi
+
+        if [ "$skip_cmd" = "false" ]; then
+            if [ "${EPHEMERAL_CREDS:-false}" = "true" ] && [ -n "${pass:-}" ]; then
+                 # M-6 FIX: Guard set -x toggle to prevent trace leakage
+                 local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
+                 printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin >/dev/null 2>&1 || true
+                 if [ "$was_x" -eq 1 ]; then set -x; fi
+            else
+                 timeout 15s iwctl station "$iface" "$cmd" "$ssid" >/dev/null 2>&1 || true
+            fi
         fi
         
-        # If iwctl returns empty/success (0)
-        if [[ -z "$out" ]]; then
-            # Verify networkd state - if no static config, ensure DHCP fallback
-            local config_exists="false"
-            if [ -f "${STORAGE_NET_DIR}/75-config-${iface}.network" ] || \
-               [ -f "${STORAGE_NET_DIR}/75-static-${iface}.network" ]; then
-                config_exists="true"
-            elif [ -f "${PERSISTENT_NET_DIR}/75-config-${iface}.network" ] || \
-                 [ -f "${PERSISTENT_NET_DIR}/75-static-${iface}.network" ]; then
-                config_exists="true"
-            fi
-            
-            if [ "$config_exists" == "false" ]; then
-                 log_info "No network configuration found for $iface. Applying default DHCP."
-                 if type _task_set_dhcp &>/dev/null; then
-                     with_iface_lock "$iface" _task_set_dhcp "$iface" "" "" "" "" "yes" "yes" ""
-                     
-                     # Check if networkd is actually running
-                     if is_service_active "systemd-networkd"; then
-                         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1 || \
-                         timeout 5s networkctl reload >/dev/null 2>&1
-                     else
-                         log_warn "networkd missing or inactive. Triggering Rescue Mode (udhcpc)."
-                         if type configure_standalone_client &>/dev/null; then
-                             configure_standalone_client "$iface"
-                         else
-                             log_warn "Rescue helper not found (rxnm-system.sh not sourced?)."
-                         fi
-                     fi
-                 else
-                     log_warn "Cannot apply default DHCP: Interface library not loaded."
-                 fi
-            fi
-            
-            audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
-            json_success '{"connected": true, "ssid": "'"$ssid"'", "iface": "'"$iface"'"}'
-            return 0
-        fi
-        
-        # Handle IWD error messages
-        if echo "$out" | grep -qi "passphrase\|password\|not correct"; then
-             json_error "Authentication failed - check password"
-             return 0
-        elif echo "$out" | grep -qi "not found\|no network"; then
-             json_error "Network '$ssid' not found"
-             return 0
-        elif echo "$out" | grep -qi "already in progress"; then
-             log_warn "Connection in progress, waiting..."
-             sleep 3
-        else
-             log_warn "Connection failed (attempt $((attempts+1))/$max_attempts): $out"
-             sleep $((retry_delay * (attempts + 1)))
-        fi
-        attempts=$((attempts+1))
+        # Allow time for status transition
+        sleep 2
+        local conn_state
+        conn_state=$(iwctl station "$iface" show 2>/dev/null | \
+            grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+
+        case "$conn_state" in
+            connected)
+                audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
+                json_success '{"connected":true,"ssid":"'"$safe_ssid"'","iface":"'"$iface"'"}'
+                return 0
+                ;;
+            connecting|authenticating)
+                # H-2 FIX: Wait patiently for slow SoCs without failing out
+                attempts=$((attempts + 1))
+                continue
+                ;;
+            *"not found"*|*"no network"*)
+                json_error "Network '$ssid' not found"; return 0 ;;
+            *"passphrase"*|*"incorrect"*)
+                json_error "Authentication failed - check password"; return 0 ;;
+        esac
+        sleep $((2 * (attempts + 1)))
+        attempts=$((attempts + 1))
     done
     
-    json_error "Failed to connect: $out"
+    json_error "Failed to connect to $ssid"
     return 0
 }
 
 action_disconnect() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    
     if is_service_active "iwd"; then
         timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1
         json_success '{"action": "disconnected", "iface": "'"$iface"'"}'
@@ -715,7 +689,7 @@ action_disconnect() {
 }
 
 action_host() {
-    local ssid="$1"; local pass="$2"; local mode="${3:-ap}"; local share="$4"; local ip="$5"; local iface="$6"; local channel="$7"; local ipv6_pd="${8:-yes}"
+    local ssid="$1" pass="$2" mode="${3:-ap}" share="$4" ip="$5" iface="$6" channel="$7" ipv6_pd="${8:-yes}"
     [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
@@ -723,18 +697,24 @@ action_host() {
     if ! validate_ssid "$ssid"; then json_error "Invalid SSID"; return 0; fi
     
     local use_share="false"
-    [ "$mode" == "ap" ] && use_share="true"
+    [ "$mode" = "ap" ] && use_share="true"
     [ -n "$share" ] && use_share="$share"
     
-    with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"
-    json_success '{"status": "host_started", "ssid": "'"$ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
+    local safe_ssid; safe_ssid=$(json_escape "$ssid")
+    
+    # M-9 FIX: Check the return status of the internal task to prevent false successes
+    if ! with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"; then
+        json_error "Failed to start Hotspot mode"
+        return 1
+    fi
+    
+    json_success '{"status": "host_started", "ssid": "'"$safe_ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
     return 0
 }
 
 action_client() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    
     with_iface_lock "$iface" _task_client_mode "$iface"
     json_success '{"mode": "client", "iface": "'"$iface"'"}'
     return 0
@@ -743,7 +723,6 @@ action_client() {
 action_set_country() {
     local code="$1"
     ! validate_country "$code" && { json_error "Invalid country"; return 0; }
-    
     if with_iface_lock "global_country" _task_set_country "$code"; then
         json_success '{"country": "'"$code"'"}'
     else
@@ -753,21 +732,18 @@ action_set_country() {
 }
 
 action_p2p_scan() {
-    local iface="${1:-global_p2p}"
     local output
-    if output=$(with_iface_lock "global_wifi" _task_p2p_scan); then
-        json_success "$output"
-    else
-        json_error "P2P Scan failed"
-    fi
+    if output=$(with_iface_lock "global_wifi" _task_p2p_scan); then json_success "$output"; else json_error "P2P Scan failed"; fi
 }
 
 action_p2p_connect() {
     local peer_name="$1"
     [ -z "$peer_name" ] && { json_error "Peer name required"; return 0; }
-    local result
-    if result=$(with_iface_lock "global_wifi" _task_p2p_connect "$peer_name"); then
-        json_success '{"action": "p2p_connect", "peer": "'"$peer_name"'", "status": "negotiating"}'
+    
+    local safe_peer; safe_peer=$(json_escape "$peer_name")
+    
+    if with_iface_lock "global_wifi" _task_p2p_connect "$peer_name"; then
+        json_success '{"action": "p2p_connect", "peer": "'"$safe_peer"'", "status": "negotiating"}'
     else
         json_error "Failed to initiate P2P connection"
     fi
@@ -775,32 +751,20 @@ action_p2p_connect() {
 
 action_p2p_disconnect() {
     local iface="${1:-global_wifi}"
-    if with_iface_lock "$iface" _task_p2p_disconnect; then
-        json_success '{"action": "p2p_disconnect", "status": "ok"}'
-    else
-        json_error "Failed to disconnect P2P peer or no connection active"
-    fi
+    if with_iface_lock "$iface" _task_p2p_disconnect; then json_success '{"action": "p2p_disconnect", "status": "ok"}'; else json_error "Failed to disconnect P2P peer"; fi
 }
 
 action_p2p_status() {
     local output
-    if output=$(with_iface_lock "global_wifi" _task_p2p_status); then
-        echo "$output"
-    else
-        json_error "Failed to retrieve P2P status"
-    fi
+    if output=$(with_iface_lock "global_wifi" _task_p2p_status); then echo "$output"; else json_error "Failed to retrieve P2P status"; fi
 }
 
 action_dpp_enroll() {
-    local iface="$1"
-    local uri="$2"
+    local iface="$1" uri="$2"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     [ -z "$iface" ] && { json_error "No WiFi interface found"; return 0; }
     [ -z "$uri" ] && { json_error "DPP URI string required"; return 0; }
-    
     if ! command -v iwctl >/dev/null; then json_error "iwctl required for DPP"; return 0; fi
-    
-    log_info "Starting DPP enrollment on $iface..."
     if with_iface_lock "$iface" _task_dpp_enroll "$iface" "$uri"; then
         json_success '{"action": "dpp_enroll", "status": "started", "iface": "'"$iface"'"}'
     else
@@ -811,8 +775,6 @@ action_dpp_enroll() {
 action_dpp_stop() {
     local iface="$1"
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
-    [ -z "$iface" ] && { json_error "No WiFi interface found"; return 0; }
-    
     with_iface_lock "$iface" _task_dpp_stop "$iface"
     json_success '{"action": "dpp_stop", "status": "stopped", "iface": "'"$iface"'"}'
 }

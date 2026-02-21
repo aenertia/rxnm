@@ -1,5 +1,5 @@
 [Unit]
-Description=ROCKNIX Network Manager (RXNM)
+Description=RXNM (ROCKNIX Network Manager)
 Documentation=https://codeberg.org/aenertia/rxnm
 
 # Requirement: Filesystem must be online. 
@@ -18,10 +18,10 @@ Wants=systemd-networkd.service systemd-resolved.service iwd.service
 Type=oneshot
 RemainAfterExit=yes
 
-# Main lifecycle mapping
-ExecStart=/usr/bin/rocknix-network-manager start
-ExecReload=/usr/bin/rocknix-network-manager reload
-ExecStop=/usr/bin/rocknix-network-manager stop
+# Main lifecycle mapping (Updated to use unified rxnm binary)
+ExecStart=/usr/bin/rxnm system start
+ExecReload=/usr/bin/rxnm system reload
+ExecStop=/usr/bin/rxnm system stop
 
 # Environment configuration (Optional overrides)
 # Environment="CONF_DIR=/storage/.config"

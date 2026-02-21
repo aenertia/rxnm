@@ -15,6 +15,7 @@
  * 4. Diagnostics: Performs TCP connectivity probes (internet checks).
  * 5. Namespace/Service: Native containerization primitives (unshare/mount/setns).
  * 6. XDP/eBPF: Fast-path packet dropping for Nullify Mode.
+ * 7. Regex: Provides POSIX regex matching for shell scripts on constrained systems.
  *
  * DESIGN PHILOSOPHY:
  * - No external dependencies (glibc/musl only).
@@ -31,6 +32,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/select.h>
@@ -40,6 +42,7 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sched.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -53,6 +56,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <dirent.h>
+#include <regex.h>
 // New headers for BPF/XDP
 #include <linux/bpf.h>
 #include <sys/syscall.h>
@@ -109,6 +113,11 @@ bool g_filter_table = true; /* If false, dump all tables */
 #define DBUS_BACKOFF_CAP_US 100000       /* 100ms Cap (Ensure < 0.1s latency on wake) */
 #define DBUS_IO_TIMEOUT_SEC 2            /* 2 Seconds I/O Timeout (Select/SO_RCV) */
 
+#ifndef IWD_DBUS_MAX_KB
+#define IWD_DBUS_MAX_KB 512
+#endif
+#define IWD_DBUS_MAX_BYTES ((size_t)(IWD_DBUS_MAX_KB) * 1024)
+
 /* --- Netlink/WiFi Constants --- */
 #define NL80211_GENL_NAME           "nl80211"
 #define NL80211_CMD_GET_INTERFACE   5
@@ -161,9 +170,65 @@ static int bpf(int cmd, union bpf_attr *attr, unsigned int size) {
 }
 
 // XDP Drop Program: r0 = 1 (XDP_DROP), exit
-struct bpf_insn xdp_drop_prog[] = {
+static const struct bpf_insn xdp_drop_prog[] = {
     { 0xb7, 0, 0, 0, 1 },
     { 0x95, 0, 0, 0, 0 },
+};
+
+/*
+ * XDP Software WoL Program: Drop all EXCEPT Magic Packets
+ * Evaluates raw BPF bytecode directly to bypass libbpf dependencies.
+ * Handles IPv4 UDP Port 7/9, IPv6 UDP Port 7/9, and Raw EtherType 0x0842.
+ */
+static const struct bpf_insn xdp_soft_wol_prog[] = {
+    { 0x61, 2, 1, offsetof(struct xdp_md, data), 0 },
+    { 0x61, 3, 1, offsetof(struct xdp_md, data_end), 0 },
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 14 },
+    { 0x2d, 4, 3, 29, 0 },      // 04: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 12, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 13, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = EtherType
+    { 0x15, 5, 0, 26, 0x0842 }, // 09: if == 0x0842 goto PASS (36)
+    { 0x15, 5, 0, 2, 0x0800 },  // 10: if == 0x0800 goto IPv4 (13)
+    { 0x15, 5, 0, 11, 0x86DD }, // 11: if == 0x86DD goto IPv6 (23)
+    { 0x05, 0, 0, 21, 0 },      // 12: goto DROP (34)
+    
+    /* IPv4 Header Evaluation (Index 13) */
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 42 },      // Min len: Eth(14) + IPv4(20) + UDP(8)
+    { 0x2d, 4, 3, 18, 0 },      // 15: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 23, 0 },
+    { 0x55, 5, 0, 16, 17 },     // 17: if proto != UDP(17) goto DROP (34)
+    { 0x71, 5, 2, 36, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 37, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = DPORT
+    { 0x05, 0, 0, 9, 0 },       // 22: goto DPORT_CHECK (32)
+    
+    /* IPv6 Header Evaluation (Index 23) */
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 62 },      // Min len: Eth(14) + IPv6(40) + UDP(8)
+    { 0x2d, 4, 3, 8, 0 },       // 25: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 20, 0 },
+    { 0x55, 5, 0, 6, 17 },      // 27: if next_hdr != UDP(17) goto DROP (34)
+    { 0x71, 5, 2, 56, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 57, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = DPORT
+    
+    /* DPORT Validation (Index 32) */
+    { 0x15, 5, 0, 3, 7 },       // 32: if == 7 goto PASS (36)
+    { 0x15, 5, 0, 2, 9 },       // 33: if == 9 goto PASS (36)
+    
+    /* DROP (Index 34) */
+    { 0xb7, 0, 0, 0, 1 },       // r0 = 1 (XDP_DROP)
+    { 0x95, 0, 0, 0, 0 },       // exit
+    
+    /* PASS (Index 36) */
+    { 0xb7, 0, 0, 0, 2 },       // r0 = 2 (XDP_PASS)
+    { 0x95, 0, 0, 0, 0 }        // exit
 };
 
 /* --- Structures --- */
@@ -231,6 +296,69 @@ size_t ifaces_capacity = 0;
 /* --- Utilities --- */
 
 /**
+ * @brief Dynamic Buffer struct for flexible payload construction
+ */
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} dyn_buf_t;
+
+bool dyn_buf_append(dyn_buf_t *b, const void *data, size_t dlen) {
+    if (b->len + dlen > b->cap) {
+        size_t new_cap = b->cap == 0 ? 1024 : b->cap * 2;
+        while (b->len + dlen > new_cap) new_cap *= 2;
+        uint8_t *n = realloc(b->data, new_cap);
+        if (!n) return false;
+        b->data = n;
+        b->cap = new_cap;
+    }
+    memcpy(b->data + b->len, data, dlen);
+    b->len += dlen;
+    return true;
+}
+
+bool dyn_buf_align4(dyn_buf_t *b) {
+    uint8_t pad = 0;
+    while (b->len % 4 != 0) {
+        if (!dyn_buf_append(b, &pad, 1)) return false;
+    }
+    return true;
+}
+
+bool dyn_buf_align8(dyn_buf_t *b) {
+    uint8_t pad = 0;
+    while (b->len % 8 != 0) {
+        if (!dyn_buf_append(b, &pad, 1)) return false;
+    }
+    return true;
+}
+
+bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
+    /* L-1 FIX: Ensure 4-byte alignment before appending string length (D-Bus Spec) */
+    if (!dyn_buf_align4(b)) return false;
+    
+    /* M-8 Fix: Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
+    uint32_t len = strlen(str);
+    uint8_t len_bytes[4] = {
+        (uint8_t)(len & 0xFF),
+        (uint8_t)((len >> 8) & 0xFF),
+        (uint8_t)((len >> 16) & 0xFF),
+        (uint8_t)((len >> 24) & 0xFF)
+    };
+    
+    if (!dyn_buf_append(b, len_bytes, 4)) return false;
+    if (!dyn_buf_append(b, str, len + 1)) return false;
+    return true;
+}
+
+void dyn_buf_free(dyn_buf_t *b) {
+    if (b->data) free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+}
+
+/**
  * @brief Safely frees all dynamically allocated memory tracking the network state.
  */
 void cleanup_ifaces(void) {
@@ -259,7 +387,7 @@ bool file_contains(const char *path, const char *search_term) {
     char buffer[4096];
     bool found = false;
     while (fgets(buffer, sizeof(buffer), f)) {
-        if (strstr(buffer, search_term)) { found = true; break; }
+        if (strcasestr(buffer, search_term)) { found = true; break; }
     }
     fclose(f);
     return found;
@@ -291,7 +419,7 @@ iface_entry_t* get_iface(int index) {
         iface_entry_t **new_ifaces = realloc(ifaces, new_cap * sizeof(iface_entry_t*));
         if (!new_ifaces) {
             fprintf(stderr, "OOM expanding interfaces array\n");
-            exit(1);
+            return NULL; /* Graceful degradation */
         }
         ifaces = new_ifaces;
         ifaces_capacity = new_cap;
@@ -301,14 +429,15 @@ iface_entry_t* get_iface(int index) {
     iface_entry_t *entry = calloc(1, sizeof(iface_entry_t));
     if (!entry) {
         fprintf(stderr, "OOM allocating interface entry\n");
-        exit(1);
+        return NULL;
     }
     
     entry->exists = true;
     entry->index = index;
     entry->signal_dbm = -100;
     entry->speed_mbps = -1;
-    strcpy(entry->state, "unknown");
+    strncpy(entry->state, "unknown", sizeof(entry->state) - 1);
+    entry->state[sizeof(entry->state)-1] = '\0';
     
     /* Pre-allocate inner arrays with sensible defaults */
     entry->ipv4_capacity = 2;
@@ -371,88 +500,18 @@ const char* detect_iface_type(iface_entry_t *entry) {
 
 /* --- Configuration Loading --- */
 
-void extract_bash_var(const char *line, const char *key, char *dest, size_t dest_size) {
-    char search_pattern[128];
-    // Pattern 1: : "${KEY:=Val}"
-    snprintf(search_pattern, sizeof(search_pattern), "${%s:=", key);
-    char *p = strstr(line, search_pattern);
-    if (p) {
-        p += strlen(search_pattern);
-        char *end = strchr(p, '}');
-        if (end) {
-            if (p[0] == '"' && end[-1] == '"') { p++; end--; }
-            size_t len = end - p;
-            size_t copy_len = len < dest_size ? len : dest_size - 1;
-            strncpy(dest, p, copy_len);
-            dest[copy_len] = '\0';
-            return;
-        }
-    }
-    // Pattern 2: export KEY=Val
-    snprintf(search_pattern, sizeof(search_pattern), "export %s=", key);
-    p = strstr(line, search_pattern);
-    if (p) {
-        p += strlen(search_pattern);
-        char *end = strpbrk(p, "\n");
-        if (!end) end = p + strlen(p);
-        if (p[0] == '"') { p++; end = strchr(p, '"'); }
-        if (end) {
-            size_t len = end - p;
-            size_t copy_len = len < dest_size ? len : dest_size - 1;
-            strncpy(dest, p, copy_len);
-            dest[copy_len] = '\0';
-        }
-    }
-}
-
 /**
- * @brief Reads runtime config logic from Bash script if headers are stale.
+ * @brief Reads runtime config logic from environment overrides.
  * Acts as a runtime fallback for compiled-in constants.
  */
-void load_runtime_config() {
-    // 1. Check Env Overrides first
-    char *env_timeout = getenv("RXNM_DBUS_TIMEOUT_MS");
+static void apply_env_overrides(void) {
+    const char *env_timeout = getenv("RXNM_DBUS_TIMEOUT_MS");
     if (env_timeout) {
-        g_dbus_timeout_us = atol(env_timeout) * 1000;
+        long ms = atol(env_timeout);
+        if (ms > 0 && ms < 60000)           /* sanity: 1ms–60s */
+            g_dbus_timeout_us = ms * 1000L;
     }
-
-    char self_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    if (len == -1) return;
-    self_path[len] = '\0';
-    
-    // Resolve ../lib/rxnm-constants.sh
-    char *last_slash = strrchr(self_path, '/');
-    if (!last_slash) return;
-    *last_slash = '\0';
-    char *bin_parent = strdup(self_path);
-    if (!bin_parent) return;
-    last_slash = strrchr(bin_parent, '/');
-    if (last_slash) *last_slash = '\0';
-    
-    char script_path[PATH_MAX];
-    snprintf(script_path, sizeof(script_path), "%s/lib/rxnm-constants.sh", bin_parent);
-    
-    FILE *f = fopen(script_path, "r");
-    if (!f) {
-        f = fopen("/usr/lib/rocknix-network-manager/lib/rxnm-constants.sh", "r");
-    }
-    
-    if (f) {
-        char line[1024];
-        while (fgets(line, sizeof(line), f)) {
-            char *trimmed = line;
-            while(*trimmed == ' ' || *trimmed == '\t') trimmed++;
-            if (*trimmed == '#') continue;
-            extract_bash_var(trimmed, "CONF_DIR", g_conf_dir, sizeof(g_conf_dir));
-            extract_bash_var(trimmed, "RUN_DIR", g_run_dir, sizeof(g_run_dir));
-            extract_bash_var(trimmed, "RXNM_VERSION", g_agent_version, sizeof(g_agent_version));
-            extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V4", g_conn_targets_v4, sizeof(g_conn_targets_v4));
-            extract_bash_var(trimmed, "RXNM_PROBE_TARGETS_V6", g_conn_targets_v6, sizeof(g_conn_targets_v6));
-        }
-        fclose(f);
-    }
-    free(bin_parent);
+    /* Future runtime overrides go here, not in a file parser */
 }
 
 /* --- Udev Enrichment --- */
@@ -460,7 +519,8 @@ void load_runtime_config() {
 static inline void safe_udev_copy(char *dest, size_t dest_size, const char *src) {
     if (!src || !dest) return;
     size_t len = strlen(src);
-    if (len > 0 && src[len-1] == '\n') len--;
+    /* Safely trim trailing CR/LF */
+    while (len > 0 && (src[len-1] == '\n' || src[len-1] == '\r')) len--;
     if (len >= dest_size) len = dest_size - 1;
     memcpy(dest, src, len);
     dest[len] = '\0';
@@ -493,16 +553,6 @@ void udev_enrich(iface_entry_t *entry) {
 }
 
 /* --- DBus Implementation --- */
-
-bool append_string(uint8_t **ptr, const uint8_t *limit, const char *str) {
-    uint32_t len = strlen(str);
-    if (*ptr + 4 + len + 1 > limit) return false;
-    *((uint32_t *)*ptr) = len;
-    *ptr += 4;
-    memcpy(*ptr, str, len + 1);
-    *ptr += len + 1;
-    return true;
-}
 
 int dbus_connect_system(void) {
     long current_backoff = DBUS_BACKOFF_START_US;
@@ -604,47 +654,45 @@ int dbus_connect_system(void) {
 }
 
 /**
- * @brief Constructs and sends a DBus Method Call.
+ * @brief Constructs and sends a DBus Method Call using dynamic buffers.
  */
 int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method) {
-    uint8_t msg[2048];
-    memset(msg, 0, sizeof(msg));
-    uint8_t *limit = msg + sizeof(msg);
+    dyn_buf_t b = {0};
     
-    dbus_header_t *hdr = (dbus_header_t *)msg;
-    hdr->endian = DBUS_ENDIAN_LITTLE;
-    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr->flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
-    hdr->version = DBUS_PROTOCOL_VERSION;
-    hdr->serial = (uint32_t)time(NULL);
+    dbus_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr.flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
+    hdr.version = DBUS_PROTOCOL_VERSION;
     
-    uint8_t *ptr = msg + sizeof(dbus_header_t);
+    /* Ensure DBus Serial Number compliance (Unique per connection) */
+    static uint32_t _serial_counter = 0;
+    hdr.serial = ++_serial_counter;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, path)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!dyn_buf_append(&b, &hdr, sizeof(hdr))) { dyn_buf_free(&b); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, dest)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    uint8_t field_type;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, iface)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_PATH;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01o\x00", 3) || !dyn_buf_append_string(&b, path) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, method)) return -1;
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_DESTINATION;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, dest) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0; 
-    hdr->body_len = 0;
+    field_type = DBUS_HEADER_FIELD_INTERFACE;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, iface) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
     
-    return send(sock, msg, (ptr - msg), 0);
+    field_type = DBUS_HEADER_FIELD_MEMBER;
+    if (!dyn_buf_append(&b, &field_type, 1) || !dyn_buf_append(&b, "\x01s\x00", 3) || !dyn_buf_append_string(&b, method) || !dyn_buf_align8(&b)) { dyn_buf_free(&b); return -1; }
+    
+    dbus_header_t *out_hdr = (dbus_header_t *)b.data;
+    out_hdr->fields_len = (uint32_t)(b.len - sizeof(dbus_header_t));
+    out_hdr->body_len = 0;
+    
+    int ret = send(sock, b.data, b.len, 0);
+    dyn_buf_free(&b);
+    return ret;
 }
 
 /**
@@ -689,64 +737,79 @@ int check_variant_sig_string(const char *buf, int pos) {
  */
 int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max_len) {
     /* 1. Request ObjectManager Dump */
-    uint8_t msg[512];
-    memset(msg, 0, sizeof(msg));
-    uint8_t *limit = msg + sizeof(msg);
+    dyn_buf_t req = {0};
+    dbus_header_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
+    hdr.flags = 0; /* Expect Reply */
+    hdr.version = DBUS_PROTOCOL_VERSION;
     
-    dbus_header_t *hdr = (dbus_header_t *)msg;
-    hdr->endian = DBUS_ENDIAN_LITTLE;
-    hdr->type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr->flags = 0; /* Expect Reply */
-    hdr->version = DBUS_PROTOCOL_VERSION;
-    hdr->serial = 2;
+    static uint32_t _serial_counter = 0;
+    hdr.serial = ++_serial_counter;
     
-    uint8_t *ptr = msg + sizeof(dbus_header_t);
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_PATH; *ptr++ = 1; *ptr++ = 'o'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "/")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    if (!dyn_buf_append(&req, &hdr, sizeof(hdr))) return -1;
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_DESTINATION; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "net.connman.iwd")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    uint8_t field_type;
+    field_type = DBUS_HEADER_FIELD_PATH;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01o\x00", 3) || !dyn_buf_append_string(&req, "/") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_INTERFACE; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "org.freedesktop.DBus.ObjectManager")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_DESTINATION;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "net.connman.iwd") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (ptr + 4 > limit) return -1;
-    *ptr++ = DBUS_HEADER_FIELD_MEMBER; *ptr++ = 1; *ptr++ = 's'; *ptr++ = 0;
-    if (!append_string(&ptr, limit, "GetManagedObjects")) return -1; 
-    ptr = (uint8_t*)ALIGN8((uintptr_t)ptr);
+    field_type = DBUS_HEADER_FIELD_INTERFACE;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "org.freedesktop.DBus.ObjectManager") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    hdr->fields_len = (uint32_t)(ptr - (msg + sizeof(dbus_header_t)));
-    while (((uintptr_t)ptr) % 8 != 0 && ptr < limit) *ptr++ = 0;
-    hdr->body_len = 0;
+    field_type = DBUS_HEADER_FIELD_MEMBER;
+    if (!dyn_buf_append(&req, &field_type, 1) || !dyn_buf_append(&req, "\x01s\x00", 3) || !dyn_buf_append_string(&req, "GetManagedObjects") || !dyn_buf_align8(&req)) { dyn_buf_free(&req); return -1; }
     
-    if (send(sock, msg, (ptr - msg), 0) < 0) return -1;
+    dbus_header_t *out_hdr = (dbus_header_t *)req.data;
+    out_hdr->fields_len = (uint32_t)(req.len - sizeof(dbus_header_t));
+    out_hdr->body_len = 0;
     
-    /* 2. Read Response (Large Buffer) */
-    static char buf[65536]; /* 64KB should cover typical scan lists */
-    
-    /* Read header first to get body length */
-    int n = recv(sock, buf, sizeof(dbus_header_t), 0);
-    if (n < (int)sizeof(dbus_header_t)) return -1;
-    
-    dbus_header_t *resp_hdr = (dbus_header_t *)buf;
-    int total_msg_size = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len) + resp_hdr->body_len;
-    
-    if (total_msg_size > (int)sizeof(buf)) return -2; /* Too big */
-    
-    /* Read rest of message */
-    int remaining = total_msg_size - n;
-    char *p = buf + n;
-    while (remaining > 0) {
-        int r = recv(sock, p, remaining, 0);
-        if (r <= 0) break;
-        p += r; remaining -= r;
+    if (send(sock, req.data, req.len, 0) < 0) {
+        dyn_buf_free(&req);
+        return -1;
     }
+    dyn_buf_free(&req);
+    
+    /* 2. Read Response — Dynamically expanded to avoid static max/malformed bloat */
+    char hdr_raw[sizeof(dbus_header_t)];
+    int n = recv(sock, hdr_raw, sizeof(hdr_raw), 0);
+    if (n < (int)sizeof(hdr_raw)) return -1;
+    
+    dbus_header_t *resp_hdr = (dbus_header_t *)hdr_raw;
+    size_t total_msg_size = sizeof(dbus_header_t)
+                            + (size_t)ALIGN8(resp_hdr->fields_len)
+                            + (size_t)resp_hdr->body_len;
+                            
+    if (total_msg_size < sizeof(dbus_header_t)) return -2;  /* underflow/malformed */
+    if (total_msg_size > IWD_DBUS_MAX_BYTES)    return -2;  /* exceeds tunable cap */
+    
+    size_t cap = 4096;
+    char *buf = malloc(cap);
+    if (!buf) return -3;
+    memcpy(buf, hdr_raw, sizeof(hdr_raw));
+    
+    size_t received = (size_t)n;
+    while (received < total_msg_size) {
+        if (received >= cap) {
+            size_t new_cap = cap * 2;
+            char *new_buf = realloc(buf, new_cap);
+            if (!new_buf) { free(buf); return -3; }
+            buf = new_buf;
+            cap = new_cap;
+        }
+        size_t want = cap - received;
+        if (total_msg_size - received < want) want = total_msg_size - received;
+        
+        int r = recv(sock, buf + received, want, 0);
+        if (r <= 0) break;                                    /* timeout or peer close */
+        received += (size_t)r;
+    }
+    
+    /* RC1 FIX: Ensure the buffer wasn't truncated prematurely before parsing bounds */
+    if (received < total_msg_size) { free(buf); return -5; }
     
     /* 3. Scan for SSID */
     char last_path[256] = {0};
@@ -758,11 +821,14 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
     
     /* RC3 FIX: Explicit upper bound check */
-    int loop_limit = total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
+    int loop_limit = (int)total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
+    int result = -1;
     
     for (int i = start_offset; i < loop_limit; i += 4) {
         
-        uint32_t len = *((uint32_t*)&buf[i]);
+        /* PROACTIVE FIX: Avoid unaligned 32-bit loads on ARM/RISC-V */
+        uint32_t len;
+        memcpy(&len, &buf[i], sizeof(len));
         
         /* Sanity Check Length */
         if (len > 255 || len == 0) continue;
@@ -786,13 +852,15 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
             if (last_path[0] != '\0') {
                 if (check_variant_sig_string(buf, i)) {
                     strncpy(out_path, last_path, max_len);
-                    return 0;
+                    result = 0;
+                    break;
                 }
             }
         }
     }
     
-    return -1; /* Not found */
+    free(buf);
+    return result;
 }
 
 int cmd_connect(const char *ssid, const char *iface) {
@@ -852,7 +920,7 @@ void process_link_msg(struct nlmsghdr *nh) {
     parse_rtattr(tb, IFLA_MAX, IFLA_RTA(ifi), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifi)));
     
     iface_entry_t *entry = get_iface(ifi->ifi_index);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     entry->hw_type = ifi->ifi_type;
     if (tb[IFLA_IFNAME]) strncpy(entry->name, (char *)RTA_DATA(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
@@ -875,12 +943,22 @@ void process_link_msg(struct nlmsghdr *nh) {
         entry->tx_bytes = stats->tx_bytes;
     }
     
-    /* Operational State Translation */
-    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) strcpy(entry->state, "routable");
-    else if (ifi->ifi_flags & IFF_UP) strcpy(entry->state, "no-carrier");
-    else strcpy(entry->state, "off");
+    /* Operational State Translation (RC1 FIX: using strncpy) */
+    if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) {
+        strncpy(entry->state, "routable", sizeof(entry->state)-1);
+    }
+    else if (ifi->ifi_flags & IFF_UP) {
+        strncpy(entry->state, "no-carrier", sizeof(entry->state)-1);
+    }
+    else {
+        strncpy(entry->state, "off", sizeof(entry->state)-1);
+    }
+    entry->state[sizeof(entry->state)-1] = '\0';
     
-    if (tb[IFLA_MASTER]) strcpy(entry->state, "enslaved");
+    if (tb[IFLA_MASTER]) {
+        strncpy(entry->state, "enslaved", sizeof(entry->state)-1);
+        entry->state[sizeof(entry->state)-1] = '\0';
+    }
     
     udev_enrich(entry);
 }
@@ -892,7 +970,7 @@ void process_addr_msg(struct nlmsghdr *nh) {
     parse_rtattr(tb, IFA_MAX, IFA_RTA(ifa), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
     
     iface_entry_t *entry = get_iface(ifa->ifa_index);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     if (tb[IFA_ADDRESS]) {
         void *addr_ptr = RTA_DATA(tb[IFA_ADDRESS]);
@@ -953,7 +1031,7 @@ void process_route_msg(struct nlmsghdr *nh) {
     int oif = *(int *)RTA_DATA(tb[RTA_OIF]);
     
     iface_entry_t *entry = get_iface(oif);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     
     /* Dynamically expand Routes array if full */
     if (entry->route_count >= entry->route_capacity) {
@@ -979,10 +1057,10 @@ void process_route_msg(struct nlmsghdr *nh) {
     
     /* Default Gateway Check */
     if (rt->rtm_dst_len == 0) {
-        strcpy(route->dst, "default");
+        strcpy(route->dst, "default"); /* Safe: 40+ chars allocated */
         route->is_default = true;
         if (rt->rtm_family == AF_INET || entry->gateway[0] == '\0') {
-            if (route->gw[0] != '\0') strcpy(entry->gateway, route->gw);
+            if (route->gw[0] != '\0') strncpy(entry->gateway, route->gw, INET6_ADDRSTRLEN);
             entry->metric = route->metric;
         }
     } else if (tb[RTA_DST]) {
@@ -1041,17 +1119,37 @@ int open_netlink_genl() {
     return sock;
 }
 
+void parse_genl_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len) {
+    memset(tb, 0, sizeof(struct rtattr *) * (max + 1));
+    while (RTA_OK(rta, len)) {
+        if (rta->rta_type <= max) tb[rta->rta_type] = rta;
+        rta = RTA_NEXT(rta, len);
+    }
+}
+
+bool add_nl_attr(struct nlmsghdr *n, size_t max_buf_size, int type, const void *data, int len) {
+    int alen = RTA_LENGTH(len);
+    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(alen) > max_buf_size) return false;
+    struct rtattr *rta = (struct rtattr *)((char *)n + NLMSG_ALIGN(n->nlmsg_len));
+    rta->rta_type = type;
+    rta->rta_len = alen;
+    memcpy(RTA_DATA(rta), data, len);
+    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(alen);
+    return true;
+}
+
 int get_genl_family_id(int sock, const char *family_name) {
-    struct { struct nlmsghdr n; struct genlmsghdr g; char buf[256]; } req = {
-        .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = GENL_ID_CTRL,
-        .n.nlmsg_flags = NLM_F_REQUEST, .n.nlmsg_seq = 1, .n.nlmsg_pid = getpid(),
-        .g.cmd = CTRL_CMD_GETFAMILY, .g.version = 1
-    };
-    struct rtattr *rta = (struct rtattr *) req.buf;
-    rta->rta_type = CTRL_ATTR_FAMILY_NAME;
-    rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
-    strcpy(RTA_DATA(rta), family_name);
-    req.n.nlmsg_len += rta->rta_len;
+    struct { struct nlmsghdr n; struct genlmsghdr g; char buf[256]; } req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = GENL_ID_CTRL;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+    req.n.nlmsg_seq = 1;
+    req.n.nlmsg_pid = getpid();
+    req.g.cmd = CTRL_CMD_GETFAMILY;
+    req.g.version = 1;
+    
+    add_nl_attr(&req.n, sizeof(req), CTRL_ATTR_FAMILY_NAME, family_name, strlen(family_name) + 1);
     send(sock, &req, req.n.nlmsg_len, 0);
     
     char buf[BUF_SIZE];
@@ -1062,40 +1160,31 @@ int get_genl_family_id(int sock, const char *family_name) {
     if (NLMSG_OK(nh, len) && nh->nlmsg_type != NLMSG_ERROR) {
         struct genlmsghdr *gh = NLMSG_DATA(nh);
         struct rtattr *tb[CTRL_ATTR_MAX + 1];
-        parse_rtattr(tb, CTRL_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
+        parse_genl_rtattr(tb, CTRL_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
         if (tb[CTRL_ATTR_FAMILY_ID]) return *(uint16_t *)RTA_DATA(tb[CTRL_ATTR_FAMILY_ID]);
     }
     return -1;
 }
 
-void add_nl_attr(struct nlmsghdr *n, int type, const void *data, int len) {
-    int alen = RTA_LENGTH(len);
-    struct rtattr *rta = (struct rtattr *)((char *)n + n->nlmsg_len);
-    rta->rta_type = type;
-    rta->rta_len = alen;
-    memcpy(RTA_DATA(rta), data, len);
-    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len + alen);
-}
-
 void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     struct genlmsghdr *gh = NLMSG_DATA(nh);
     struct rtattr *tb[NL80211_ATTR_PARSE_MAX + 1];
-    parse_rtattr(tb, NL80211_ATTR_PARSE_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
+    parse_genl_rtattr(tb, NL80211_ATTR_PARSE_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
     
     if (!tb[NL80211_ATTR_IFINDEX]) return;
     int ifindex = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
     
     iface_entry_t *entry = get_iface(ifindex);
-    if (!entry) return;
+    if (!entry) return; /* Safely abort on OOM */
     entry->is_wifi = true;
     
     if (cmd == NL80211_CMD_GET_INTERFACE) {
         if (tb[NL80211_ATTR_SSID]) {
             char *ssid_data = (char *)RTA_DATA(tb[NL80211_ATTR_SSID]);
             int ssid_len = RTA_PAYLOAD(tb[NL80211_ATTR_SSID]);
-            if (ssid_len > 32) ssid_len = 32;
-            memcpy(entry->ssid, ssid_data, ssid_len);
-            entry->ssid[ssid_len] = '\0';
+            int safe_ssid_len = (ssid_len >= (int)sizeof(entry->ssid)) ? (int)sizeof(entry->ssid) - 1 : ssid_len;
+            memcpy(entry->ssid, ssid_data, safe_ssid_len);
+            entry->ssid[safe_ssid_len] = '\0';
             entry->wifi_connected = true;
         }
         if (tb[NL80211_ATTR_WIPHY_FREQ]) entry->frequency = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY_FREQ]);
@@ -1168,13 +1257,17 @@ step2:
     /* Request Station Info for each WiFi Interface */
     for (size_t i = 0; i < ifaces_count; i++) {
         if (ifaces[i]->exists && ifaces[i]->is_wifi) {
-            struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req = {
-                .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid,
-                .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .n.nlmsg_seq = time(NULL) + i,
-                .g.cmd = NL80211_CMD_GET_STATION, .g.version = 1
-            };
+            struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req;
+            memset(&sta_req, 0, sizeof(sta_req));
+            sta_req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+            sta_req.n.nlmsg_type = fid;
+            sta_req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+            sta_req.n.nlmsg_seq = time(NULL) + i;
+            sta_req.g.cmd = NL80211_CMD_GET_STATION;
+            sta_req.g.version = 1;
+            
             uint32_t idx = ifaces[i]->index;
-            add_nl_attr(&sta_req.n, NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
+            add_nl_attr(&sta_req.n, sizeof(sta_req), NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
             
             send(sock, &sta_req, sta_req.n.nlmsg_len, 0);
             while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
@@ -1326,6 +1419,17 @@ void json_print_string(const char *key, const char *val, bool comma) {
         else putchar(*p);
     }
     printf("\"%s\n", comma ? "," : "");
+}
+
+/* Helper for cmd_ns_list array escaping without trailing newlines */
+void print_escaped_string(const char *val) {
+    printf("\"");
+    for (const char *p = val; *p; p++) {
+        if (*p == '"') printf("\\\"");
+        else if (*p == '\\') printf("\\\\");
+        else putchar(*p);
+    }
+    printf("\"");
 }
 
 void print_json_status() {
@@ -1495,17 +1599,43 @@ void cmd_tune(char *profile) {
 
 /* --- XDP/eBPF Logic --- */
 
-int load_xdp_drop_prog() {
-    // Construct bpf_attr manually to avoid libbpf dependency
+int load_xdp_drop_prog(bool soft_wol) {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.prog_type = BPF_PROG_TYPE_XDP;
-    attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
-    attr.insns = (unsigned long)xdp_drop_prog;
-    attr.license = (unsigned long)"GPL";
     
-    // Call syscall directly
-    return bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+    if (soft_wol) {
+        attr.insn_cnt = sizeof(xdp_soft_wol_prog) / sizeof(struct bpf_insn);
+        attr.insns = (__aligned_u64)(uintptr_t)xdp_soft_wol_prog;
+    } else {
+        attr.insn_cnt = sizeof(xdp_drop_prog) / sizeof(struct bpf_insn);
+        attr.insns = (__aligned_u64)(uintptr_t)xdp_drop_prog;
+    }
+    
+    /* C-2 Fix: Use uintptr_t to prevent truncation on 32-bit architectures */
+    attr.license = (__aligned_u64)(uintptr_t)"GPL";
+    
+    /* M-7 Fix: Try without verifier log first to avoid unnecessary kernel strings and save stack space */
+    attr.log_level = 0;
+    
+    int fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+    if (fd < 0) {
+        /* Failed, retry with a large heap-allocated log buffer to provide debug info */
+        char *log_buf = calloc(1, 16384);
+        if (log_buf) {
+            attr.log_buf = (__aligned_u64)(uintptr_t)log_buf;
+            attr.log_size = 16384;
+            attr.log_level = 1;
+            fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+            if (fd < 0) {
+                fprintf(stderr, "BPF_PROG_LOAD failed: %s\nVerifier log:\n%s\n", strerror(errno), log_buf);
+            }
+            free(log_buf);
+        } else {
+             fprintf(stderr, "BPF_PROG_LOAD failed: %s\n", strerror(errno));
+        }
+    }
+    return fd;
 }
 
 int attach_xdp_prog(int ifindex, int fd, int flags) {
@@ -1515,7 +1645,7 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     struct {
         struct nlmsghdr n;
         struct ifinfomsg i;
-        char buf[256];
+        char buf[1024];
     } req;
     
     memset(&req, 0, sizeof(req));
@@ -1526,30 +1656,31 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     req.i.ifi_family = AF_UNSPEC;
     req.i.ifi_index = ifindex;
     
-    // Construct Nested IFLA_XDP attribute
-    struct rtattr *xdp_attr = (struct rtattr *)((char *)&req + req.n.nlmsg_len);
-    xdp_attr->rta_type = IFLA_XDP | NLA_F_NESTED;
-    int xdp_len = sizeof(struct rtattr); // Start with header size
+    /* C-5 & M-1 Fix: Use bounds-checked attribute helper to construct nested IFLA_XDP */
+    /* Note: NLA_F_NESTED requires a parent attribute to encapsulate the children */
     
-    // 1. Add IFLA_XDP_FD
-    struct rtattr *fd_attr = (struct rtattr *)((char *)xdp_attr + sizeof(struct rtattr));
-    fd_attr->rta_type = IFLA_XDP_FD;
-    fd_attr->rta_len = RTA_LENGTH(sizeof(int));
-    memcpy(RTA_DATA(fd_attr), &fd, sizeof(int));
-    xdp_len += RTA_ALIGN(fd_attr->rta_len);
+    /* We temporarily store the nested attributes in a scratch buffer before appending the parent */
+    char nested_buf[256];
+    struct nlmsghdr *nested_dummy = (struct nlmsghdr *)nested_buf;
+    memset(nested_dummy, 0, sizeof(*nested_dummy));
+    nested_dummy->nlmsg_len = NLMSG_LENGTH(0);
     
-    // 2. Add IFLA_XDP_FLAGS (if non-zero)
-    if (flags != 0) {
-        struct rtattr *flags_attr = (struct rtattr *)((char *)xdp_attr + xdp_len);
-        // Using IFLA_XDP_FLAGS from header or fallback define
-        flags_attr->rta_type = IFLA_XDP_FLAGS; 
-        flags_attr->rta_len = RTA_LENGTH(sizeof(int));
-        memcpy(RTA_DATA(flags_attr), &flags, sizeof(int));
-        xdp_len += RTA_ALIGN(flags_attr->rta_len);
+    if (!add_nl_attr(nested_dummy, sizeof(nested_buf), IFLA_XDP_FD, &fd, sizeof(int))) {
+        close(sock); return -1; 
     }
     
-    xdp_attr->rta_len = xdp_len;
-    req.n.nlmsg_len += RTA_ALIGN(xdp_len);
+    if (flags != 0) {
+        if (!add_nl_attr(nested_dummy, sizeof(nested_buf), IFLA_XDP_FLAGS, &flags, sizeof(int))) {
+            close(sock); return -1;
+        }
+    }
+    
+    int nested_payload_len = nested_dummy->nlmsg_len - NLMSG_LENGTH(0);
+    
+    if (!add_nl_attr(&req.n, sizeof(req), IFLA_XDP | NLA_F_NESTED, (char*)nested_dummy + NLMSG_LENGTH(0), nested_payload_len)) {
+        close(sock);
+        return -1;
+    }
     
     if (send(sock, &req, req.n.nlmsg_len, 0) < 0) {
         close(sock);
@@ -1574,7 +1705,7 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
 
 void cmd_nullify_xdp(char *iface, char *action) {
     if (!iface || !action) {
-        fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|disable>\n");
+        fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|enable-swol|disable>\n");
         exit(1);
     }
     
@@ -1584,10 +1715,15 @@ void cmd_nullify_xdp(char *iface, char *action) {
         exit(1);
     }
     
-    if (strcmp(action, "enable") == 0) {
-        int fd = load_xdp_drop_prog();
+    /* Ensure BPF eBPF bytecode limits are explicitly raised for older kernels/constrained envs */
+    struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+    setrlimit(RLIMIT_MEMLOCK, &rl);
+    
+    if (strncmp(action, "enable", 6) == 0) {
+        bool soft_wol = (strcmp(action, "enable-swol") == 0);
+        int fd = load_xdp_drop_prog(soft_wol);
         if (fd < 0) {
-            perror("BPF_PROG_LOAD failed");
+            // Already prints to stderr in load_xdp_drop_prog
             exit(1);
         }
         
@@ -1605,7 +1741,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             fprintf(stderr, "Failed to attach XDP: %s\n", strerror(-err));
             exit(1);
         }
-        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"enabled\", \"iface\": \"%s\"}\n", iface);
+        printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"%s\", \"iface\": \"%s\"}\n", soft_wol ? "enabled-swol" : "enabled", iface);
         
     } else if (strcmp(action, "disable") == 0) {
         // Attach FD -1 to detach
@@ -1615,23 +1751,23 @@ void cmd_nullify_xdp(char *iface, char *action) {
         }
         
         if (err != 0) {
-            fprintf(stderr, "Failed to detach XDP: %s\n", strerror(-err));
-            exit(1);
+            fprintf(stderr, "Warning: Failed to detach XDP (may not be attached): %s\n", strerror(-err));
+            // Do not exit fatally on disable; allow partial cleanups to proceed.
         }
         printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"disabled\", \"iface\": \"%s\"}\n", iface);
     }
 }
 
 /**
- * @brief Atomically writes stdin to a file.
+ * @brief Atomically writes stdin to a file using dynamic re-allocation.
  */
-void cmd_atomic_write(char *path, char *perm_str) {
+int cmd_atomic_write(char *path, char *perm_str) {
     size_t capacity = 65536; // Start with 64KB
     size_t total_len = 0;
     char *buf = malloc(capacity);
     if (!buf) {
         fprintf(stderr, "OOM allocating atomic buffer\n");
-        exit(1);
+        return 1;
     }
 
     while (1) {
@@ -1643,21 +1779,16 @@ void cmd_atomic_write(char *path, char *perm_str) {
         if (ferror(stdin)) {
             fprintf(stderr, "Error reading stdin\n");
             free(buf);
-            exit(1);
+            return 1;
         }
 
         if (total_len == capacity) {
             capacity *= 2;
-            if (capacity > 16 * 1024 * 1024) { // 16MB Safety Cap
-                fprintf(stderr, "Input exceeds 16MB safety cap\n");
-                free(buf);
-                exit(1);
-            }
             char *new_buf = realloc(buf, capacity);
             if (!new_buf) {
                 fprintf(stderr, "OOM expanding atomic buffer\n");
                 free(buf);
-                exit(1);
+                return 1;
             }
             buf = new_buf;
         }
@@ -1689,17 +1820,20 @@ void cmd_atomic_write(char *path, char *perm_str) {
 
     if (!changed) {
         free(buf);
-        return;
+        return 0;
     }
 
+    /* PROACTIVE FIX: Mitigate predictable temp file symlink races by using mkstemp.
+     * Note: This prevents TOCTOU on the filename itself, though the narrow permissions
+     * window between mkstemp() and fchmod() remains the same as open(O_CREAT). */
     char tmp_path[PATH_MAX];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, getpid());
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = mkstemp(tmp_path);
     if (fd < 0) {
-        fprintf(stderr, "Error creating temp file\n");
+        fprintf(stderr, "Error creating secure temp file\n");
         free(buf);
-        exit(1);
+        return 1;
     }
 
     size_t written = 0;
@@ -1711,7 +1845,7 @@ void cmd_atomic_write(char *path, char *perm_str) {
             close(fd);
             unlink(tmp_path);
             free(buf);
-            exit(1);
+            return 1;
         }
         written += w;
     }
@@ -1728,39 +1862,59 @@ void cmd_atomic_write(char *path, char *perm_str) {
          fprintf(stderr, "Error renaming temp file\n");
          unlink(tmp_path);
          free(buf);
-         exit(1);
+         return 1;
     }
     
     free(buf);
+    return 0;
 }
 
 /**
- * @brief Appends a line to a file safely (with flock).
+ * @brief Appends a line to a file safely using dynamically expanding file buffer.
  */
-void cmd_append_config(char *path, char *line) {
+int cmd_append_config(char *path, char *line) {
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) {
         fprintf(stderr, "Error opening config file\n");
-        exit(1);
+        return 1;
     }
     
     if (flock(fd, LOCK_EX) != 0) {
         fprintf(stderr, "Failed to lock file\n");
         close(fd);
-        exit(1);
+        return 1;
     }
     
-    char file_buf[32768];
-    ssize_t read_len = 0;
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("fstat");
+        close(fd);
+        return 1;
+    }
+    
+    size_t file_size = st.st_size;
+    char *file_buf = malloc(file_size + 1);
+    if (!file_buf) {
+        fprintf(stderr, "OOM allocating append buffer\n");
+        /* FIX: Prevent FD lock leakage on OOM */
+        flock(fd, LOCK_UN);
+        close(fd);
+        return 1;
+    }
+    
+    ssize_t total_read = 0;
+    while (total_read < (ssize_t)file_size) {
+        ssize_t read_len = read(fd, file_buf + total_read, file_size - total_read);
+        if (read_len <= 0) break;
+        total_read += read_len;
+    }
+    file_buf[total_read] = '\0';
+    
     bool found = false;
-    
-    while ((read_len = read(fd, file_buf, sizeof(file_buf)-1)) > 0) {
-        file_buf[read_len] = '\0';
-        if (strstr(file_buf, line)) {
-            found = true;
-            break;
-        }
+    if (strstr(file_buf, line)) {
+        found = true;
     }
+    free(file_buf);
     
     if (!found) {
         lseek(fd, 0, SEEK_END);
@@ -1775,6 +1929,7 @@ void cmd_append_config(char *path, char *line) {
     
     flock(fd, LOCK_UN);
     close(fd);
+    return 0;
 }
 
 static void trigger_roaming_event(const char *iface) {
@@ -1796,11 +1951,36 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     int sock = open_netlink_rt();
     if (sock < 0) exit(1);
     
-    trigger_roaming_event(iface);
+    struct timespec last_trigger = {0, 0};
+    unsigned int last_flags = 0;
+    
+    /* C-1 FIX: Initialize last_flags to prevent spurious triggers on already-up interfaces */
+    int io_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (io_sock >= 0) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+        if (ioctl(io_sock, SIOCGIFFLAGS, &ifr) == 0) {
+            last_flags = ifr.ifr_flags;
+        }
+        close(io_sock);
+    }
     
     while (1) {
         char buf[4096];
         int len = recv(sock, buf, sizeof(buf), 0);
+        
+        /* C-1/M-8 FIX: Robust Recv Error Handling */
+        if (len < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "Netlink socket error, reconnecting...\n");
+            sleep(5);
+            close(sock);
+            sock = open_netlink_rt();
+            if (sock < 0) exit(1);
+            continue;
+        }
+        
         if (len > 0) {
             struct nlmsghdr *nh = (struct nlmsghdr *)buf;
             for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
@@ -1812,13 +1992,30 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                     if (tb[IFLA_IFNAME]) {
                         char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
                         if (strcmp(name, iface) == 0) {
-                            trigger_roaming_event(iface);
+                            
+                            /* C-1 FIX: Transition monitoring + Debounce */
+                            unsigned int current_flags = ifi->ifi_flags;
+                            bool is_running = (current_flags & IFF_RUNNING) && (current_flags & IFF_LOWER_UP);
+                            bool was_running = (last_flags & IFF_RUNNING) && (last_flags & IFF_LOWER_UP);
+                            
+                            last_flags = current_flags;
+                            
+                            /* Only trigger on state change to running (Carrier UP) */
+                            if (is_running && !was_running) {
+                                struct timespec now;
+                                clock_gettime(CLOCK_MONOTONIC, &now);
+                                
+                                long delta = now.tv_sec - last_trigger.tv_sec;
+                                if (delta >= 5) { /* 5s mechanical debounce */
+                                    last_trigger = now;
+                                    trigger_roaming_event(iface);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        sleep(2);
     }
     close(sock);
 }
@@ -1838,7 +2035,8 @@ void cmd_ns_list() {
     while ((dir = readdir(d)) != NULL) {
         if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
         if (!first) printf(", ");
-        printf("\"%s\"", dir->d_name);
+        /* L-5 FIX: Escape namespace JSON arrays */
+        print_escaped_string(dir->d_name);
         first = false;
     }
     printf("]}\n");
@@ -1864,16 +2062,31 @@ int cmd_ns_create(const char *name) {
     }
     close(fd);
     
-    /* Unshare network namespace */
-    if (unshare(CLONE_NEWNET) < 0) {
-        perror("unshare");
+    /* Unshare network namespace in child to protect parent process state */
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
         unlink(path);
         return 1;
     }
     
-    /* Bind mount new namespace to file */
-    if (mount("/proc/self/ns/net", path, "none", MS_BIND, NULL) < 0) {
-        perror("mount");
+    if (pid == 0) {
+        if (unshare(CLONE_NEWNET) < 0) {
+            perror("unshare");
+            exit(1);
+        }
+        
+        /* Bind mount new namespace to file */
+        if (mount("/proc/self/ns/net", path, "none", MS_BIND, NULL) < 0) {
+            perror("mount");
+            exit(1);
+        }
+        exit(0);
+    }
+    
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         unlink(path);
         return 1;
     }
@@ -1931,6 +2144,29 @@ int cmd_ns_exec(const char *name, int argc, char **argv) {
     return 0;
 }
 
+/**
+ * @brief Tests whether a string matches an extended POSIX regex.
+ * @param str   The string to test.
+ * @param pat   The extended regex pattern (ERE).
+ * @return 0 on match, 1 on no-match, 2 on regex compile error.
+ */
+int cmd_match(const char *str, const char *pat) {
+    regex_t re;
+    int ret;
+
+    ret = regcomp(&re, pat, REG_EXTENDED | REG_NOSUB);
+    if (ret != 0) {
+        char errbuf[256];
+        regerror(ret, &re, errbuf, sizeof(errbuf));
+        fprintf(stderr, "rxnm-agent --match: invalid pattern: %s\n", errbuf);
+        return 2;
+    }
+
+    ret = regexec(&re, str, 0, NULL, 0);
+    regfree(&re);
+    return (ret == 0) ? 0 : 1;
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -1968,7 +2204,7 @@ char *g_route_table = NULL;
 
 int main(int argc, char *argv[]) {
     atexit(cleanup_ifaces);
-    load_runtime_config();
+    apply_env_overrides();
     
     static struct option long_options[] = {
         {"version", no_argument, 0, 'v'},
@@ -1996,6 +2232,7 @@ int main(int argc, char *argv[]) {
         {"ns-list", no_argument, 0, 1003},
         {"route-dump", required_argument, 0, 1004},
         {"ns-exec", required_argument, 0, 1005},
+        {"match", required_argument, 0, 1006},
         {0, 0, 0, 0}
     };
     
@@ -2030,6 +2267,13 @@ int main(int argc, char *argv[]) {
                 g_ns_exec_name = optarg;
                 // Stop option parsing here to pass remaining args to execvp
                 goto end_args;
+            case 1006:
+                if (optind < argc) {
+                    return cmd_match(optarg, argv[optind]);
+                } else {
+                    fprintf(stderr, "Usage: rxnm-agent --match <string> <pattern>\n");
+                    return 1;
+                }
             default: return 1;
         }
     }
@@ -2041,20 +2285,20 @@ end_args:
         return cmd_ns_exec(g_ns_exec_name, argc - optind, argv + optind);
     }
     
-    // XDP Command: requires --nullify-xdp <iface> AND a following "enable/disable"
+    // XDP Command: requires --nullify-xdp <iface> AND a following "enable/enable-swol/disable"
     if (g_nullify_xdp_iface) {
         // Look for next arg as action
         if (optind < argc) {
             cmd_nullify_xdp(g_nullify_xdp_iface, argv[optind]);
             return 0;
         } else {
-            fprintf(stderr, "Missing action for --nullify-xdp (enable|disable)\n");
+            fprintf(stderr, "Missing action for --nullify-xdp (enable|enable-swol|disable)\n");
             return 1;
         }
     }
     
-    if (g_atomic_path) { cmd_atomic_write(g_atomic_path, g_perm_str); return 0; }
-    if (g_append_path && g_append_line) { cmd_append_config(g_append_path, g_append_line); return 0; }
+    if (g_atomic_path) { return cmd_atomic_write(g_atomic_path, g_perm_str); }
+    if (g_append_path && g_append_line) { return cmd_append_config(g_append_path, g_append_line); }
     if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }
     if (g_connect_ssid) { return cmd_connect(g_connect_ssid, g_connect_iface); }
     if (g_nullify_cmd) { 

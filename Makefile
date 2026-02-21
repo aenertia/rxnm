@@ -43,12 +43,13 @@ SYSTEMD_SLEEP_DIR ?= $(PREFIX)/lib/systemd/system-sleep
 TARGET = $(BIN_DIR)/rxnm-agent
 CONSTANTS_HEADER = $(SRC_DIR)/rxnm_generated.h
 
-.PHONY: all clean check lint dirs constants tiny test-all install verify
+.PHONY: all clean check lint dirs constants tiny test-all install verify rocknix-release combined-full
 
 all: dirs constants $(TARGET)
 
 dirs:
 	@mkdir -p $(BIN_DIR)
+	@mkdir -p build
 
 # Step 1: Sync Constants (SSoT)
 constants: $(CONSTANTS_HEADER)
@@ -91,7 +92,7 @@ install: all
 	@chmod 755 $(LIBEXEC_DIR)/bin/*
 	@chmod 644 $(LIBEXEC_DIR)/lib/*
 	@echo "[LINK]    Creating symlink $(BIN_SYMLINK)..."
-	@ln -sf $(LIBEXEC_DIR)/bin/rocknix-network-manager $(BIN_SYMLINK)
+	@ln -sf $(LIBEXEC_DIR)/bin/rxnm $(BIN_SYMLINK)
 	
 	@echo "[INSTALL] Bash completion..."
 	@mkdir -p $(BASH_COMP_DIR)
@@ -101,8 +102,8 @@ install: all
 	@echo "[INSTALL] Systemd network templates..."
 	@mkdir -p $(SYSTEMD_NET_DIR)
 	@cp -f usr/lib/systemd/network/* $(SYSTEMD_NET_DIR)/
-	# Fixed: Chmod everything in target dir instead of specific extensions that might not exist
-	@chmod 644 $(SYSTEMD_NET_DIR)/*
+	# Fixed: Only apply chmod to files to prevent stripping +x from dirs
+	@find $(SYSTEMD_NET_DIR) -type f -exec chmod 644 {} +
 
 	@echo "[INSTALL] System sleep hooks..."
 	@mkdir -p $(SYSTEMD_SLEEP_DIR)
@@ -115,6 +116,7 @@ clean:
 	@echo "[CLEAN]"
 	@rm -f $(TARGET)
 	@rm -f $(CONSTANTS_HEADER)
+	@rm -rf build/
 
 # New: Static Analysis
 lint:
@@ -127,7 +129,7 @@ check: all
 	@bash tests/test_foundation.sh
 	@bash tests/test_phase2.sh
 
-# Full Phase 3 Validation (Updated for RC3)
+# Full Phase 3 Validation (Updated for Release)
 # Now includes linting as a prerequisite
 test-all: all lint
 	@echo "[TEST] Running Full Validation Suite..."
@@ -138,9 +140,31 @@ test-all: all lint
 	@bash tests/test_performance.sh
 	@bash tests/test_stability.sh
 	@bash tests/test_cli_fuzz.sh
-	@bash tests/verify_rc3.sh
+	@bash tests/verify_release.sh
 
 # Final Implementation Verification
 verify:
-	@echo "[VERIFY] Running RC3 Implementation Verification..."
-	@bash tests/verify_rc3.sh
+	@echo "[VERIFY] Running Implementation Verification..."
+	@bash tests/verify_release.sh
+
+# Target for ROCKNIX Minimal Edition
+rocknix-release: tiny
+	@echo "[ROCKNIX] Building Minimal Bundle..."
+	@bash scripts/bundle.sh
+	@cp -f $(TARGET) build/rxnm-agent
+	@echo "[ROCKNIX] Running Bundle Fuzzer..."
+	@BUNDLE_BIN=build/rxnm bash tests/test_bundle_fuzz.sh
+	@echo "[ROCKNIX] Deployment artifacts ready in build/"
+	@echo "    - build/rxnm       (Single Script)"
+	@echo "    - build/rxnm-agent (Tiny C Agent)"
+
+# Target for Full Combined Edition (All Features)
+combined-full: tiny
+	@echo "[RXNM] Building Full Combined Bundle..."
+	@BUNDLE_MODE=full bash scripts/bundle.sh
+	@cp -f $(TARGET) build/rxnm-agent
+	@echo "[RXNM] Running Bundle Fuzzer on Full Edition..."
+	@BUNDLE_BIN=build/rxnm-full bash tests/test_bundle_fuzz.sh
+	@echo "[RXNM] Deployment artifacts ready in build/"
+	@echo "    - build/rxnm-full  (Single Script - All Features)"
+	@echo "    - build/rxnm-agent (Tiny C Agent)"

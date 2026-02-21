@@ -3,11 +3,11 @@
 # Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
 # -----------------------------------------------------------------------------
-# FILE: verify_rc3.sh
-# PURPOSE: Release Candidate 3 Verification Suite
+# FILE: verify_release.sh
+# PURPOSE: Release Candidate Verification Suite
 # ARCHITECTURE: Test Suite / Verification
 #
-# Validates key RC3 features:
+# Validates key features prior to tagging a release:
 # 1. Service Isolation (Namespace creation/execution)
 # 2. Stub Correctness (MPLS/PPPoE return 501)
 # 3. Agent Fallback (Graceful degradation if agent missing)
@@ -61,11 +61,11 @@ fi
 # Enable experimental features for testing
 export RXNM_EXPERIMENTAL=true
 
-echo "--- RC3 Verification Suite ---"
+echo "--- Release Verification Suite ---"
 
 # TEST 1: Service Isolation (Stub or Real)
 info "Testing Service Architecture..."
-SERVICE_NAME="rc3_test_ns"
+SERVICE_NAME="release_test_ns"
 
 # Create (Use --json for deterministic grep)
 out=$("$RXNM" service create "$SERVICE_NAME" --json)
@@ -130,9 +130,9 @@ fi
 
 echo "-----------------------------------"
 if [ $ERRORS -eq 0 ]; then
-    echo -e "${GREEN}RC3 Verification Complete: All tests passed.${NC}"
+    echo -e "${GREEN}Release Verification Complete: All tests passed.${NC}"
     exit 0
 else
-    echo -e "${RED}RC3 Verification Failed: $ERRORS errors found.${NC}"
+    echo -e "${RED}Release Verification Failed: $ERRORS errors found.${NC}"
     exit 1
 fi

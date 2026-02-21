@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RXNM 1.0 Unified API Schema",
+  "title": "RXNM 1.1 Unified API Schema",
   "description": "Contract for RXNM interactions including Input Requests (stdin) and Output Responses (stdout).",
   "type": "object",
   "oneOf": [
@@ -53,7 +53,8 @@
         },
         "api_version": {
           "type": "string",
-          "default": "1.0"
+          "default": "1.1",
+          "enum": ["1.0", "1.1"]
         },
         "force": {
           "type": "boolean"
@@ -71,9 +72,24 @@
           "enum": [
             "json",
             "human",
-            "table",
             "simple"
           ]
+        },
+        "wowlan": {
+          "type": "boolean",
+          "description": "Toggle WoWLAN firmware filtering during nullify operations"
+        },
+        "soft_wol": {
+          "type": "boolean",
+          "description": "Expand XDP filter to allow standard Wake-on-LAN Magic Packets"
+        },
+        "bt": {
+          "type": "boolean",
+          "description": "Toggle Bluetooth HCI air-gap during nullify operations"
+        },
+        "xdp": {
+          "type": "boolean",
+          "description": "Toggle XDP driver eBPF drop filters during nullify operations"
         }
       },
       "allOf": [
@@ -176,7 +192,7 @@
     },
     "WifiInput": {
       "properties": {
-        "action": { "enum": [ "scan", "connect", "disconnect", "ap", "wps", "list", "networks", "forget", "country", "p2p", "dpp", "roaming" ] },
+        "action": { "enum": [ "scan", "connect", "disconnect", "ap", "wps", "list", "networks", "forget", "country", "p2p", "dpp", "roaming", "nullify" ] },
         "ssid": { "type": "string" },
         "password": { "type": "string" },
         "hidden": { "type": "boolean" },
@@ -216,7 +232,7 @@
     },
     "BluetoothInput": {
       "properties": {
-        "action": { "enum": [ "scan", "pair", "unpair", "pan" ] },
+        "action": { "enum": [ "scan", "pair", "unpair", "pan", "nullify" ] },
         "mac": { "type": "string" },
         "subcommand": { "enum": [ "enable", "disable" ] },
         "mode": { "enum": [ "client", "host" ] },
@@ -226,7 +242,7 @@
     },
     "SystemInput": {
       "properties": {
-        "action": { "enum": [ "status", "check", "proxy", "reload", "setup", "start", "stop", "nullify" ] },
+        "action": { "enum": [ "status", "check", "proxy", "reload", "setup", "start", "stop", "nullify", "ipv4", "ipv6" ] },
         "subcommand": { "type": "string" },
         "http": { "type": "string" },
         "https": { "type": "string" },

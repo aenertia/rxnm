@@ -34,7 +34,7 @@ Categories:
   tunnel        Overlay Networks (VXLAN, Geneve)
 
 Global Options:
-  --format <fmt>  Output format: human (default), json, table, simple
+  --format <fmt>  Output format: human (default), json, simple
   --simple        Shortcut for '--format simple' (Bash friendly)
   --get <key>     Extract specific value (implies --simple)
   --yes, -y       Skip confirmation prompts
@@ -47,7 +47,7 @@ Examples:
   rxnm wifi connect "MyNetwork"
   rxnm interface wlan0 set dhcp
   rxnm route add default --gateway 192.168.1.1
-  rxnm system status --format table
+  rxnm system status --format json
 
 Use 'rxnm <category> --help' for specific commands.
 EOF
@@ -80,6 +80,8 @@ Actions:
   roaming monitor       Start opportunistic roaming monitor (Foreground)
   roaming enable        Enable roaming background service
   roaming disable       Disable roaming background service
+  
+  nullify <cmd>         Suspend/Resume hardware traffic for WiFi (enable, disable, status)
 
 Options:
   --password <pass>     WiFi Password
@@ -111,6 +113,7 @@ Usage: rxnm interface [name] <action> [options]
 
 Actions:
   show                  Show interface details
+  nullify <cmd>         Suspend/Resume hardware traffic (enable, disable, status)
   hotplug               Trigger hotplug event (Standard/Rescue)
   set dhcp              Enable DHCP
   set static <ip>       Set Static IP (CIDR format)
@@ -141,14 +144,13 @@ Examples:
   # Set Static IP
   rxnm interface eth0 set static 192.168.1.50/24 --gateway 192.168.1.1 --dns 8.8.8.8
 
-  # Enable DHCP with custom metric (priority)
-  rxnm interface wlan0 set dhcp --metric 100
+  # Power Management: Suspend hardware traffic on specific interface
+  rxnm interface wlan0 nullify enable
 
   # Get just the IP address (useful for scripts)
   rxnm interface eth0 show --get ip
 
   # Change MAC address
-  rxnm interface wlan0 set hardware --mac 00:11:22:33:44:55
 EOF
             ;;
         route)
@@ -302,27 +304,30 @@ Actions:
   check portal          Check for captive portal
   reload                Reload network configuration
   proxy set             Configure global/interface proxy
-  nullify enable        Disable networking entirely (requires --yes)
-  nullify disable       Attempt to restore networking
+  nullify <cmd>         Suspend hardware network traffic via XDP/WoWLAN (enable, disable, status)
+  ipv4 <cmd>            Globally silence IPv4 broadcast/ARP chatter (enable, disable, status)
+  ipv6 <cmd>            Globally enable/disable the IPv6 kernel stack (enable, disable, status)
 
 Options:
   --http <url>          Set HTTP proxy
   --https <url>         Set HTTPS proxy
   --noproxy <list>      Set no_proxy exclusions
+  --interface <iface>   Target a specific interface (e.g., for proxy or nullify)
+  --wowlan <yes|no>     Nullify: Toggle WoWLAN firmware filtering (Default: yes)
+  --soft-wol <yes|no>   Nullify: Expand XDP filter to allow Wake-on-LAN packets (Default: no)
+  --bt <yes|no>         Nullify: Toggle Bluetooth HCI air-gap (Default: yes)
+  --xdp <yes|no>        Nullify: Toggle XDP driver eBPF filter (Default: yes)
   --dry-run             Show actions without executing (nullify only)
 
 Examples:
   # Check Internet Connectivity
   rxnm system check internet
 
-  # Set System Proxy
-  rxnm system proxy set --http "http://proxy.example.com:8080" --noproxy "localhost,127.0.0.1"
+  # Power Management: Suspend all network traffic globally
+  rxnm system nullify enable
 
-  # Remove Proxy
-  rxnm system proxy set
-
-  # Emergency: Disable all networking (Nullify)
-  rxnm system nullify enable --yes
+  # Power Management: Extreme Power Profile (Silences IPv4/IPv6 kernel stacks + Hardware drops)
+  rxnm system ipv6 disable && rxnm system ipv4 disable && rxnm system nullify enable
 EOF
             ;;
         api)
@@ -348,6 +353,7 @@ Actions:
   unpair <mac>          Unpair/Remove device
   pan enable            Enable Bluetooth Tethering (PAN)
   pan disable           Disable Bluetooth Tethering
+  nullify <cmd>         Suspend/Resume Bluetooth hardware via HCI (enable, disable, status)
 
 Options:
   --mode <client|host>  PAN Mode (default: client)
