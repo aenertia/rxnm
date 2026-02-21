@@ -169,9 +169,12 @@ _task_nullify_iface() {
                     return 1
                 fi
                 log_debug "Applying XDP $agent_action to $iface..."
-                if "$RXNM_AGENT_BIN" --nullify-xdp "$iface" "$agent_action" >/dev/null 2>&1; then
+                local xdp_out
+                if xdp_out=$("$RXNM_AGENT_BIN" --nullify-xdp "$iface" "$agent_action" 2>&1); then
                     modes="${modes:+$modes,}xdp"
                     [ "$do_soft_wol" = "yes" ] && modes="${modes}-swol"
+                else
+                    log_warn "XDP attach failed on $iface: $xdp_out"
                 fi
             fi
             
@@ -179,10 +182,17 @@ _task_nullify_iface() {
             ;;
     esac
     
+    if [ -z "$modes" ]; then
+        modes="none"
+        if [ "$action" = "enable" ]; then
+             return 1 # Fail fast if no mechanisms could be successfully enabled
+        fi
+    fi
+
     _set_nullify_state "${action}d" "${RUN_DIR}/nullify_${iface}.state"
     
     # Emit applied modes to stdout for JSON capture
-    printf '%s\n' "${modes:-none}"
+    printf '%s\n' "$modes"
     return 0
 }
 
@@ -236,10 +246,11 @@ _task_nullify_global() {
             # LAYER 2: XDP eBPF
             if [ "$do_xdp" = "yes" ]; then
                 log_debug "Applying XDP $agent_action to $iface..."
-                if [ -x "$RXNM_AGENT_BIN" ] && "$RXNM_AGENT_BIN" --nullify-xdp "$iface" "$agent_action" >/dev/null 2>&1; then
+                local xdp_out
+                if [ -x "$RXNM_AGENT_BIN" ] && xdp_out=$("$RXNM_AGENT_BIN" --nullify-xdp "$iface" "$agent_action" 2>&1); then
                     xdp_success_count=$((xdp_success_count + 1))
                 else
-                    log_warn "Failed to apply XDP to $iface (Driver may not support it)"
+                    log_warn "Failed to apply XDP to $iface: $xdp_out"
                 fi
             fi
             
@@ -258,12 +269,17 @@ _task_nullify_global() {
     
     _set_nullify_state "${action}d" "$NULLIFY_STATE_FILE"
     
-    printf '%s\n' "${modes:-none}"
+    if [ -z "$modes" ]; then
+        modes="none"
+    fi
+    
+    printf '%s\n' "$modes"
     
     # If XDP was requested but completely failed on all interfaces, return failure
     if [ "$do_xdp" = "yes" ] && [ "$xdp_success_count" -eq 0 ] && [ "$action" = "enable" ]; then
-        # Still return what worked, but signify incomplete application
-        return 1
+        if [ "$wowlan_success_count" -eq 0 ] && [ "$modes" != "bt" ]; then
+            return 1
+        fi
     fi
     return 0
 }
@@ -312,7 +328,7 @@ action_system_nullify() {
             if modes=$(with_iface_lock "$specific_iface" _task_nullify_iface "$specific_iface" "enable" "$opt_wowlan" "$opt_xdp" "$opt_bt" "$opt_swol"); then
                 json_success '{"action": "nullify_iface", "iface": "'"$specific_iface"'", "status": "enabled", "mode": "'"$modes"'"}'
             else
-                json_error "Failed to enable nullify on $specific_iface (Agent missing?)"
+                json_error "Failed to enable nullify on $specific_iface (Mechanisms failed/rejected)"
                 exit 1
             fi
             return 0

@@ -42,6 +42,7 @@
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sched.h>
 #include <net/if.h>
 #include <arpa/inet.h>
@@ -1630,11 +1631,15 @@ void cmd_nullify_xdp(char *iface, char *action) {
         exit(1);
     }
     
+    /* Ensure BPF eBPF bytecode limits are explicitly raised for older kernels/constrained envs */
+    struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+    setrlimit(RLIMIT_MEMLOCK, &rl);
+    
     if (strncmp(action, "enable", 6) == 0) {
         bool soft_wol = (strcmp(action, "enable-swol") == 0);
         int fd = load_xdp_drop_prog(soft_wol);
         if (fd < 0) {
-            perror("BPF_PROG_LOAD failed");
+            // Already prints to stderr in load_xdp_drop_prog
             exit(1);
         }
         
@@ -1662,8 +1667,8 @@ void cmd_nullify_xdp(char *iface, char *action) {
         }
         
         if (err != 0) {
-            fprintf(stderr, "Failed to detach XDP: %s\n", strerror(-err));
-            exit(1);
+            fprintf(stderr, "Warning: Failed to detach XDP (may not be attached): %s\n", strerror(-err));
+            // Do not exit fatally on disable; allow partial cleanups to proceed.
         }
         printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"disabled\", \"iface\": \"%s\"}\n", iface);
     }

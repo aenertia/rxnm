@@ -114,7 +114,9 @@ chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxn
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
 
 info "Booting Bundle Machines..."
-COMMON_ARGS="--network-bridge=$BRIDGE --boot --capability=all --private-users=no --system-call-filter=add_key:keyctl:bpf --ephemeral"
+# FIX: Appending explicit system-call-filter allowances (@default @bpf @keyring) to ensure eBPF 
+# can load in GitHub Actions ubuntu-24.04 runner despite AppArmor/Seccomp defaults.
+COMMON_ARGS="--network-bridge=$BRIDGE --boot --capability=all --private-users=no --system-call-filter=@default --system-call-filter=@bpf --system-call-filter=@keyring --ephemeral"
 systemd-nspawn -D "$ROOTFS" -M $SERVER $COMMON_ARGS > /tmp/$SERVER.log 2>&1 &
 systemd-nspawn -D "$ROOTFS" -M $CLIENT $COMMON_ARGS > /tmp/$CLIENT.log 2>&1 &
 
