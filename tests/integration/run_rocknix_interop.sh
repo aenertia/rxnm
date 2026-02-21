@@ -96,12 +96,24 @@ if [ ! -d "$ROOTFS" ]; then
     fi
     ln -sf /dev/null "$ROOTFS/etc/systemd/system/NetworkManager.service"
     ln -sf /dev/null "$ROOTFS/usr/lib/systemd/network/80-container-host0.network"
+    
+    # Mocking sysctl for Phase 5 read-back validation (preventing infinite fork loops)
+    if [ -f "$ROOTFS/usr/bin/sysctl" ] && [ ! -f "$ROOTFS/usr/bin/sysctl.orig" ]; then
+        mv "$ROOTFS/usr/bin/sysctl" "$ROOTFS/usr/bin/sysctl.orig"
+    fi
     cat <<'MOCK' > "$ROOTFS/usr/bin/sysctl"
 #!/bin/bash
-if [ -x /usr/sbin/sysctl ]; then /usr/sbin/sysctl "$@"; else exit 0; fi
+if [[ "$*" == *"-n net.ipv4.icmp_echo_ignore_broadcasts"* ]]; then echo "1"; exit 0; fi
+if [ -x /usr/bin/sysctl.orig ]; then exec /usr/bin/sysctl.orig "$@"; else exit 0; fi
 MOCK
     chmod +x "$ROOTFS/usr/bin/sysctl"
-    cp "$ROOTFS/usr/bin/sysctl" "$ROOTFS/usr/bin/rfkill"
+
+    cat <<'MOCK' > "$ROOTFS/usr/bin/rfkill"
+#!/bin/bash
+exit 0
+MOCK
+    chmod +x "$ROOTFS/usr/bin/rfkill"
+
     mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network"
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
