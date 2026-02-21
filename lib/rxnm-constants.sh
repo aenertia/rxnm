@@ -15,7 +15,7 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.1.0-rc3}"
+: "${RXNM_VERSION:=1.1.0}"
 : "${RXNM_API_VERSION:=1.1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 
