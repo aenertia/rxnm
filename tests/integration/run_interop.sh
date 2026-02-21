@@ -97,6 +97,8 @@ info "Setting up Host Bridge..."
 if ! ip link show $BRIDGE >/dev/null 2>&1; then
     ip link add $BRIDGE type bridge
     ip link set $BRIDGE up
+    # CRITICAL: Disable multicast snooping to prevent IPv6 Neighbor Discovery drop failures in isolated bridges
+    echo 0 > /sys/class/net/$BRIDGE/bridge/multicast_snooping 2>/dev/null || true
     sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
     sysctl -w net.ipv6.conf.$BRIDGE.disable_ipv6=1 2>/dev/null || true
     sysctl -w net.ipv4.conf.$BRIDGE.forwarding=1 2>/dev/null || true
@@ -252,24 +254,14 @@ info "--- [PHASE 2] Advanced Interface Attributes ---"
 m_exec $CLIENT rxnm interface host0 set static 192.168.213.50/24 --gateway 192.168.213.1 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
 m_exec $CLIENT networkctl reload
 m_exec $CLIENT networkctl reconfigure host0
+sleep 3
 
-info "Waiting for Attribute Convergence..."
-CONVERGED=false
-for ((i=1; i<=15; i++)); do
-    IP_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.213.50" || true)
-    MAC_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].address // empty')
-    MTU_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].mtu // empty')
+IP_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty' | head -n1)
+MAC_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].address')
+MTU_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].mtu')
 
-    if [ -n "$IP_CHECK" ] && [ "$MAC_CHECK" == "02:aa:bb:cc:dd:ee" ] && [ "$MTU_CHECK" == "1420" ]; then
-        CONVERGED=true
-        break
-    fi
-    sleep 2
-done
-
-if [ "$CONVERGED" = "false" ]; then
-    IP_DUMP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | tr '\n' ' ')
-    err "Attribute application failed! IPs:[$IP_DUMP] MAC:$MAC_CHECK MTU:$MTU_CHECK"
+if [ "$IP_CHECK" != "192.168.213.50" ] || [ "$MAC_CHECK" != "02:aa:bb:cc:dd:ee" ] || [ "$MTU_CHECK" != "1420" ]; then
+    err "Attribute application failed! IP:$IP_CHECK MAC:$MAC_CHECK MTU:$MTU_CHECK"
     exit 1
 fi
 info "✓ Attributes applied successfully (Static IP, MTU 1420, Spoofed MAC)"
@@ -281,24 +273,22 @@ m_exec $SERVER networkctl reload && m_exec $SERVER networkctl reconfigure host0
 
 m_exec $CLIENT rxnm interface host0 set static 192.168.213.50/24,fd00:cafe::2/64 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
 m_exec $CLIENT networkctl reload && m_exec $CLIENT networkctl reconfigure host0
+sleep 3
 
-info "Waiting for IPv6 Convergence..."
-CONVERGED=false
-for ((i=1; i<=15; i++)); do
-    if m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::2"; then
-        if m_exec $SERVER ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::1"; then
-            CONVERGED=true
-            break
-        fi
+info "Verifying IPv6 ICMP reachability..."
+PING_SUCCESS=false
+for ((i=1; i<=10; i++)); do
+    if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::1 >/dev/null 2>&1; then
+        PING_SUCCESS=true
+        break
     fi
-    sleep 2
+    sleep 1
 done
-if [ "$CONVERGED" = "false" ]; then err "IPv6 Convergence timeout"; exit 1; fi
 
-if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::1 >/dev/null 2>&1; then
+if [ "$PING_SUCCESS" = "true" ]; then
     info "✓ IPv6 Ping Successful (Dual-Stack Active)"
 else
-    err "IPv6 Ping Failed"
+    err "IPv6 Ping Failed (NDP resolution timeout)"
     exit 1
 fi
 
