@@ -172,7 +172,12 @@ with_iface_lock() {
     
     # C-6 FIX: Dynamically allocate FDs to prevent lock clobbering when 
     # concurrent backgrounded RXNM tasks run within the same parent shell.
+    # N-1 NOTE: This counter persists across sourced invocations in long-running 
+    # parent shells. It safely wraps at 200, which may reuse FDs in extreme cases.
     : "${_RXNM_FD_COUNTER:=10}"
+    
+    # N-4 FIX: Export the counter so subshells don't reset to 10 and clobber parent FDs.
+    export _RXNM_FD_COUNTER
     local _wi_fd="$_RXNM_FD_COUNTER"
     _RXNM_FD_COUNTER=$((_RXNM_FD_COUNTER + 1))
     

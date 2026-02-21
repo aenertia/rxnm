@@ -318,6 +318,14 @@ bool dyn_buf_align4(dyn_buf_t *b) {
     return true;
 }
 
+bool dyn_buf_align8(dyn_buf_t *b) {
+    uint8_t pad = 0;
+    while (b->len % 8 != 0) {
+        if (!dyn_buf_append(b, &pad, 1)) return false;
+    }
+    return true;
+}
+
 bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
     /* L-1 FIX: Ensure 4-byte alignment before appending string length (D-Bus Spec) */
     if (!dyn_buf_align4(b)) return false;
@@ -333,14 +341,6 @@ bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
     
     if (!dyn_buf_append(b, len_bytes, 4)) return false;
     if (!dyn_buf_append(b, str, len + 1)) return false;
-    return true;
-}
-
-bool dyn_buf_align8(dyn_buf_t *b) {
-    uint8_t pad = 0;
-    while (b->len % 8 != 0) {
-        if (!dyn_buf_append(b, &pad, 1)) return false;
-    }
     return true;
 }
 
@@ -1815,7 +1815,9 @@ int cmd_atomic_write(char *path, char *perm_str) {
         return 0;
     }
 
-    /* PROACTIVE FIX: Secure temporary file creation (TOCTOU mitigation) */
+    /* PROACTIVE FIX: Mitigate predictable temp file symlink races by using mkstemp.
+     * Note: This prevents TOCTOU on the filename itself, though the narrow permissions
+     * window between mkstemp() and fchmod() remains the same as open(O_CREAT). */
     char tmp_path[PATH_MAX];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
 

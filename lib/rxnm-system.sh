@@ -456,6 +456,8 @@ disable_nat_masquerade() {
                 # C-2 FIX: Safely convert Append commands to Delete commands and evaluate them.
                 # This guarantees that the nested `--comment "rocknix"` strings are properly parsed
                 # by the shell and deleted correctly, preventing stale NAT rule buildup.
+                # N-2 NOTE: Piped through `sh` relying on PATH. Implicit assumption is that
+                # iptables rule bodies contain no shell metacharacters beyond the controlled comment.
                 printf '%s\n' "$rules" | sed "s/^-A /timeout 2s iptables -t $table -D /" | sh
             fi
         done
