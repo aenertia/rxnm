@@ -245,14 +245,24 @@ info "--- [PHASE 2] Advanced Interface Attributes ---"
 m_exec $CLIENT rxnm interface host0 set static 192.168.213.60/24 --gateway 192.168.213.2 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
 m_exec $CLIENT networkctl reload
 m_exec $CLIENT networkctl reconfigure host0
-sleep 3
 
-IP_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[] | select(.family=="inet") | .local // empty' | head -n1)
-MAC_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].address')
-MTU_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].mtu')
+info "Waiting for Attribute Convergence..."
+CONVERGED=false
+for ((i=1; i<=15; i++)); do
+    IP_CHECK=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.213.60" || true)
+    MAC_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].address // empty')
+    MTU_CHECK=$(m_exec $CLIENT ip -j link show host0 | jq -r '.[0].mtu // empty')
 
-if [ "$IP_CHECK" != "192.168.213.60" ] || [ "$MAC_CHECK" != "02:aa:bb:cc:dd:ee" ] || [ "$MTU_CHECK" != "1420" ]; then
-    err "Attribute application failed! IP:$IP_CHECK MAC:$MAC_CHECK MTU:$MTU_CHECK"
+    if [ -n "$IP_CHECK" ] && [ "$MAC_CHECK" == "02:aa:bb:cc:dd:ee" ] && [ "$MTU_CHECK" == "1420" ]; then
+        CONVERGED=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$CONVERGED" = "false" ]; then
+    IP_DUMP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | tr '\n' ' ')
+    err "Attribute application failed! IPs:[$IP_DUMP] MAC:$MAC_CHECK MTU:$MTU_CHECK"
     exit 1
 fi
 info "✓ Attributes applied successfully (Static IP, MTU 1420, Spoofed MAC)"
@@ -264,7 +274,19 @@ m_exec $SERVER networkctl reload && m_exec $SERVER networkctl reconfigure host0
 
 m_exec $CLIENT rxnm interface host0 set static 192.168.213.60/24,fd00:cafe::3/64 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
 m_exec $CLIENT networkctl reload && m_exec $CLIENT networkctl reconfigure host0
-sleep 3
+
+info "Waiting for IPv6 Convergence..."
+CONVERGED=false
+for ((i=1; i<=15; i++)); do
+    if m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::3"; then
+        if m_exec $SERVER ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::2"; then
+            CONVERGED=true
+            break
+        fi
+    fi
+    sleep 2
+done
+if [ "$CONVERGED" = "false" ]; then err "IPv6 Convergence timeout"; exit 1; fi
 
 if m_exec $CLIENT ping -6 -c 1 -W 2 fd00:cafe::2 >/dev/null 2>&1; then
     info "✓ IPv6 Ping Successful (Dual-Stack Active)"
