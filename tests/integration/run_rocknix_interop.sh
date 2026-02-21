@@ -129,7 +129,7 @@ chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxn
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
 
 info "Booting Bundle Machines..."
-# FIX: Use bash array to prevent word-splitting on the space-separated syscall filter list.
+# Use bash array to prevent word-splitting on the space-separated syscall filter list.
 # Also explicitly pass RLIMIT_MEMLOCK=infinity to nspawn to allow eBPF bytecode memory allocation.
 COMMON_ARGS=(
     "--network-bridge=$BRIDGE"

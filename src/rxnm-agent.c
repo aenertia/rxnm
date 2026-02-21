@@ -90,7 +90,7 @@ char g_conf_dir[PATH_MAX] = CONF_DIR;
 char g_run_dir[PATH_MAX] = RUN_DIR;
 char g_agent_version[64] = RXNM_VERSION;
 
-/* RC1 FIX: Increased buffers for probe targets (4KB) to prevent truncation of long env vars */
+/* Increased buffers for probe targets (4KB) to prevent truncation of long env vars */
 char g_conn_targets_v4[4096] = RXNM_PROBE_TARGETS_V4;
 char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 
@@ -335,10 +335,10 @@ bool dyn_buf_align8(dyn_buf_t *b) {
 }
 
 bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
-    /* L-1 FIX: Ensure 4-byte alignment before appending string length (D-Bus Spec) */
+    /* Ensure 4-byte alignment before appending string length (D-Bus Spec) */
     if (!dyn_buf_align4(b)) return false;
     
-    /* M-8 Fix: Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
+    /* Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
     uint32_t len = strlen(str);
     uint8_t len_bytes[4] = {
         (uint8_t)(len & 0xFF),
@@ -711,7 +711,7 @@ int dbus_trigger_reload() {
 
 /* Helper to check if a Variant String Signature exists before current position */
 int check_variant_sig_string(const char *buf, int pos) {
-    /* RC3 FIX: Stricter lower bound check to prevent underflow reads */
+    /* Stricter lower bound check to prevent underflow reads */
     if (pos < 2) return 0;
     
     int i = pos - 1;
@@ -808,7 +808,7 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
         received += (size_t)r;
     }
     
-    /* RC1 FIX: Ensure the buffer wasn't truncated prematurely before parsing bounds */
+    /* Ensure the buffer wasn't truncated prematurely before parsing bounds */
     if (received < total_msg_size) { free(buf); return -5; }
     
     /* 3. Scan for SSID */
@@ -820,20 +820,20 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
      */
     int start_offset = sizeof(dbus_header_t) + ALIGN8(resp_hdr->fields_len);
     
-    /* RC3 FIX: Explicit upper bound check */
+    /* Explicit upper bound check */
     int loop_limit = (int)total_msg_size - 8; /* Ensure 4 byte len + at least 4 byte string data */
     int result = -1;
     
     for (int i = start_offset; i < loop_limit; i += 4) {
         
-        /* PROACTIVE FIX: Avoid unaligned 32-bit loads on ARM/RISC-V */
+        /* Avoid unaligned 32-bit loads on ARM/RISC-V */
         uint32_t len;
         memcpy(&len, &buf[i], sizeof(len));
         
         /* Sanity Check Length */
         if (len > 255 || len == 0) continue;
         
-        /* RC3 FIX: Boundary check for the string content itself */
+        /* Boundary check for the string content itself */
         if (i + 4 + len >= (uint32_t)total_msg_size) continue;
         
         /* Is this an Object Path? */
@@ -943,7 +943,7 @@ void process_link_msg(struct nlmsghdr *nh) {
         entry->tx_bytes = stats->tx_bytes;
     }
     
-    /* Operational State Translation (RC1 FIX: using strncpy) */
+    /* Operational State Translation (using strncpy) */
     if ((ifi->ifi_flags & IFF_UP) && (ifi->ifi_flags & IFF_RUNNING)) {
         strncpy(entry->state, "routable", sizeof(entry->state)-1);
     }
@@ -1355,7 +1355,6 @@ void cmd_check_internet() {
     bool v4 = false, v6 = false;
     
     /* Check IPv4 */
-    /* RC1 FIX: Use enlarged buffer */
     char list_v4[4096]; 
     strncpy(list_v4, g_conn_targets_v4, sizeof(list_v4) - 1); 
     list_v4[sizeof(list_v4)-1] = '\0';
@@ -1369,7 +1368,6 @@ void cmd_check_internet() {
     }
     
     /* Check IPv6 */
-    /* RC1 FIX: Use enlarged buffer */
     char list_v6[4096]; 
     strncpy(list_v6, g_conn_targets_v6, sizeof(list_v6) - 1); 
     list_v6[sizeof(list_v6)-1] = '\0';
@@ -1612,10 +1610,10 @@ int load_xdp_drop_prog(bool soft_wol) {
         attr.insns = (__aligned_u64)(uintptr_t)xdp_drop_prog;
     }
     
-    /* C-2 Fix: Use uintptr_t to prevent truncation on 32-bit architectures */
+    /* Use uintptr_t to prevent truncation on 32-bit architectures */
     attr.license = (__aligned_u64)(uintptr_t)"GPL";
     
-    /* M-7 Fix: Try without verifier log first to avoid unnecessary kernel strings and save stack space */
+    /* Try without verifier log first to avoid unnecessary kernel strings and save stack space */
     attr.log_level = 0;
     
     int fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
@@ -1656,7 +1654,7 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     req.i.ifi_family = AF_UNSPEC;
     req.i.ifi_index = ifindex;
     
-    /* C-5 & M-1 Fix: Use bounds-checked attribute helper to construct nested IFLA_XDP */
+    /* Use bounds-checked attribute helper to construct nested IFLA_XDP */
     /* Note: NLA_F_NESTED requires a parent attribute to encapsulate the children */
     
     /* We temporarily store the nested attributes in a scratch buffer before appending the parent */
@@ -1823,7 +1821,7 @@ int cmd_atomic_write(char *path, char *perm_str) {
         return 0;
     }
 
-    /* PROACTIVE FIX: Mitigate predictable temp file symlink races by using mkstemp.
+    /* Mitigate predictable temp file symlink races by using mkstemp.
      * Note: This prevents TOCTOU on the filename itself, though the narrow permissions
      * window between mkstemp() and fchmod() remains the same as open(O_CREAT). */
     char tmp_path[PATH_MAX];
@@ -1896,7 +1894,7 @@ int cmd_append_config(char *path, char *line) {
     char *file_buf = malloc(file_size + 1);
     if (!file_buf) {
         fprintf(stderr, "OOM allocating append buffer\n");
-        /* FIX: Prevent FD lock leakage on OOM */
+        /* Prevent FD lock leakage on OOM */
         flock(fd, LOCK_UN);
         close(fd);
         return 1;
@@ -1954,7 +1952,7 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     struct timespec last_trigger = {0, 0};
     unsigned int last_flags = 0;
     
-    /* C-1 FIX: Initialize last_flags to prevent spurious triggers on already-up interfaces */
+    /* Initialize last_flags to prevent spurious triggers on already-up interfaces */
     int io_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (io_sock >= 0) {
         struct ifreq ifr;
@@ -1970,7 +1968,7 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
         char buf[4096];
         int len = recv(sock, buf, sizeof(buf), 0);
         
-        /* C-1/M-8 FIX: Robust Recv Error Handling */
+        /* Robust Recv Error Handling */
         if (len < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "Netlink socket error, reconnecting...\n");
@@ -1993,7 +1991,7 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                         char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
                         if (strcmp(name, iface) == 0) {
                             
-                            /* C-1 FIX: Transition monitoring + Debounce */
+                            /* Transition monitoring + Debounce */
                             unsigned int current_flags = ifi->ifi_flags;
                             bool is_running = (current_flags & IFF_RUNNING) && (current_flags & IFF_LOWER_UP);
                             bool was_running = (last_flags & IFF_RUNNING) && (last_flags & IFF_LOWER_UP);
@@ -2035,7 +2033,7 @@ void cmd_ns_list() {
     while ((dir = readdir(d)) != NULL) {
         if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
         if (!first) printf(", ");
-        /* L-5 FIX: Escape namespace JSON arrays */
+        /* Escape namespace JSON arrays */
         print_escaped_string(dir->d_name);
         first = false;
     }

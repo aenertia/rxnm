@@ -122,7 +122,7 @@ cpu_regex=$(grep -h "grep -qEi" "$CONSTANTS_SH" | grep "/proc/cpuinfo" | sed -n 
 
 if [ -n "$cpu_regex" ]; then
     # Convert pipes to C array format: "RK3326", "RK3566", ...
-    # M-7 Fix: Lowercase the strings for guaranteed deterministic matching alongside Agent's strcasestr
+    # Lowercase the strings for guaranteed deterministic matching alongside Agent's strcasestr
     c_list=$(echo "$cpu_regex" | tr '[:upper:]' '[:lower:]' | sed 's/|/", "/g')
     echo "#define LOW_POWER_SOCS { \"$c_list\", NULL }" >> "$HEADER_FILE"
 else
@@ -137,7 +137,7 @@ echo "// --- Kernel Header Sync (Drift Guard) ---" >> "$HEADER_FILE"
 # We use grep to find the define and extract the value (usually 3)
 HEADER_VAL=""
 if [ -f "/usr/include/linux/if_link.h" ]; then
-    # Fix: Added '|| true' because grep returns exit code 1 if not found,
+    # Added '|| true' because grep returns exit code 1 if not found,
     # which causes the script to abort under 'set -e'.
     HEADER_VAL=$(grep -E "^\s*#define\s+IFLA_XDP_FLAGS\s+[0-9]+" /usr/include/linux/if_link.h | head -n1 | awk '{print $3}' || true)
 fi

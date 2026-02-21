@@ -76,7 +76,7 @@ else
     fail "Health Check JSON invalid: $health_json"
 fi
 
-# 6. Issue 5.2: Test --get query path
+# Test --get query path
 agent_ifaces=$("$AGENT_BIN" --dump 2>/dev/null | "$JQ_BIN" -r '.interfaces | keys | .[0] // empty')
 if [ -n "$agent_ifaces" ]; then
     result=$("$AGENT_BIN" --get "interfaces.${agent_ifaces}.state" 2>/dev/null)

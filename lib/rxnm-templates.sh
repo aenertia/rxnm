@@ -61,7 +61,7 @@ parse_template_metadata() {
             "$s_name" "$s_type" "$s_wlan" "$s_desc" "$s_masq" "$s_dhcp")
     fi
         
-    # Task C-1: Actually populate the cache
+    # Actually populate the cache
     if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ] && [ -n "$file" ]; then
         # Store as a compact single-line value; the cache key is the file path
         eval 'TEMPLATE_CACHE["'"$file"'"]="'"$(printf '%s' "$meta" | tr '\n' '\035')"'"'

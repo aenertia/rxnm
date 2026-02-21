@@ -264,7 +264,7 @@ if [ "$SHOW_HELP" = "true" ] && [ "$#" -eq 0 ]; then
 fi
 
 # --- HIERARCHY DISPATCHER ---
-# FIX: Restore space in IFS temporarily to allow splitting the CATS list
+# Restore space in IFS temporarily to allow splitting the CATS list
 _safe_ifs="$IFS"
 IFS=" $(printf '\n\t')"
 

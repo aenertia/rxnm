@@ -30,7 +30,6 @@ fi
 # Load Core Modules
 . "${RXNM_LIB_DIR}/rxnm-constants.sh"
 . "${RXNM_LIB_DIR}/rxnm-utils.sh"
-# Fix Issue 3.3: Use RXNM_LIB_DIR consistently
 . "${RXNM_LIB_DIR}/rxnm-system.sh"
 
 # If the caller script didn't set format, inherit or default

@@ -84,7 +84,7 @@ action_bt_scan() {
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
     done
 
-    # M-6 Fix: Event-driven early exit architecture.
+    # Event-driven early exit architecture.
     # Allow 1.5s for initial discovery burst of cached/nearby devices.
     sleep 1.5
     

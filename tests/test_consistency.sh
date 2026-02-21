@@ -64,7 +64,7 @@ for iface in $ifaces_agent; do
     echo "--- Analyzing Interface: $iface ---"
     
     # 1. IPv4 Address
-    # FIX: Normalize Legacy IP output. If it's an array (older networkctl), join with dots.
+    # Normalize Legacy IP output. If it's an array (older networkctl), join with dots.
     ip_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r "(.interfaces[\"$iface\"].ip | if type==\"array\" then join(\".\") else . end) // empty")
     ip_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ip // empty")
     
@@ -92,7 +92,7 @@ for iface in $ifaces_agent; do
     # 3. MAC Address (Normalized to lowercase)
     raw_mac_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].mac // empty")
     
-    # FIX: Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) safely
+    # Handle Networkctl decimal array quirk (e.g., [202, 2, ...]) safely
     case "$raw_mac_legacy" in
         \[*)
             mac_legacy=$(echo "$raw_mac_legacy" | "$JQ_BIN" -r '.[]' | while IFS= read -r num; do
@@ -107,7 +107,7 @@ for iface in $ifaces_agent; do
     mac_legacy=$(echo "$mac_legacy" | tr '[:upper:]' '[:lower:]')
     mac_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].mac // empty" | tr '[:upper:]' '[:lower:]')
     
-    # FIX: Treat empty string and zero-mac as equivalent for loopback or uninitialized virtuals
+    # Treat empty string and zero-mac as equivalent for loopback or uninitialized virtuals
     if [ "$mac_legacy" = "$mac_agent" ] || { [ "$iface" = "lo" ] && { [ -z "$mac_legacy" ] || [ "$mac_legacy" = "00:00:00:00:00:00" ]; }; }; then
         log_pass "MAC Match: ${mac_agent:-none}"
     else
@@ -154,7 +154,7 @@ for iface in $ifaces_agent; do
     ipv6_legacy=$(echo "$json_legacy" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ipv6[]?" | sort | tr '\n' ',' | sed 's/,$//')
     ipv6_agent=$(echo "$json_agent" | "$JQ_BIN" -r ".interfaces[\"$iface\"].ipv6[]?" | sort | tr '\n' ',' | sed 's/,$//')
     
-    # FIX: Detect if Legacy output corrupted by array-to-string conversion
+    # Detect if Legacy output corrupted by array-to-string conversion
     case "$ipv6_legacy" in
         *",,"*) log_info "Legacy IPv6 output format is raw array (incompatible with simple diff). Skipping comparison." ;;
         *)

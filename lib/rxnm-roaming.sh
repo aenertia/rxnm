@@ -289,7 +289,7 @@ _logic_signal_steering() {
             LAST_NUDGE_BSSID="$bssid"
             NUDGE_COUNT=$((NUDGE_COUNT + 1))
             
-            # Task C-2: Update our map in background (Guard against fork bombs)
+            # Update our map in background (Guard against fork bombs)
             if [ -z "${_ROAM_MAP_UPDATE_PID:-}" ] || ! kill -0 "$_ROAM_MAP_UPDATE_PID" 2>/dev/null; then
                 update_roaming_map "$iface" &
                 _ROAM_MAP_UPDATE_PID=$!
@@ -313,7 +313,7 @@ run_passive_monitor() {
     # Initial check
     evaluate_roaming_state "$iface" "false"
     
-    # H-7 FIX: Wrap pipe in while true loop to catch DBus/IWD restarts
+    # Wrap pipe in while true loop to catch DBus/IWD restarts
     # This prevents the passive monitor from dying silently if the underlying daemon crashes.
     while true; do
         busctl monitor net.connman.iwd --match "member='PropertiesChanged',interface='net.connman.iwd.Station'" | \

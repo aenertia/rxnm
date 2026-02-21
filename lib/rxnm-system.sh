@@ -31,10 +31,8 @@ _SVC_TS_AVAHI=0
 # systemctl is-active queries.
 cache_service_states() {
     local now
-    # L-3 FIX: Properly suppress stderr inside command substitution
     now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
-    
-    # H-1 FIX: Query services individually to prevent line shifting, but parallelise
+    # Query services individually to prevent line shifting, but parallelise 
     # them using background subshells to cap the worst-case D-Bus hang at exactly 1 second
     # total, rather than 4 sequential seconds.
     local t_dir="${RUN_DIR}/.svc_cache_tmp"
@@ -121,7 +119,7 @@ configure_standalone_gadget() {
     ip link set "$iface" up
     ip addr add "${ip}/24" dev "$iface" 2>/dev/null
     
-    # M-5 FIX: Generate temporary busybox dhcpd config in root-owned RUN_DIR 
+    # Generate temporary busybox dhcpd config in root-owned RUN_DIR 
     # instead of world-writable /tmp to prevent arbitrary DNS hijacking
     local conf="${RUN_DIR}/udhcpd.${iface}.conf"
     
@@ -465,10 +463,10 @@ disable_nat_masquerade() {
         for table in nat filter mangle; do
             local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
             if [ -n "$rules" ]; then
-                # C-2 FIX: Safely convert Append commands to Delete commands and evaluate them.
+                # Safely convert Append commands to Delete commands and evaluate them.
                 # This guarantees that the nested `--comment "rocknix"` strings are properly parsed
                 # by the shell and deleted correctly, preventing stale NAT rule buildup.
-                # N-2 NOTE: Piped through `sh` relying on PATH. Implicit assumption is that
+                # NOTE: Piped through `sh` relying on PATH. Implicit assumption is that
                 # iptables rule bodies contain no shell metacharacters beyond the controlled comment.
                 printf '%s\n' "$rules" | sed "s/^-A /timeout 2s iptables -t $table -D /" | sh
             fi

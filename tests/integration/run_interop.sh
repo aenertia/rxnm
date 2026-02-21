@@ -171,7 +171,7 @@ mkdir -p "$ROOTFS/usr/lib/systemd/network"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/"
 
 info "Booting Machines..."
-# FIX: Use bash array to prevent word-splitting on the space-separated syscall filter list.
+# Use bash array to prevent word-splitting on the space-separated syscall filter list.
 # Also explicitly pass RLIMIT_MEMLOCK=infinity to nspawn to allow eBPF bytecode memory allocation.
 COMMON_ARGS=(
     "--network-bridge=$BRIDGE"

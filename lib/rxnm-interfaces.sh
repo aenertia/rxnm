@@ -209,7 +209,7 @@ action_set_static() {
         addr=$(echo "$addr" | tr -d ' ')
         [ -z "$addr" ] && continue
         
-        # L-2 FIX: Only apply default /24 to bare IPv4 addresses, leave IPv6 alone
+        # Only apply default /24 to bare IPv4 addresses, leave IPv6 alone
         case "$addr" in 
             *:*) ;; # IPv6: Do not append /24
             */*) ;; # Already has CIDR

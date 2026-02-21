@@ -151,7 +151,7 @@ GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
 GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
 # v1.1.0: State caching for robust nullify restoration
 NULLIFY_STATE_FILE="${RUN_DIR}/nullify.state"
-# C-3 FIX: Define roaming map file globally to prevent set -eu crash in roaming module
+# Define roaming map file globally to prevent set -eu crash in roaming module
 ROAM_MAP_FILE="${RUN_DIR}/roaming-bssid-map.json"
 
 # --- JSON Processor Detection ---

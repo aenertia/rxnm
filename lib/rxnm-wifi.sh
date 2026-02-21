@@ -121,7 +121,7 @@ _task_host_mode() {
     ensure_interface_active "$iface"
     ensure_dirs
     
-    # Mask conflicting templates (Batch 3)
+    # Mask conflicting templates
     if type build_template_conflict_map >/dev/null 2>&1; then
         local conflicts
         conflicts=$(build_template_conflict_map "$iface" "ap")
@@ -155,7 +155,7 @@ _task_host_mode() {
     fi
     
     if [ "$mode" != "adhoc" ]; then
-         # M-6 FIX: Safely toggle set -x state to prevent debug trace pollution
+         # Safely toggle set -x state to prevent debug trace pollution
          local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
          secure_write "$ap_conf" "$ap_data" "600"
          if [ "$was_x" -eq 1 ]; then set -x; fi
@@ -229,7 +229,7 @@ _task_forget() {
     
     local removed_count=0
     
-    # L-4 FIX: Use exact fixed-string grep (grep -qFx) rather than relying on sanitized glob filenames
+    # Use exact fixed-string grep (grep -qFx) rather than relying on sanitized glob filenames
     # This completely neutralizes any regex metacharacter injection vulnerabilities embedded in SSIDs.
     for f in "${STORAGE_NET_DIR}"/75-config-*.network; do
         if [ -f "$f" ]; then
@@ -528,7 +528,7 @@ action_list_known_networks() {
         fi
     fi
     
-    # Task A-2: Use POSIX Fallback JSON Builder if agent is unavailable
+    # Use POSIX Fallback JSON Builder if agent is unavailable
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then
         _list_networks_posix
         return 0
@@ -582,7 +582,7 @@ action_connect() {
         echo
     fi
     
-    # C-4 FIX: Validate passphrase BEFORE allowing it to be saved to disk
+    # Validate passphrase BEFORE allowing it to be saved to disk
     # This prevents short/malformed passphrases from breaking IWD state files forever.
     if [ -n "$pass" ]; then
         if ! validate_passphrase "$pass"; then return 0; fi
@@ -618,7 +618,7 @@ action_connect() {
     local cmd="connect"
     [ "$hidden" = "true" ] && cmd="connect-hidden"
     
-    # Task B-1: Pre-check config before the retry loop
+    # Pre-check config before the retry loop
     _ensure_wifi_netconfig "$iface"
     
     local attempts=0
@@ -626,7 +626,7 @@ action_connect() {
     
     while [ "$attempts" -lt "$max_attempts" ]; do
         
-        # H-2 FIX: Check current state BEFORE issuing a connect command.
+        # Check current state BEFORE issuing a connect command.
         # If IWD is actively performing a WPA handshake, issuing another connect
         # will cause it to abort and error out.
         local skip_cmd="false"
@@ -638,7 +638,7 @@ action_connect() {
 
         if [ "$skip_cmd" = "false" ]; then
             if [ "${EPHEMERAL_CREDS:-false}" = "true" ] && [ -n "${pass:-}" ]; then
-                 # M-6 FIX: Guard set -x toggle to prevent trace leakage
+                 # Guard set -x toggle to prevent trace leakage
                  local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
                  printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin >/dev/null 2>&1 || true
                  if [ "$was_x" -eq 1 ]; then set -x; fi
@@ -660,7 +660,7 @@ action_connect() {
                 return 0
                 ;;
             connecting|authenticating)
-                # H-2 FIX: Wait patiently for slow SoCs without failing out
+                # Wait patiently for slow SoCs without failing out
                 attempts=$((attempts + 1))
                 continue
                 ;;
@@ -702,7 +702,7 @@ action_host() {
     
     local safe_ssid; safe_ssid=$(json_escape "$ssid")
     
-    # M-9 FIX: Check the return status of the internal task to prevent false successes
+    # Check the return status of the internal task to prevent false successes
     if ! with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"; then
         json_error "Failed to start Hotspot mode"
         return 1

@@ -234,7 +234,7 @@ _task_nullify_global() {
            [ -d "$iface_path/device" ] || \
            case "$iface" in usb*|rndis*) true ;; *) false ;; esac; then
             
-            # H-8 FIX: Apply per-iface lock around the save operation in global sweep
+            # Apply per-iface lock around the save operation in global sweep
             if [ "$action" = "enable" ]; then with_iface_lock "$iface" _save_wifi_state "$iface"; fi
             
             # LAYER 1: Attempt WoWLAN programming first
@@ -255,7 +255,7 @@ _task_nullify_global() {
                 fi
             fi
             
-            # H-8 FIX: Apply per-iface lock around the restore operation in global sweep
+            # Apply per-iface lock around the restore operation in global sweep
             if [ "$action" = "disable" ]; then with_iface_lock "$iface" _restore_wifi_state "$iface"; fi
         fi
     done

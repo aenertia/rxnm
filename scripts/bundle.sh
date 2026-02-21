@@ -111,7 +111,7 @@ for mod in $MODULES; do
     
     echo -e "\n# --- MODULE: $mod_path ---" >> "$TMP_TARGET"
     
-    # CRITICAL FIX 1: Replace the schema file with pure POSIX stubs in the bundle.
+    # Replace the schema file with pure POSIX stubs in the bundle.
     if [ "$mod_path" = "rxnm-config-schema.sh" ]; then
         cat << 'STUB' >> "$TMP_TARGET"
 validate_config_state() { return 0; }
@@ -122,7 +122,7 @@ STUB
         continue
     fi
 
-    # CRITICAL FIX 2: Strip environment validation from rxnm-api.sh when bundling.
+    # Strip environment validation from rxnm-api.sh when bundling.
     if [ "$mod_path" = "rxnm-api.sh" ]; then
         # Start at format default to skip sourcing and derivation blocks entirely
         sed -n '/: "\${RXNM_FORMAT:=human}"/,$p' "$file_path" | \

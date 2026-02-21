@@ -28,12 +28,12 @@ _sync_active_configs() {
 _task_profile_save_global() {
     local name="$1"
     
-    # H-5 FIX: Ensure STORAGE_PROFILES_DIR is set to prevent catastrophic expansion
+    # Ensure STORAGE_PROFILES_DIR is set to prevent catastrophic expansion
     [ -z "${STORAGE_PROFILES_DIR:-}" ] && return 1
     
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     
-    # H-5 FIX: Validate the directory prefix to prevent rm -rf /global/*
+    # Validate the directory prefix to prevent rm -rf /global/*
     case "$profile_dir" in
         "${STORAGE_PROFILES_DIR}/"*) ;;
         *) 
@@ -72,13 +72,13 @@ _task_profile_save_global() {
 _task_profile_load_global() {
     local name="$1"
     
-    # H-5 FIX: Ensure STORAGE_PROFILES_DIR is set to prevent catastrophic expansion
+    # Ensure STORAGE_PROFILES_DIR is set to prevent catastrophic expansion
     [ -z "${STORAGE_PROFILES_DIR:-}" ] && return 1
     
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    # PROACTIVE FIX: Secure temporary directories instead of predictable PID ($$) paths
+    # Secure temporary directories instead of predictable PID ($$) paths
     local staging_dir
     staging_dir=$(umask 077 && mktemp -d "${RUN_DIR}/profile_staging_XXXXXX") || return 1
     

@@ -77,7 +77,7 @@ cleanup() {
         local lock="$1"
         [ -f "$lock" ] || return
         
-        # M-3 FIX: Use FD-based flock in a subshell for universal BusyBox compatibility
+        #  Use FD-based flock in a subshell for universal BusyBox compatibility
         # and to avoid TOCTOU races by holding the lock while unlinking.
         (
             if exec 9>>"$lock" && flock -n 9; then
@@ -172,13 +172,13 @@ with_iface_lock() {
         return $?
     fi
     
-    # C-6 FIX: Dynamically allocate FDs to prevent lock clobbering when 
+    # Dynamically allocate FDs to prevent lock clobbering when 
     # concurrent backgrounded RXNM tasks run within the same parent shell.
-    # N-1 NOTE: This counter persists across sourced invocations in long-running 
+    # NOTE: This counter persists across sourced invocations in long-running 
     # parent shells. It safely wraps at 200, which may reuse FDs in extreme cases.
     : "${_RXNM_FD_COUNTER:=10}"
     
-    # N-4 FIX: Export the counter so subshells don't reset to 10 and clobber parent FDs.
+    # Export the counter so subshells don't reset to 10 and clobber parent FDs.
     export _RXNM_FD_COUNTER
     local _wi_fd="$_RXNM_FD_COUNTER"
     _RXNM_FD_COUNTER=$((_RXNM_FD_COUNTER + 1))
@@ -456,7 +456,7 @@ get_proxy_json() {
         while read -r line; do
             [ -z "$line" ] && continue
             
-            # H-3 FIX: Robustly parse config without truncating embedded '=' signs
+            # Robustly parse config without truncating embedded '=' signs
             local key="${line%%=*}"
             local value="${line#*=}"
             value=$(echo "$value" | tr -d "\"'")
@@ -588,7 +588,7 @@ validate_ip() {
     local addr="${ip%/*}"
     local prefix="${ip##*/}"
     
-    # M-2 Fix: Strict Semantic Validation for IPv4 Octets and IPv6 CIDR Lengths
+    # Strict Semantic Validation for IPv4 Octets and IPv6 CIDR Lengths
     if case "$addr" in *:*) false;; *) true;; esac; then
         # IPv4
         if ! rxnm_match "$addr" '^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'; then

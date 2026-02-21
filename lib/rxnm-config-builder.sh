@@ -32,7 +32,7 @@ _get_system_template_val() {
     done < "$f"
 }
 
-# Task C-3: Sanitizes INI strings
+# Sanitizes INI strings
 _ini_safe() {
     # Strip ASCII control characters to prevent multi-line injection
     printf '%s' "$1" | tr -d '\000-\037\177'
@@ -192,7 +192,7 @@ build_network_config() {
              local safe_dhcp_id; safe_dhcp_id=$(_ini_safe "${dhcp_client_id}")
              printf "ClientIdentifier=%s\n" "${safe_dhcp_id}"
          fi
-         # Fix: Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
+         # Apply metric to DHCP routes if DHCP is enabled (Valid in DHCPv4 section)
          [ "$dhcp" != "no" ] && [ -n "$metric" ] && printf "RouteMetric=%s\n" "${metric}"
     fi
     

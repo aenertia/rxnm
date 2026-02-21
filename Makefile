@@ -102,7 +102,7 @@ install: all
 	@echo "[INSTALL] Systemd network templates..."
 	@mkdir -p $(SYSTEMD_NET_DIR)
 	@cp -f usr/lib/systemd/network/* $(SYSTEMD_NET_DIR)/
-	# Fixed: Only apply chmod to files to prevent stripping +x from dirs
+	# Only apply chmod to files to prevent stripping +x from dirs
 	@find $(SYSTEMD_NET_DIR) -type f -exec chmod 644 {} +
 
 	@echo "[INSTALL] System sleep hooks..."
