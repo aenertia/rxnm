@@ -150,45 +150,48 @@ validate_config_state() {
     local iface="${iface_field#iface:}"
     local states_str="${state_field#states:}"
     
-    # Split states using POSIX here-doc loop
-    while IFS= read -r state; do
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for state in $states_str; do
         [ -z "$state" ] && continue
         
         local rules
         rules=$(_get_schema_rules "$state")
         [ -z "$rules" ] && continue
         
-        # Parse Rules: requires:A,B|excludes:C|allows:D
-        while IFS= read -r group; do
+        IFS="|"
+        for group in $rules; do
             [ -z "$group" ] && continue
             local type="${group%%:*}"
             local list="${group#*:}"
             
-            while IFS= read -r item; do
+            IFS=","
+            for item in $list; do
                 [ -z "$item" ] && continue
                 
                 case "$type" in
                     requires)
-                        if ! _check_requirement "$item" "$iface" "$states_str"; then return 1; fi
+                        if ! _check_requirement "$item" "$iface" "$states_str"; then
+                            IFS="$_old_ifs"; set +f; return 1
+                        fi
                         ;;
                     excludes)
                         if [ "$item" = "iface:bridge_member" ]; then
                             if [ -n "$iface" ] && [ -e "/sys/class/net/$iface/brport" ]; then
                                 json_error "Conflict: Interface '$iface' is a bridge member. Cannot apply '$state'." "1"
-                                return 1
+                                IFS="$_old_ifs"; set +f; return 1
                             fi
                         fi
                         ;;
                 esac
-            done <<EOF
-$(printf '%s\n' "$list" | tr ',' '\n')
-EOF
-        done <<EOF
-$(printf '%s\n' "$rules" | tr '|' '\n')
-EOF
-    done <<EOF
-$(printf '%s\n' "$states_str" | tr ',' '\n')
-EOF
+            done
+            IFS="|"
+        done
+        IFS=","
+    done
+    IFS="$_old_ifs"
+    set +f
     
     return 0
 }

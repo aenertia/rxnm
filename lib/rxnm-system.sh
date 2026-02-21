@@ -473,21 +473,27 @@ disable_nat_masquerade() {
         # Clean up rules marked with our comment
         for table in nat filter mangle; do
             local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
-            # shellcheck disable=SC2086
-            while IFS= read -r line; do
-                [ -z "$line" ] && continue
-                # Basic parsing to extract rule for deletion
-                # remove leading '-A '
-                local rule="${line#-A * }"
-                local chain
-                # Extract chain from line: -A CHAIN ...
-                chain=$(echo "$line" | awk '{print $2}')
-                
-                # Delete it
-                $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
-            done <<EOF
-$rules
-EOF
+            if [ -n "$rules" ]; then
+                set -f
+                local _old_ifs="$IFS"
+                # Safe POSIX newline split
+                IFS='
+'
+                for line in $rules; do
+                    [ -z "$line" ] && continue
+                    # Basic parsing to extract rule for deletion
+                    # remove leading '-A '
+                    local rule="${line#-A * }"
+                    local chain
+                    # Extract chain from line: -A CHAIN ...
+                    chain=$(echo "$line" | awk '{print $2}')
+                    
+                    # Delete it
+                    $T iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
+                done
+                IFS="$_old_ifs"
+                set +f
+            fi
         done
     elif [ "$fw_tool" = "nft" ]; then
         $T nft delete table ip rocknix_nat 2>/dev/null

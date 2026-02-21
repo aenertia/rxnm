@@ -585,19 +585,25 @@ validate_ip() {
 # Returns 0 if every entry passes validate_ip, 1 on first failure.
 _validate_ip_csv() {
     local _list="$1"
-    while IFS= read -r _item; do
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for _item in $_list; do
         _item=$(printf '%s' "$_item" | tr -d ' \t')
         [ -z "$_item" ] && continue
-        if ! validate_ip "$_item"; then return 1; fi
-    done <<_IP_CSV_
-$(printf '%s' "$_list" | tr ',' '\n')
-_IP_CSV_
+        if ! validate_ip "$_item"; then IFS="$_old_ifs"; set +f; return 1; fi
+    done
+    IFS="$_old_ifs"
+    set +f
     return 0
 }
 
 validate_routes() {
     local routes="$1"
-    while IFS= read -r r; do
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for r in $routes; do
         local dest=""
         local rgw=""
         local rmet=""
@@ -612,17 +618,17 @@ validate_routes() {
             if [ "$rmet" = "$rest" ]; then rmet=""; fi
         fi
         
-        if [ -z "$dest" ]; then return 1; fi
-        if ! validate_ip "$dest"; then return 1; fi
+        if [ -z "$dest" ]; then IFS="$_old_ifs"; set +f; return 1; fi
+        if ! validate_ip "$dest"; then IFS="$_old_ifs"; set +f; return 1; fi
         if [ -n "$rgw" ]; then
-            if ! validate_ip "$rgw"; then return 1; fi
+            if ! validate_ip "$rgw"; then IFS="$_old_ifs"; set +f; return 1; fi
         fi
         if [ -n "$rmet" ]; then
-            if ! validate_integer "$rmet"; then return 1; fi
+            if ! validate_integer "$rmet"; then IFS="$_old_ifs"; set +f; return 1; fi
         fi
-    done <<_ROUTES_CSV_
-$(printf '%s' "$routes" | tr ',' '\n')
-_ROUTES_CSV_
+    done
+    IFS="$_old_ifs"
+    set +f
     return 0
 }
 

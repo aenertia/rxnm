@@ -140,15 +140,18 @@ build_network_config() {
         printf "IPv6PrivacyExtensions=%s\n" "${ipv6_privacy}"
     fi
 
-    # TASK B-2: Replace `set --` glob-risks with robust here-doc while loops
+    # Robust POSIX array traversal using IFS to avoid here-doc truncation bugs
     if [ -n "$addresses" ]; then
-        while IFS= read -r addr; do
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for addr in $addresses; do
             addr=$(printf '%s' "$addr" | tr -d ' ')
             [ -z "$addr" ] && continue
             printf "Address=%s\n" "$addr"
-        done <<_ADDRS_
-$(printf '%s' "$addresses" | tr ',' '\n')
-_ADDRS_
+        done
+        IFS="$_old_ifs"
+        set +f
     fi
     
     if [ -n "$gateway" ]; then
@@ -156,24 +159,30 @@ _ADDRS_
     fi
     
     if [ -n "$dns_servers" ]; then
-        while IFS= read -r d; do
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for d in $dns_servers; do
             d=$(printf '%s' "$d" | tr -d ' ')
             [ -z "$d" ] && continue
             printf "DNS=%s\n" "$d"
-        done <<_DNS_
-$(printf '%s' "$dns_servers" | tr ',' '\n')
-_DNS_
+        done
+        IFS="$_old_ifs"
+        set +f
     fi
     
     if [ -n "$domains" ]; then
-        while IFS= read -r d; do
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for d in $domains; do
             d=$(printf '%s' "$d" | tr -d ' ')
             [ -z "$d" ] && continue
             local safe_d; safe_d=$(_ini_safe "$d")
             printf "Domains=%s\n" "${safe_d}"
-        done <<_DOMAINS_
-$(printf '%s' "$domains" | tr ',' '\n')
-_DOMAINS_
+        done
+        IFS="$_old_ifs"
+        set +f
     fi
     
     # DHCP Client Options
@@ -193,7 +202,10 @@ _DOMAINS_
 
     # Static Routes
     if [ -n "$routes" ]; then
-        while IFS= read -r r; do
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for r in $routes; do
             r=$(printf '%s' "$r" | tr -d ' ')
             [ -z "$r" ] && continue
             local r_dest="" r_gw="" r_metric=""
@@ -210,9 +222,9 @@ _DOMAINS_
             elif [ -n "$metric" ] && [ "$dhcp" = "no" ]; then 
                 printf "Metric=%s\n" "${metric}"
             fi
-        done <<_ROUTES_
-$(printf '%s' "$routes" | tr ',' '\n')
-_ROUTES_
+        done
+        IFS="$_old_ifs"
+        set +f
     fi
 }
 
@@ -244,8 +256,6 @@ build_gateway_config() {
     # Auto-detect IP if missing (useful for usb gadgets)
     if [ -z "$ip" ]; then
         local detected_ip=""
-        # REFACTOR: Removed check for legacy bridge template
-        # Use case instead of [[ == ]]
         case "$iface" in
             usb*|rndis*)
                  detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address")

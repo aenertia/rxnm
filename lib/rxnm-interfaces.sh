@@ -202,15 +202,18 @@ action_set_static() {
     [ -z "$iface" ] || [ -z "$ip" ] && return 1
     
     local final_ips=""
-    while IFS= read -r addr; do
+    set -f
+    local _old_ifs="$IFS"
+    IFS=","
+    for addr in $ip; do
         addr=$(echo "$addr" | tr -d ' ')
         [ -z "$addr" ] && continue
         case "$addr" in */*) ;; *) addr="${addr}/24" ;; esac
-        if ! validate_ip "$addr"; then return 1; fi
+        if ! validate_ip "$addr"; then IFS="$_old_ifs"; set +f; return 1; fi
         final_ips="${final_ips:+$final_ips,}$addr"
-    done <<_IP_LIST_
-$(printf '%s' "$ip" | tr ',' '\n')
-_IP_LIST_
+    done
+    IFS="$_old_ifs"
+    set +f
     
     [ -n "$gw" ] && ! validate_ip "$gw" && { json_error "Invalid Gateway"; return 1; }
     [ -n "$dns" ] && ! validate_dns "$dns" && { json_error "Invalid DNS"; return 1; }
