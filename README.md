@@ -1,253 +1,289 @@
 # RXNM (ROCKNIX Network Manager)
 
-**RXNM** is a lightning-fast, modular CLI suite and API gateway for `systemd-networkd` and `iwd`. It is aggressively optimized for low-power ARM and RISC-V embedded devices (specifically RK3326, RK3566, RK3588, and SG2002 handhelds) while remaining 100% compatible with general Linux environments.
+**RXNM** is a lightning-fast, modular CLI suite and API gateway for `systemd-networkd` and `iwd`. It is aggressively optimized for battery-powered ARM handhelds, high-performance mobile SoCs, and RISC-V development platforms—specifically the **Rockchip RK3326/RK3566**, **Allwinner H700**, **Qualcomm Snapdragon SM8250/SM8550**, **Canaan K230**, **Terasic SoC boards**, and the **Milk-V** ecosystem—while remaining 100% compatible with general Linux environments.
 
-By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory footprint** and sub-5ms read latencies, making it the ultimate networking stack for emulation handhelds, immutable OS designs, and containerized cloud environments.
+By eliminating monolithic middleware daemons, RXNM achieves a **0MB idle memory footprint** and sub-5ms read latencies, making it the ultimate networking stack for emulation handhelds, mobile Linux devices, RISC-V hardware development, and immutable OS designs.
 
 | **Version** | **API Specification** | **Architecture** | **License** | 
  | ----- | ----- | ----- | ----- | 
-| `1.1.0` | `v1.1` (Current) | Hybrid (Dual-Path Bash/POSIX) | GPL-2.0-or-later | 
+| `1.1.0-rc3` | `v1.1` (Current) | Hybrid (Dual-Path Bash/POSIX) | GPL-2.0-or-later | 
 
 ## 👨‍💻 Origins & Motivation
 
-RXNM is developed independently, targeting the **ROCKNIX** ecosystem as a primary consumer.
+RXNM is developed independently, targeting the **ROCKNIX** ecosystem and high-performance mobile/embedded Linux distributions as primary consumers.
 
 The author is a veteran engineer with **25+ years of experience** working with Linux systems and major Network Equipment Vendors. This project was born out of a specific void in the Linux ecosystem: while `systemd-networkd` offers a gold standard for performance and stability, it has historically lacked a comprehensive, user-facing CLI wrapper equivalent to `NetworkManager`'s `nmcli`.
 
 Until now, managing `networkd` meant manually authoring INI files or relying on rigid orchestration tools. RXNM is that missing link—a frontend that provides the interactive convenience of a modern network manager without sacrificing the raw efficiency of the systemd stack.
 
-When you have 40+ devices that need to connect to WiFi in under a second to sync save states or download boxart, every millisecond of latency and megabyte of RAM counts. RXNM exists to ensure the network is a transparent utility, not a boot-time bottleneck.
+When you have devices that need to connect to WiFi in under a second to sync save states or download boxart, every millisecond of latency and megabyte of RAM counts. RXNM exists to ensure the network is a transparent utility, not a boot-time bottleneck.
 
-## 🛠️ Configuration Philosophy: Standards-First
+## ⚡ Architecture: The Middleware for Scripters
 
-RXNM is built on the principle of transparency. Unlike other managers that hide state in proprietary databases or binary blobs, RXNM is a pure orchestrator of standard Linux interfaces.
+The primary goal of RXNM is to provide a **reliable, ultra-lightweight abstraction layer**. It allows users and developers to perform complex network operations without needing to understand—or implement—concurrency, state machines, or hardware synchronization.
 
-* **Standard Files:** Every action performed by RXNM results in the generation of standard `systemd-networkd` `.network` or `.netdev` files (and `udev` `.link` files for hardware properties).
+### "Super Tiny" by Design
 
-* **Drop-in Compatibility:** RXNM operates within the standard systemd filesystem hierarchy. It is designed to be a "good citizen" and will honor any user-supplied overrides or custom 'dropped-in' configurations.
+Unlike traditional managers that link against massive libraries (`GLib`, `libdbus`, `GObject`), RXNM is built to be "super tiny":
 
-* **No Hidden State:** What you see in `/run/systemd/network` is exactly what RXNM is managing. This makes the system trivial to debug and 100% compatible with existing systemd-based automation.
+* **DBus-Lite:** The C-agent implements the DBus wire protocol manually to trigger `networkd` reloads. This eliminates a \~2MB dependency chain, resulting in a binary that is **\~50KB** when statically linked with `musl`.
 
-## 🔌 Application-Centric API: The REST-Lite Gateway
+* **Zero-Dependency Core:** The native agent requires only a standard C library, making it trivial to drop into an Initramfs or a minimalist recovery environment.
 
-RXNM is designed to be the "Networking Engine" for modern applications. It provides an application-centric API that decouples the UI from the underlying shell complexity.
+* **Low-Power Optimization:** The logic is 100% event-driven. It consumes **zero CPU cycles** and **zero resident RAM** when not in use.
 
-### The Application Gateway (Socket & STDIN)
+### "State-for-Free": Eliminating Scripting Boilerplate
 
-Applications (such as EmulationStation, React-based web dashboards, or Qt apps) can communicate with RXNM either **directly through STDIN** or via the `rxnm-api.socket` gateway (Unix domain socket or TCP port 29304). This gateway uses systemd socket activation to ensure it consumes **zero memory** when not actively processing a request, while direct STDIN support provides an easy path for simple integration from parent processes and scripts.
+In traditional embedded development, scripters often ignore state management and locking because it is difficult to implement correctly in shell. RXNM provides these features natively:
 
-### Deterministic JSON Contract
+* **Internal Concurrency Guarding:** Multiple `rxnm` commands from different background scripts are handled via internal queuing and per-interface locking.
 
-RXNM enforces a strict JSON schema (`api-schema.json`) for all input and output. This eliminates the need for applications to parse fragile command-line output using `grep` or `awk`.
+* **Hardware-Aware Wait Cycles:** Commands manage the state transition from IWD to Networkd, waiting for valid carrier and L3 routability before returning.
 
-* **Input:** Send a JSON object to `stdin` or the socket.
+* **Zero-Parsing Data Fetching:** RXNM's `--get` flag and JSON API provide deterministic data that won't break if a system tool changes its output format.
 
-* **Output:** Receive a structured JSON response containing success status, error hints, and data.
+## 🔋 Power Residency: The "Project Silence" Focus
 
-### Unified SDK (`rxnm-api.sh`)
+On modern Linux kernels, the primary cause of battery drain during sleep is "Network Noise." Devices standardized around `s2idle` (Suspend-to-Idle), particularly high-end **Snapdragon**, **Rockchip**, and prototype **RISC-V** SoCs, are extremely sensitive to hardware interrupts.
 
-For third-party shell scripts or internal plugins, RXNM provides a standard API library. By sourcing `rxnm-api.sh`, any script gains the ability to query the network state or apply configurations using the same optimized paths as the main binary.
+### XDP Nullify Solution
 
-## ⚡ Architecture: The Dual-Path Execution Model
+RXNM implements a multi-layered hardware silencing strategy to extend standby battery life by **5-12%**:
 
-RXNM v1.1 introduces an adaptive execution strategy that ensures carrier-grade performance on high-end systems and unbreakable portability on restricted recovery environments.
+1. **WoWLAN (Firmware Layer):** Instructs the WiFi module to drop background chatter (mDNS/ARP) and only wake the host for authorized magic packets.
 
-### 1. The Intelligent Shell Upgrade
+2. **XDP Nullify (Driver Layer):** Attaches a 2-instruction eBPF program to the driver. Incoming packets are discarded instantly at the driver ring-buffer, preventing the CPU from ever leaving its deepest C-state (C6-C10).
 
-When invoked, RXNM performs an immediate capability check. If executed via a minimal `/bin/sh` (Dash/Ash) but a full `/bin/bash` is available on the host, it seamlessly re-executes itself under Bash. This automatically unlocks performance optimizations like associative array caching and native regex without user intervention.
+3. **HCI Air-Gap:** Logically closes the Bluetooth HCI interface during sleep, preventing BLE advertisements (from trackers/watches) from triggering unwanted SoC wakeups.
 
-### 2. Path A: The Bash Path (Robust Resilience)
+### Software-Defined Wake-on-LAN (SWOL)
 
-* **Bash (Agent):** Prefers the `rxnm-agent` C-accelerator for <5ms Netlink/DBus operations.
+Budget handhelds, development boards, and mobile adapters often ship with SDIO WiFi or USB Ethernet dongles lacking hardware WoL. RXNM's `--soft-wol yes` flag injects a specialized eBPF filter that provides **high-end Wake-on-LAN functionality to \$10 hardware** with zero resident memory cost.
 
-* **Bash (Fallback):** If the agent is deleted or crashes, the script gracefully degrades to a pure shell implementation using `jq`, `iproute2`, and `busctl`.
+## 🛠️ Configuration Philosophy: The Unified Orchestrator
 
-* **Validation:** Full schema validation is performed before the execution layer is reached.
+RXNM replaces fragmented, bespoke scripting with a unified, state-aware management layer designed for deterministic reliability.
 
-### 3. Path B: The POSIX Path (Agent-Forced)
+### Solving the "Split-Brain" Interaction
 
-* **Behavior:** Anchors logic to a strict POSIX `/bin/sh` implementation. It bypasses external CLI dependencies entirely by routing all complex data aggregation to the **C Agent**.
+In traditional embedded and dev-board environments, the network stack often suffers from a "Split-Brain" condition where multiple tools (e.g., `iwd`, `connman`, and custom `ip` scripts) operate simultaneously but remain entirely unaware of each other's interactions.
 
-* **Dependencies:** Strictly requires `rxnm-agent`. Does not require `jq`, `ip`, `awk`, or `busctl`.
+* **The Conflict:** `iwd` might attempt to manage L3 IP addressing on a WiFi link while a bespoke script triggers a conflicting `udhcpc` instance.
 
-* **Universal Validation:** The schema intent layer uses strict POSIX loops, ensuring invalid configs are caught even in the most restricted shells.
+* **The RXNM Solution:** RXNM enforces a strict separation of concerns. It forces `iwd` to act purely as an L2 (Authentication) worker, delegating all L3 (IP/DHCP/Routing) logic to `systemd-networkd`. This ensures that plugging in a USB dock or switching from WiFi to Bluetooth tethering is a deterministic, conflict-free transition.
 
-## 🔋 "Project Silence": The Power Residency Analysis
+### Best-Practice State & Concurrency Locking
 
-RXNM implements "Project Silence" (XDP Nullify), a high-performance power-saving mode designed to extend battery life by 5-10% during `s2idle` (Suspend-to-Idle) sleep.
+* **Global Singleton Lock:** RXNM uses `acquire_global_lock` to ensure only one instance performs critical global operations.
 
-On modern kernels, background broadcast traffic (mDNS, ARP, SSDP) frequently wakes the CPU from deep sleep. This prevents the SoC from reaching its lowest power state (C6-C10), resulting in significant battery drain while the device is "off."
+* **Fine-Grained Interface Locks:** Per-interface locking (`with_iface_lock`) allows for simultaneous configuration of `eth0` and `wlan0`.
 
-### Network Wakeup & Battery Impact Matrix
+* **Atomic Transitions:** State changes follow a "Write-Tmp-and-Rename" pattern, ensuring the system reboots into a known-good configuration even after sudden power loss.
 
-| Method | Packet Handling | CPU State during Packet | Resume Latency | Battery Life Impact | 
+### Deterministic Component Ordering
+
+RXNM recognizes that the Linux network stack is sensitive to the order of operations:
+
+1. **Pre-flight Safety:** Scans for existing hardware blocks (`rfkill`) before initiating L2.
+
+2. **L2 Authorization:** Triggers WiFi authentication (IWD) as an isolated worker.
+
+3. **L3 Lifecycle:** Confirms L2 carrier before triggering `systemd-networkd` for IP addressing.
+
+4. **Tuning:** Final kernel protocol tuning is applied only after the link reaches a "routable" state.
+
+## 📂 Profile Management & Persistence
+
+Configurations are written to the ephemeral `/run` directory to avoid flash wear on SD cards or internal UFS/eMMC storage.
+
+1. **The Default Profile:** At boot, the `rxnm.service` wipes ephemeral state and loads the `default` profile from `/storage/.config/network/profiles/global/default/`, syncing persistent overrides into RAM.
+
+2. **Named Profiles:** Users can capture state into profiles (e.g., "Lab", "Work", "Home", "Multiplayer_VLAN"):
+
+   * **Save:** `rxnm profile save lab_work`
+
+   * **Load:** `rxnm profile load lab_work` (Swaps active config in RAM and reloads `networkd` instantly).
+
+   * **Reset:** `rxnm profile load default` (If no 'default' exists, resets to system factory state).
+
+## ⌨️ Interactive Discovery & "Tab-Mashing"
+
+RXNM features a deep, context-aware **Bash Completion** system.
+
+* **Contextual Suggestions:** `rxnm interface [TAB]` shows only active devices; `rxnm wifi connect [TAB]` triggers a lookup of available scan results.
+
+* **Zero-Latency:** Completions read the high-speed `/run/rocknix/status.json` cache generated by the C-agent, ensuring instant feedback even on low-power hardware.
+
+## 📊 Comparative Command Reference
+
+How `rxnm` translates from traditional Linux networking tools.
+
+| Operation | **RXNM** | **NM (nmcli)** | **ConnMan (connmanctl)** | **iproute2 (ip)** | 
  | ----- | ----- | ----- | ----- | ----- | 
-| **Default Linux** | Full OS Stack Processing | **C0 (Active)** | Instant | **High Drain**: CPU wakes fully to route packet. | 
-| **RFKill (Soft)** | Soft-blocked in kernel | **C1/C2 (Shallow)** | Moderate | **Varies**: NIC may still poll; bus often stays powered. | 
-| **Modprobe -r** | Driver removed entirely | **C10 (Deepest)** | **Fatal (\~4s)** | **Minimal**: No IRQs, but kills state and slow resume. | 
-| **Android (APF)** | Firmware-level filtering | **Off/Sleep** | Instant | **Gold Standard**: Hardware filters before CPU wake. | 
-| **RXNM XDP Native** | Driver Ring Buffer Drop | **C6-C10 (Deep)** | **Instant (<5ms)** | **Near-Android**: Dropped in driver context before OS wake. | 
-| **RXNM XDP Generic** | Kernel Ingress Drop | **C1-C2 (Shallow)** | **Instant (<5ms)** | **Optimized**: CPU wakes briefly to drop, then idles. | 
+| **Status (Global)** | `rxnm system status` | `nmcli general status` | `connmanctl state` | `ip addr` / `ip route` | 
+| **Status (Device)** | `rxnm interface eth0 show` | `nmcli device show eth0` | `connmanctl services` | `ip addr show eth0` | 
+| **WiFi Scan** | `rxnm wifi scan` | `nmcli dev wifi list` | `connmanctl scan wifi` | `iw dev wlan0 scan` | 
+| **WiFi Connect** | `rxnm wifi connect SSID` | `nmcli dev wifi connect SSID` | `connmanctl connect wifi_...` | `iwctl station connect SSID` | 
+| **Set DHCP** | `rxnm interface eth0 set dhcp` | `nmcli con mod eth0 ipv4.method auto` | *(Automatic)* | `udhcpc -i eth0` | 
+| **Set Static IP** | `rxnm interface eth0 set static IP/24` | `nmcli con mod eth0 ipv4.addresses IP/24` | `connmanctl config ... ipv4 manual ...` | `ip addr add IP/24 dev eth0` | 
+| **Set Gateway** | `... set static ... --gateway GW` | `nmcli con mod eth0 ipv4.gateway GW` | *(As above)* | `ip route add default via GW` | 
+| **Link Up/Down** | `rxnm interface eth0 enable/disable` | `nmcli device connect/disconnect eth0` | `connmanctl enable/disable ethernet` | `ip link set eth0 up/down` | 
+| **Internet Check** | `rxnm system check internet` | `nmcli networking connectivity` | *(None)* | `ping -c 1 8.8.8.8` | 
+| **Power Silence** | `rxnm system nullify enable` | *(None)* | *(None)* | *(Requires custom XDP/eBPF code)* | 
 
-### Why XDP Native vs. Generic?
+## 📖 Documentation & Usage Examples
 
-* **XDP Native (HW Driver Support):** Used on high-end PCIe NICs. The packet verdict happens inside the driver's RX loop. The CPU processes the instruction so fast it rarely leaves the hardware-controlled deep sleep state.
+This section provides a definitive reference for all RXNM capabilities.
 
-* **XDP Generic (SKB Mode):** Used on legacy SDIO modules (Realtek/Broadcom). The kernel must allocate an `sk_buff` (memory buffer) before the BPF program can discard it. While this forces a brief CPU wake, it prevents the "thundering herd" of userspace processes (avahi, systemd) from waking up, providing a 10x efficiency gain over the default behavior.
+### 1. Wireless Operations (`rxnm wifi`)
 
-### 🛡️ Buggy Driver & RF Chip Safety
+| Action | Description | 
+ | ----- | ----- | 
+| `scan` | Scan for visible Access Points | 
+| `connect` | Associate with an SSID | 
+| `disconnect` | Terminate current association | 
+| `ap` | Manage Host/Hotspot mode | 
+| `networks` | List known (saved) profiles | 
+| `p2p` | Wi-Fi Direct / Peer-to-Peer management | 
+| `dpp` | QR-based Device Provisioning | 
+| `roaming` | Configure opportunistic steering | 
 
-Embedded devices often ship with "crappy" SDIO WiFi chips (RTL8723DS, RTL8821CS, etc.) whose drivers are notoriously fragile.
+#### WiFi Examples
 
-* **The Danger of `modprobe -r`:** Unloading a driver on these chips often leads to kernel panics or SDIO bus hangs.
+```
+# Basic connection (interactive prompt for password)
+rxnm wifi connect "HomeWiFi"
 
-* **The XDP Solution:** XDP operates strictly on the **data plane**. It does not unload the driver or alter the firmware state. The driver remains stable, but the CPU simply ignores the incoming noise. This makes XDP Nullify the only power-saving method that is truly safe for unstable hardware.
+# Connect with inline password and hidden SSID
+rxnm wifi connect "HiddenLab" --password "s3cr3t" --hidden
 
-### 🔒 Security Context: The Logical Air-Gap
+# Setup a Hotspot (NAT + DHCP auto-configured)
+rxnm wifi ap start "RocknixAP" --password "12345678" --share
 
-While Nullify Mode is designed for power management, it serves a secondary role as a **Robust Security Feature**.
+# Join a WiFi Direct multiplayer session
+rxnm wifi p2p scan
+rxnm wifi p2p connect "Opponent_Device"
 
-By utilizing eBPF to implement a data-plane drop-all filter, RXNM provides a "Logical Air-Gap." When enabled, the network interface is effectively blind and deaf to the network at the driver level. Unlike a standard firewall (which still allows the OS to process packet headers), XDP Nullify prevents the protocol stack from even seeing the traffic. This acts as a network kill-switch that prevents unsolicited telemetry, remote access, or lateral movement attacks while the system in a low-power state, all without tearing down the authenticated WiFi link or losing IP state.
+# Enroll via DPP (QR Code URI)
+rxnm wifi dpp enroll "DPP:C:81/1;M:001122334455;K:..."
 
----
+```
 
-## 🚀 Performance Benchmarks
+### 2. Interface Management (`rxnm interface`)
 
-*Measured on Rockchip RK3326 (1.5GHz Quad-Core Cortex-A35).*
+| Action | Description | 
+ | ----- | ----- | 
+| `show` | Detailed JSON/Human status for an interface | 
+| `set dhcp` | Enable dynamic addressing | 
+| `set static` | Configure fixed IP/Gateway/DNS | 
+| `set hardware` | Adjust MAC, Speed, Duplex, or MTU | 
+| `enable/disable` | Administrative UP/DOWN toggle | 
 
-### Latency Comparison
+#### Interface Examples
 
-*Time from command invocation to valid JSON output.*
+```
+# Set Static IP with specific DNS and Route Metric
+rxnm interface eth0 set static 192.168.1.50/24 --gateway 192.168.1.1 --dns 8.8.8.8 --metric 10
 
-| Operation | RXNM (Bash/POSIX+Agent) | RXNM (Bash Fallback) | ConnMan | NetworkManager | 
- | ----- | ----- | ----- | ----- | ----- | 
-| **Status Read** | **< 5ms** | \~45ms | \~60ms | \~80ms | 
-| **Route Dump** | **< 3ms** | \~35ms | N/A | \~15ms | 
-| **Namespace Create** | **< 8ms** | \~20ms | N/A | \~40ms | 
-| **Roaming Trigger** | **< 15ms** | \~50ms | \~200ms | \~250ms+ | 
-| **Cold Boot** | **\~0.1s** | \~0.3s | \~0.8s | \~1.5s+ | 
+# Extract specific data for a script (Single Pane of Glass)
+rxnm interface wlan0 show --get wifi.rssi
 
-### Resident Footprint & background activity (Cost of Idle)
+# Force 100Mbps Full Duplex on a fixed link
+rxnm interface eth0 set hardware --speed 100 --duplex full --autoneg no
 
-This comparison highlights the "Background Overhead" of each stack. RXNM achieves a near-zero idle profile by using pure event-driven backends and ephemeral management logic.
+```
 
-| Metric / Component | RXNM (All Paths) | ConnMan Stack | NetworkManager | 
- | ----- | ----- | ----- | ----- | 
-| **L2 WiFi** | `iwd`: **3.5 MB** | `wpa_supplicant`: 8.0 MB | `wpa_supplicant`: 8.0 MB | 
-| **L3 Core** | `networkd`: **4.0 MB** | `connman`: 10.5 MB | `NetworkManager`: 24.2 MB | 
-| **Management** | **0.0 MB** (Exits) | *(In L3 Core)* | *(In L3 Core)* | 
-| **API/UI Bus** | **0.1 MB** (Socket) | N/A | `nm-applet`: 15.0 MB | 
-| **TOTAL RAM** | **\~7.6 MB** | **\~18.5 MB** | **\~47.2 MB+** | 
-| **Idle Wakeups / sec** | **< 2** (Netlink) | **\~12** (Polling) | **\~35+** (D-Bus/Plugins) | 
+### 3. Power Management & System (`rxnm system`)
 
-*Note: Internal wakeups are software-initiated interrupts (timers/polls). A lower number allows the CPU to stay in deeper sleep states longer, even if the radio is silent.*
+| Action | Description | 
+ | ----- | ----- | 
+| `nullify` | Engage eBPF hardware silence | 
+| `ipv4/ipv6` | Protocol stack toggles | 
+| `check internet` | High-speed TCP reachability probe | 
+| `proxy set` | Global/Interface HTTP proxy config | 
 
----
+#### System Examples
 
-## 📖 Command Reference
+```
+# Global "Project Silence" (XDP + WoWLAN + BT Air-gap)
+rxnm system nullify enable
 
-### 1. WiFi & Roaming (`rxnm wifi`)
+# Enable silence on a specific interface only
+rxnm system nullify enable --interface wlan0
 
-* **Connect:** `rxnm wifi connect "MySSID" --password "s3cr3t"`
+# Advanced Nullify: silence everything EXCEPT Magic Packets (Soft-WoL)
+rxnm system nullify enable --soft-wol yes
 
-* **Hotspot:** `rxnm wifi ap start "MyHotspot" --share`
+# Power saving: disable IPv6 stack completely
+rxnm system ipv6 disable
 
-* **Roaming:** `rxnm wifi roaming enable` (Signal steering for opportunistic AP switching)
+```
 
-* **Direct:** `rxnm wifi p2p scan` / `rxnm wifi p2p connect`
+### 4. Virtual Networking & VPN (`rxnm bridge|bond|vlan|vrf|vpn`)
 
-### 2. Interface & IP (`rxnm interface`)
+#### Virtual Examples
 
-* **DHCP:** `rxnm interface eth0 set dhcp --metric 100`
+```
+# Create a bridge and add eth0 as a member
+rxnm bridge create br0
+rxnm bridge add-member eth0 --bridge br0
 
-* **Static:** `rxnm interface eth0 set static 192.168.1.50/24 --gateway 192.168.1.1`
+# Create a WireGuard link
+rxnm vpn wireguard connect wg0 \
+  --private-key "..." --peer-key "..." \
+  --endpoint "vpn.host.com:51820" --address "10.0.0.2/24"
 
-* **Hardware:** `rxnm interface eth0 set hardware --speed 1000 --duplex full`
+```
 
-* **Status:** `rxnm interface eth0 show --get ip` (Extract specific values for scripts)
-
-### 3. Power & System (`rxnm system`)
-
-* **Nullify:** `rxnm system nullify enable --yes` (Activate eBPF silence mode)
-
-* **Diagnostics:** `rxnm system check internet` (High-speed TCP probing)
-
-* **Proxy:** `rxnm system proxy set --http "http://proxy:8080"`
-
-### 4. Advanced Virtualization (`rxnm bridge|bond|vlan|vrf|service`)
-
-* **Bridge:** `rxnm bridge create br0`
-
-* **Namespaces:** `rxnm service create my-isolated-ns`
-
-* **Exec:** `rxnm service exec my-isolated-ns "ping 8.8.8.8"`
-
----
-
-## 🏠 User Stories & Cookbooks
+## 🥗 User Stories & Cookbooks
 
 ### Scenario: The Retro Handheld Gamer
 
 *Goal: Connect to Home WiFi, tether to a phone via Bluetooth, and set up a local multiplayer lobby.*
 
-1. **Connect:** `rxnm wifi connect "Home_SSID" --password "mypassword"`
+1. **WiFi:** `rxnm wifi connect "Home_SSID" --password "mypassword"`
 
-2. **Tether:** `rxnm bluetooth pan enable --mode client`
+2. **BT Tether:** `rxnm bluetooth pan enable --mode client`
 
 3. **Multiplayer:** `rxnm wifi p2p status` on Host; `rxnm wifi p2p connect "Host"` on Client.
 
 ### Scenario: The "Zero Loss" Suspend
 
-*Goal: Maximize battery during s2idle while preserving SSH sessions.*
+*Goal: Maximize battery during s2idle while preserving protocol state.*
 
-1. **Enable Silence:** `rxnm system nullify enable --yes`
+1. **Engage:** `rxnm system nullify enable --soft-wol yes`
 
-2. **Result:** All incoming broadcast packets are dropped by XDP. The CPU remains in deep sleep. The link remains logically "UP," so TCP sessions (SSH) don't time out on resume.
+2. **Result:** XDP drops background mDNS/ARP storms. The CPU hits C10 sleep. The radio stays powered in a low-power state. On resume, SSH sessions are still alive because the TCP stack never saw a link-down event.
 
----
+### Scenario: The RISC-V Prototype Lab
+
+*Goal: Rapidly swap between "Development" (Static IP/Proxy) and "Field" (DHCP/No Proxy) modes.*
+
+1. **Save Dev:** `rxnm profile save lab_work`
+
+2. **Switch:** `rxnm profile load default` (Reset to baseline)
+
+3. **Switch Back:** `rxnm profile load lab_work`
 
 ## 🔌 API & Integration
 
 ### REST-Lite Input
 
-```bash
-echo '{"category":"wifi", "action":"connect", "ssid":"MyNet", "password":"pass"}' | rxnm --stdin
-```
+### Integration Contract
 
-### Capability Discovery
-
-Query feature status (Stable, Beta, Experimental):
-
-```bash
-rxnm api capabilities
-```
-
----
+The `api-schema.json` serves as the stability contract. It guarantees that UI code won't break even if the underlying kernel tools change their CLI output formatting.
 
 ## 📦 Deployment & Build Profiles
 
-* **Standard Build (`make`):** Modular library system. Best for general Linux.
+* **Minimal Bundle (`make rocknix-release`):** Amalgamates "Retro Core" logic into a single flat script. **Recommended for handhelds, Milk-V, and K230 distributions.**
 
-* **Static Build (`make tiny`):** Statically linked accelerator binary (\~50KB). Best for recovery environments.
+* **Full Bundle (`make combined-full`):** One script containing all features including Enterprise modules (MPLS, Namespaces, VRF).
 
-* **Minimal Bundle (`make rocknix-release`):** Amalgamates "Retro Core" logic into a single flat script. Zero boot-time `source` overhead.
+* **Static Build (`make tiny`):** Statically-linked C-accelerator binary (\~50KB) for recovery environments (Initramfs).
 
-### Installation
+## 📖 Rescue Mode & Initramfs
 
-```bash
-make tiny
-sudo make install
-```
-
-**Installed Paths:**
-
-* `/usr/bin/rxnm`: Main CLI entrypoint (symlink).
-
-* `/usr/lib/rocknix-network-manager/bin/rxnm`: Actual dispatcher script.
-
-* `/usr/lib/rocknix-network-manager/bin/rxnm-agent`: Native C-accelerator.
-
-* `/usr/lib/systemd/network/`: Default network templates.
+RXNM automatically detects missing daemons in Initramfs. If `systemd-networkd` is not present, it triggers `configure_standalone_gadget` to provide emergency SSH/RNDIS access, ensuring you are never locked out of your hardware.
 
 ## License
 
