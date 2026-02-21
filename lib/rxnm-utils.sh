@@ -73,18 +73,15 @@ cleanup() {
     fi
     
     # Attempt to clean up stale sub-locks in RUN_DIR
-    # Phase RC0 Fix: Replace non-POSIX 'fuser' with /proc iteration
     _try_remove_stale_lock() {
         local lock="$1"
         [ -f "$lock" ] || return
-        local held="false"
-        for pid_fd_dir in /proc/[0-9]*/fd; do
-            local proc_pid="${pid_fd_dir%/fd}"; proc_pid="${proc_pid##*/}"
-            [ "$proc_pid" = "$$" ] && continue
-            # shellcheck disable=SC2010
-            ls -la "$pid_fd_dir" 2>/dev/null | grep -qF "$lock" && { held="true"; break; }
-        done
-        [ "$held" = "false" ] && rm -f "$lock" 2>/dev/null
+        
+        # M-3 FIX: Utilize non-blocking flock to test lock vacancy.
+        # This is orders of magnitude faster and more robust than iterating /proc/*/fd
+        if flock -n "$lock" -c "true" 2>/dev/null; then
+            rm -f "$lock" 2>/dev/null
+        fi
     }
 
     if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then
@@ -124,7 +121,6 @@ acquire_global_lock() {
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
     
     # FD 8 reserved for global lock — see RXNM_FD_GLOBAL_LOCK in rxnm-constants.sh.
-    # FD 9 is used by with_iface_lock; do not change either without updating both.
     exec 8>"$GLOBAL_LOCK_FILE"
     
     if ! flock -w "$timeout" 8; then
@@ -160,8 +156,6 @@ acquire_global_lock() {
 # Description: Acquires a fine-grained lock for a specific interface.
 # Arguments: $1 = Interface Name, $2... = Command to execute
 # Returns: Exit code of the executed command.
-# NOTE: Uses FD 9 and explicit open/close to satisfy sensitive Dash/Ash parsers.
-# POSIX SAFETY: Uses FD 9 (RXNM_FD_IFACE_LOCK). Re-entrancy guard added via _RXNM_ACTIVE_LOCK.
 with_iface_lock() {
     local _wi_iface="$1"
     shift
@@ -176,17 +170,24 @@ with_iface_lock() {
         return $?
     fi
     
-    # Standardize on FD 9 for interface-level locks
-    exec 9>"$_wi_lock_file"
+    # C-6 FIX: Dynamically allocate FDs to prevent lock clobbering when 
+    # concurrent backgrounded RXNM tasks run within the same parent shell.
+    : "${_RXNM_FD_COUNTER:=10}"
+    local _wi_fd="$_RXNM_FD_COUNTER"
+    _RXNM_FD_COUNTER=$((_RXNM_FD_COUNTER + 1))
     
-    if ! flock -w "$_wi_timeout" 9; then
+    # Reset bounds safely within POSIX spec to prevent max fd limits
+    if [ "$_RXNM_FD_COUNTER" -gt 200 ]; then _RXNM_FD_COUNTER=10; fi
+    
+    eval "exec ${_wi_fd}>\"$_wi_lock_file\""
+    
+    if ! flock -w "$_wi_timeout" "$_wi_fd"; then
         log_error "Failed to acquire lock for $_wi_iface after ${_wi_timeout}s"
-        exec 9>&-
+        eval "exec ${_wi_fd}>&-"
         return 1
     fi
     
     local _prev_lock="${_RXNM_ACTIVE_LOCK:-}"
-    # L-5 Fix: Do NOT export. Keep re-entrancy guard localized to this shell process so it does not leak to spawned sub-commands.
     _RXNM_ACTIVE_LOCK="$_wi_iface"
     
     # Execute protected command
@@ -194,8 +195,9 @@ with_iface_lock() {
     local _wi_ret=$?
     
     _RXNM_ACTIVE_LOCK="$_prev_lock"
+    
     # Release and close
-    exec 9>&-
+    eval "exec ${_wi_fd}>&-"
     return $_wi_ret
 }
 
@@ -444,8 +446,14 @@ get_proxy_json() {
     local file="$1"
     if [ -f "$file" ]; then
         local http="" https="" noproxy=""
-        while IFS='=' read -r key value; do
+        while read -r line; do
+            [ -z "$line" ] && continue
+            
+            # H-3 FIX: Robustly parse config without truncating embedded '=' signs
+            local key="${line%%=*}"
+            local value="${line#*=}"
             value=$(echo "$value" | tr -d "\"'")
+            
             case "$key" in
                 http_proxy|'export http_proxy') http="$value" ;;
                 https_proxy|'export https_proxy') https="$value" ;;
@@ -571,10 +579,21 @@ validate_ip() {
     fi
     
     local addr="${ip%/*}"
+    local prefix="${ip##*/}"
     
-    # M-2 Fix: Semantic validation for IPv4 octet bounds
+    # M-2 Fix: Strict Semantic Validation for IPv4 Octets and IPv6 CIDR Lengths
     if case "$addr" in *:*) false;; *) true;; esac; then
+        # IPv4
         if ! rxnm_match "$addr" '^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'; then
+            return 1
+        fi
+        if [ "$prefix" != "$ip" ] && [ "$prefix" -gt 32 ] 2>/dev/null; then
+            return 1
+        fi
+    else
+        # IPv6
+        if [ "$prefix" != "$ip" ] && [ "$prefix" -gt 128 ] 2>/dev/null; then
+            json_error "Invalid IPv6 CIDR: prefix > 128" "1"
             return 1
         fi
     fi

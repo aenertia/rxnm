@@ -167,30 +167,60 @@ static const struct bpf_insn xdp_drop_prog[] = {
     { 0x95, 0, 0, 0, 0 },
 };
 
-// XDP Software WoL Program: Drop all EXCEPT UDP Port 7/9
-// Hand-crafted raw BPF assembly to avoid libbpf/clang dependency.
-// Safely bound-checks headers and reads bytes to prevent endianness bugs.
+/*
+ * XDP Software WoL Program: Drop all EXCEPT Magic Packets
+ * Evaluates raw BPF bytecode directly to bypass libbpf dependencies.
+ * Handles IPv4 UDP Port 7/9, IPv6 UDP Port 7/9, and Raw EtherType 0x0842.
+ */
 static const struct bpf_insn xdp_soft_wol_prog[] = {
-    { 0x61, 2, 1, offsetof(struct xdp_md, data), 0 },     // r2 = ctx->data
-    { 0x61, 3, 1, offsetof(struct xdp_md, data_end), 0 }, // r3 = ctx->data_end
-    { 0xbf, 4, 2, 0, 0 },                                 // r4 = r2
-    { 0x07, 4, 0, 0, 42 },                                // r4 += 42 (Eth + IPv4 + UDP min length)
-    { 0x2d, 4, 3, 11, 0 },                                // if r4 > r3 goto DROP (offset 11)
-    { 0x71, 5, 2, 12, 0 },                                // r5 = byte[12] (Eth Proto MSB)
-    { 0x55, 5, 0, 9, 0x08 },                              // if r5 != 0x08 goto DROP (offset 9)
-    { 0x71, 5, 2, 13, 0 },                                // r5 = byte[13] (Eth Proto LSB)
-    { 0x55, 5, 0, 7, 0x00 },                              // if r5 != 0x00 goto DROP (offset 7)
-    { 0x71, 5, 2, 23, 0 },                                // r5 = byte[23] (IP Proto)
-    { 0x55, 5, 0, 5, 17 },                                // if r5 != 17 (UDP) goto DROP (offset 5)
-    { 0x71, 5, 2, 36, 0 },                                // r5 = byte[36] (UDP DPORT MSB)
-    { 0x55, 5, 0, 3, 0x00 },                              // if r5 != 0x00 goto DROP (offset 3)
-    { 0x71, 5, 2, 37, 0 },                                // r5 = byte[37] (UDP DPORT LSB)
-    { 0x15, 5, 0, 3, 0x07 },                              // if r5 == 0x07 (Port 7) goto PASS (offset 3)
-    { 0x15, 5, 0, 2, 0x09 },                              // if r5 == 0x09 (Port 9) goto PASS (offset 2)
-    { 0xb7, 0, 0, 0, 1 },                                 // DROP: r0 = 1 (XDP_DROP)
-    { 0x95, 0, 0, 0, 0 },                                 // exit
-    { 0xb7, 0, 0, 0, 2 },                                 // PASS: r0 = 2 (XDP_PASS)
-    { 0x95, 0, 0, 0, 0 }                                  // exit
+    { 0x61, 2, 1, offsetof(struct xdp_md, data), 0 },
+    { 0x61, 3, 1, offsetof(struct xdp_md, data_end), 0 },
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 14 },
+    { 0x2d, 4, 3, 29, 0 },      // 04: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 12, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 13, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = EtherType
+    { 0x15, 5, 0, 26, 0x0842 }, // 09: if == 0x0842 goto PASS (36)
+    { 0x15, 5, 0, 2, 0x0800 },  // 10: if == 0x0800 goto IPv4 (13)
+    { 0x15, 5, 0, 11, 0x86DD }, // 11: if == 0x86DD goto IPv6 (23)
+    { 0x05, 0, 0, 21, 0 },      // 12: goto DROP (34)
+    
+    /* IPv4 Header Evaluation (Index 13) */
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 42 },      // Min len: Eth(14) + IPv4(20) + UDP(8)
+    { 0x2d, 4, 3, 18, 0 },      // 15: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 23, 0 },
+    { 0x55, 5, 0, 16, 17 },     // 17: if proto != UDP(17) goto DROP (34)
+    { 0x71, 5, 2, 36, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 37, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = DPORT
+    { 0x05, 0, 0, 9, 0 },       // 22: goto DPORT_CHECK (32)
+    
+    /* IPv6 Header Evaluation (Index 23) */
+    { 0xbf, 4, 2, 0, 0 },
+    { 0x07, 4, 0, 0, 62 },      // Min len: Eth(14) + IPv6(40) + UDP(8)
+    { 0x2d, 4, 3, 8, 0 },       // 25: if r4 > r3 goto DROP (34)
+    { 0x71, 5, 2, 20, 0 },
+    { 0x55, 5, 0, 6, 17 },      // 27: if next_hdr != UDP(17) goto DROP (34)
+    { 0x71, 5, 2, 56, 0 },
+    { 0x67, 5, 0, 8, 8 },
+    { 0x71, 6, 2, 57, 0 },
+    { 0x4f, 5, 6, 0, 0 },       // r5 = DPORT
+    
+    /* DPORT Validation (Index 32) */
+    { 0x15, 5, 0, 3, 7 },       // 32: if == 7 goto PASS (36)
+    { 0x15, 5, 0, 2, 9 },       // 33: if == 9 goto PASS (36)
+    
+    /* DROP (Index 34) */
+    { 0xb7, 0, 0, 0, 1 },       // r0 = 1 (XDP_DROP)
+    { 0x95, 0, 0, 0, 0 },       // exit
+    
+    /* PASS (Index 36) */
+    { 0xb7, 0, 0, 0, 2 },       // r0 = 2 (XDP_PASS)
+    { 0x95, 0, 0, 0, 0 }        // exit
 };
 
 /* --- Structures --- */
@@ -777,7 +807,9 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     
     for (int i = start_offset; i < loop_limit; i += 4) {
         
-        uint32_t len = *((uint32_t*)&buf[i]);
+        /* PROACTIVE FIX: Avoid unaligned 32-bit loads on ARM/RISC-V */
+        uint32_t len;
+        memcpy(&len, &buf[i], sizeof(len));
         
         /* Sanity Check Length */
         if (len > 255 || len == 0) continue;
@@ -1068,17 +1100,37 @@ int open_netlink_genl() {
     return sock;
 }
 
+void parse_genl_rtattr(struct rtattr *tb[], int max, struct rtattr *rta, int len) {
+    memset(tb, 0, sizeof(struct rtattr *) * (max + 1));
+    while (RTA_OK(rta, len)) {
+        if (rta->rta_type <= max) tb[rta->rta_type] = rta;
+        rta = RTA_NEXT(rta, len);
+    }
+}
+
+bool add_nl_attr(struct nlmsghdr *n, size_t max_buf_size, int type, const void *data, int len) {
+    int alen = RTA_LENGTH(len);
+    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(alen) > max_buf_size) return false;
+    struct rtattr *rta = (struct rtattr *)((char *)n + NLMSG_ALIGN(n->nlmsg_len));
+    rta->rta_type = type;
+    rta->rta_len = alen;
+    memcpy(RTA_DATA(rta), data, len);
+    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(alen);
+    return true;
+}
+
 int get_genl_family_id(int sock, const char *family_name) {
-    struct { struct nlmsghdr n; struct genlmsghdr g; char buf[256]; } req = {
-        .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = GENL_ID_CTRL,
-        .n.nlmsg_flags = NLM_F_REQUEST, .n.nlmsg_seq = 1, .n.nlmsg_pid = getpid(),
-        .g.cmd = CTRL_CMD_GETFAMILY, .g.version = 1
-    };
-    struct rtattr *rta = (struct rtattr *) req.buf;
-    rta->rta_type = CTRL_ATTR_FAMILY_NAME;
-    rta->rta_len = RTA_LENGTH(strlen(family_name) + 1);
-    strcpy(RTA_DATA(rta), family_name); // Safe, family_name is hardcoded literal
-    req.n.nlmsg_len += rta->rta_len;
+    struct { struct nlmsghdr n; struct genlmsghdr g; char buf[256]; } req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = GENL_ID_CTRL;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+    req.n.nlmsg_seq = 1;
+    req.n.nlmsg_pid = getpid();
+    req.g.cmd = CTRL_CMD_GETFAMILY;
+    req.g.version = 1;
+    
+    add_nl_attr(&req.n, sizeof(req), CTRL_ATTR_FAMILY_NAME, family_name, strlen(family_name) + 1);
     send(sock, &req, req.n.nlmsg_len, 0);
     
     char buf[BUF_SIZE];
@@ -1089,25 +1141,16 @@ int get_genl_family_id(int sock, const char *family_name) {
     if (NLMSG_OK(nh, len) && nh->nlmsg_type != NLMSG_ERROR) {
         struct genlmsghdr *gh = NLMSG_DATA(nh);
         struct rtattr *tb[CTRL_ATTR_MAX + 1];
-        parse_rtattr(tb, CTRL_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
+        parse_genl_rtattr(tb, CTRL_ATTR_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
         if (tb[CTRL_ATTR_FAMILY_ID]) return *(uint16_t *)RTA_DATA(tb[CTRL_ATTR_FAMILY_ID]);
     }
     return -1;
 }
 
-void add_nl_attr(struct nlmsghdr *n, int type, const void *data, int len) {
-    int alen = RTA_LENGTH(len);
-    struct rtattr *rta = (struct rtattr *)((char *)n + n->nlmsg_len);
-    rta->rta_type = type;
-    rta->rta_len = alen;
-    memcpy(RTA_DATA(rta), data, len);
-    n->nlmsg_len = NLMSG_ALIGN(n->nlmsg_len + alen);
-}
-
 void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     struct genlmsghdr *gh = NLMSG_DATA(nh);
     struct rtattr *tb[NL80211_ATTR_PARSE_MAX + 1];
-    parse_rtattr(tb, NL80211_ATTR_PARSE_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
+    parse_genl_rtattr(tb, NL80211_ATTR_PARSE_MAX, (struct rtattr *)((char *)gh + GENL_HDRLEN), nh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN));
     
     if (!tb[NL80211_ATTR_IFINDEX]) return;
     int ifindex = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_IFINDEX]);
@@ -1195,13 +1238,17 @@ step2:
     /* Request Station Info for each WiFi Interface */
     for (size_t i = 0; i < ifaces_count; i++) {
         if (ifaces[i]->exists && ifaces[i]->is_wifi) {
-            struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req = {
-                .n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN), .n.nlmsg_type = fid,
-                .n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP, .n.nlmsg_seq = time(NULL) + i,
-                .g.cmd = NL80211_CMD_GET_STATION, .g.version = 1
-            };
+            struct { struct nlmsghdr n; struct genlmsghdr g; char buf[64]; } sta_req;
+            memset(&sta_req, 0, sizeof(sta_req));
+            sta_req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+            sta_req.n.nlmsg_type = fid;
+            sta_req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+            sta_req.n.nlmsg_seq = time(NULL) + i;
+            sta_req.g.cmd = NL80211_CMD_GET_STATION;
+            sta_req.g.version = 1;
+            
             uint32_t idx = ifaces[i]->index;
-            add_nl_attr(&sta_req.n, NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
+            add_nl_attr(&sta_req.n, sizeof(sta_req), NL80211_ATTR_IFINDEX, &idx, sizeof(idx));
             
             send(sock, &sta_req, sta_req.n.nlmsg_len, 0);
             while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
@@ -1353,6 +1400,17 @@ void json_print_string(const char *key, const char *val, bool comma) {
         else putchar(*p);
     }
     printf("\"%s\n", comma ? "," : "");
+}
+
+/* Helper for cmd_ns_list array escaping without trailing newlines */
+void print_escaped_string(const char *val) {
+    printf("\"");
+    for (const char *p = val; *p; p++) {
+        if (*p == '"') printf("\\\"");
+        else if (*p == '\\') printf("\\\\");
+        else putchar(*p);
+    }
+    printf("\"");
 }
 
 void print_json_status() {
@@ -1523,9 +1581,7 @@ void cmd_tune(char *profile) {
 /* --- XDP/eBPF Logic --- */
 
 int load_xdp_drop_prog(bool soft_wol) {
-    // Construct bpf_attr manually to avoid libbpf dependency
     union bpf_attr attr;
-    char log_buf[4096] = {0};
     memset(&attr, 0, sizeof(attr));
     attr.prog_type = BPF_PROG_TYPE_XDP;
     
@@ -1539,13 +1595,26 @@ int load_xdp_drop_prog(bool soft_wol) {
     
     /* C-2 Fix: Use uintptr_t to prevent truncation on 32-bit architectures */
     attr.license = (__aligned_u64)(uintptr_t)"GPL";
-    attr.log_buf = (__aligned_u64)(uintptr_t)log_buf;
-    attr.log_size = sizeof(log_buf);
-    attr.log_level = 1;
+    
+    /* M-7 Fix: Try without verifier log first to avoid unnecessary kernel strings and save stack space */
+    attr.log_level = 0;
     
     int fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
     if (fd < 0) {
-        fprintf(stderr, "BPF_PROG_LOAD failed: %s\nVerifier log:\n%s\n", strerror(errno), log_buf);
+        /* Failed, retry with a large heap-allocated log buffer to provide debug info */
+        char *log_buf = calloc(1, 16384);
+        if (log_buf) {
+            attr.log_buf = (__aligned_u64)(uintptr_t)log_buf;
+            attr.log_size = 16384;
+            attr.log_level = 1;
+            fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+            if (fd < 0) {
+                fprintf(stderr, "BPF_PROG_LOAD failed: %s\nVerifier log:\n%s\n", strerror(errno), log_buf);
+            }
+            free(log_buf);
+        } else {
+             fprintf(stderr, "BPF_PROG_LOAD failed: %s\n", strerror(errno));
+        }
     }
     return fd;
 }
@@ -1568,35 +1637,31 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     req.i.ifi_family = AF_UNSPEC;
     req.i.ifi_index = ifindex;
     
-    // Construct Nested IFLA_XDP attribute
-    struct rtattr *xdp_attr = (struct rtattr *)((char *)&req + req.n.nlmsg_len);
-    xdp_attr->rta_type = IFLA_XDP | NLA_F_NESTED;
-    int xdp_len = sizeof(struct rtattr); // Start with header size
+    /* C-5 & M-1 Fix: Use bounds-checked attribute helper to construct nested IFLA_XDP */
+    /* Note: NLA_F_NESTED requires a parent attribute to encapsulate the children */
     
-    // 1. Add IFLA_XDP_FD
-    struct rtattr *fd_attr = (struct rtattr *)((char *)xdp_attr + sizeof(struct rtattr));
-    fd_attr->rta_type = IFLA_XDP_FD;
-    fd_attr->rta_len = RTA_LENGTH(sizeof(int));
-    memcpy(RTA_DATA(fd_attr), &fd, sizeof(int));
-    xdp_len += RTA_ALIGN(fd_attr->rta_len);
+    /* We temporarily store the nested attributes in a scratch buffer before appending the parent */
+    char nested_buf[256];
+    struct nlmsghdr *nested_dummy = (struct nlmsghdr *)nested_buf;
+    memset(nested_dummy, 0, sizeof(*nested_dummy));
+    nested_dummy->nlmsg_len = NLMSG_LENGTH(0);
     
-    // 2. Add IFLA_XDP_FLAGS (if non-zero)
-    if (flags != 0) {
-        struct rtattr *flags_attr = (struct rtattr *)((char *)xdp_attr + xdp_len);
-        // Using IFLA_XDP_FLAGS from header or fallback define
-        flags_attr->rta_type = IFLA_XDP_FLAGS; 
-        flags_attr->rta_len = RTA_LENGTH(sizeof(int));
-        memcpy(RTA_DATA(flags_attr), &flags, sizeof(int));
-        xdp_len += RTA_ALIGN(flags_attr->rta_len);
+    if (!add_nl_attr(nested_dummy, sizeof(nested_buf), IFLA_XDP_FD, &fd, sizeof(int))) {
+        close(sock); return -1; 
     }
     
-    if (RTA_ALIGN(xdp_len) > sizeof(req.buf)) {
+    if (flags != 0) {
+        if (!add_nl_attr(nested_dummy, sizeof(nested_buf), IFLA_XDP_FLAGS, &flags, sizeof(int))) {
+            close(sock); return -1;
+        }
+    }
+    
+    int nested_payload_len = nested_dummy->nlmsg_len - NLMSG_LENGTH(0);
+    
+    if (!add_nl_attr(&req.n, sizeof(req), IFLA_XDP | NLA_F_NESTED, (char*)nested_dummy + NLMSG_LENGTH(0), nested_payload_len)) {
         close(sock);
         return -1;
     }
-    
-    xdp_attr->rta_len = xdp_len;
-    req.n.nlmsg_len += RTA_ALIGN(xdp_len);
     
     if (send(sock, &req, req.n.nlmsg_len, 0) < 0) {
         close(sock);
@@ -1739,12 +1804,13 @@ int cmd_atomic_write(char *path, char *perm_str) {
         return 0;
     }
 
+    /* PROACTIVE FIX: Secure temporary file creation (TOCTOU mitigation) */
     char tmp_path[PATH_MAX];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", path, getpid());
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
 
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = mkstemp(tmp_path);
     if (fd < 0) {
-        fprintf(stderr, "Error creating temp file\n");
+        fprintf(stderr, "Error creating secure temp file\n");
         free(buf);
         return 1;
     }
@@ -1809,6 +1875,8 @@ int cmd_append_config(char *path, char *line) {
     char *file_buf = malloc(file_size + 1);
     if (!file_buf) {
         fprintf(stderr, "OOM allocating append buffer\n");
+        /* FIX: Prevent FD lock leakage on OOM */
+        flock(fd, LOCK_UN);
         close(fd);
         return 1;
     }
@@ -1862,9 +1930,25 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
     int sock = open_netlink_rt();
     if (sock < 0) exit(1);
     
+    struct timespec last_trigger = {0, 0};
+    unsigned int last_flags = 0;
+    bool first_event = true;
+    
     while (1) {
         char buf[4096];
         int len = recv(sock, buf, sizeof(buf), 0);
+        
+        /* C-1/M-8 FIX: Robust Recv Error Handling */
+        if (len < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "Netlink socket error, reconnecting...\n");
+            sleep(5);
+            close(sock);
+            sock = open_netlink_rt();
+            if (sock < 0) exit(1);
+            continue;
+        }
+        
         if (len > 0) {
             struct nlmsghdr *nh = (struct nlmsghdr *)buf;
             for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
@@ -1876,13 +1960,34 @@ void cmd_monitor_roam(char *iface, char *threshold_str) {
                     if (tb[IFLA_IFNAME]) {
                         char *name = (char *)RTA_DATA(tb[IFLA_IFNAME]);
                         if (strcmp(name, iface) == 0) {
-                            trigger_roaming_event(iface);
+                            
+                            /* C-1 FIX: Transition monitoring + Debounce */
+                            unsigned int current_flags = ifi->ifi_flags;
+                            bool is_running = (current_flags & IFF_RUNNING) && (current_flags & IFF_LOWER_UP);
+                            bool was_running = (last_flags & IFF_RUNNING) && (last_flags & IFF_LOWER_UP);
+                            
+                            if (first_event) {
+                                was_running = is_running;
+                                first_event = false;
+                            }
+                            last_flags = current_flags;
+                            
+                            /* Only trigger on state change to running (Carrier UP) */
+                            if (is_running && !was_running) {
+                                struct timespec now;
+                                clock_gettime(CLOCK_MONOTONIC, &now);
+                                
+                                long delta = now.tv_sec - last_trigger.tv_sec;
+                                if (delta >= 5) { /* 5s mechanical debounce */
+                                    last_trigger = now;
+                                    trigger_roaming_event(iface);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        sleep(2);
     }
     close(sock);
 }
@@ -1902,7 +2007,8 @@ void cmd_ns_list() {
     while ((dir = readdir(d)) != NULL) {
         if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
         if (!first) printf(", ");
-        printf("\"%s\"", dir->d_name);
+        /* L-5 FIX: Escape namespace JSON arrays */
+        print_escaped_string(dir->d_name);
         first = false;
     }
     printf("]}\n");

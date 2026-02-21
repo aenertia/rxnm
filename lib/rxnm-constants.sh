@@ -121,19 +121,19 @@ fi
 # enterprise environments; tune down for very memory-constrained targets.
 : "${IWD_DBUS_MAX_KB:=512}"
 
+# --- FD Reservations ---
+# POSIX only guarantees exec N>file works for single-digit N (0-9).
+# These constants document the reservation; do not use FD 8 or 9 elsewhere.
+RXNM_FD_GLOBAL_LOCK=8    # acquire_global_lock — singleton process lock
+RXNM_FD_IFACE_LOCK=9     # with_iface_lock — per-interface serialisation (Legacy/Fallback, dynamically allocated now)
+export RXNM_FD_GLOBAL_LOCK RXNM_FD_IFACE_LOCK
+
 # --- Logic Constants ---
 : "${MIN_CHANNEL:=1}"
 : "${WIFI_CHANNEL_MAX:=177}"
 : "${MIN_VLAN_ID:=1}"
 : "${MAX_VLAN_ID:=4094}"
 : "${DEFAULT_GW_V4:=192.168.212.1/24}" # Default subnet for AP/Share modes
-
-# --- FD Reservations ---
-# POSIX only guarantees exec N>file works for single-digit N (0-9).
-# These constants document the reservation; do not use FD 8 or 9 elsewhere.
-RXNM_FD_GLOBAL_LOCK=8    # acquire_global_lock — singleton process lock
-RXNM_FD_IFACE_LOCK=9     # with_iface_lock — per-interface serialisation
-export RXNM_FD_GLOBAL_LOCK RXNM_FD_IFACE_LOCK
 
 # --- Storage Paths (Detailed) ---
 PERSISTENT_NET_DIR="${CONF_DIR}/network"
@@ -151,6 +151,8 @@ GLOBAL_LOCK_FILE="${RUN_DIR}/network.lock"
 GLOBAL_PID_FILE="${RUN_DIR}/network.pid"
 # v1.1.0: State caching for robust nullify restoration
 NULLIFY_STATE_FILE="${RUN_DIR}/nullify.state"
+# C-3 FIX: Define roaming map file globally to prevent set -eu crash in roaming module
+ROAM_MAP_FILE="${RUN_DIR}/roaming-bssid-map.json"
 
 # --- JSON Processor Detection ---
 # Detects the fastest available JSON processor (jaq > gojq > jq).

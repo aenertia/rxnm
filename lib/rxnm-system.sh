@@ -28,37 +28,19 @@ _SVC_TS_AVAHI=0
 
 # --- Service State Cache ---
 # This cache (flat variables, POSIX-safe) provides a 2-second TTL for
-# systemctl is-active queries. It is the BASH PATH mechanism for reducing
-# fork overhead when multiple actions within a single invocation check
-# service state (e.g. action_setup calls cache_service_states once, then
-# is_service_active is called several times for iwd, networkd, resolved).
-#
-# RELATIONSHIP TO AGENT:
-# On PATH B (compat/agent-mandatory), 'rxnm-agent --dump' provides service
-# state in one Netlink+DBus pass — the agent is called first by action_status
-# and the cache is not exercised. The cache remains essential for PATH A
-# operations that don't go through action_status (e.g. action_setup,
-# tune_network_stack, action_reload).
-#
-# DO NOT REMOVE this cache. The agent-available path optimisation in
-# action_status/action_reload does not cover all callers of is_service_active.
+# systemctl is-active queries.
 cache_service_states() {
     local now
+    # L-3 FIX: Properly suppress stderr inside command substitution
     now=$(printf '%(%s)T' -1 2>/dev/null || date +%s)
     
-    # Bulk query to minimize fork overhead
-    local states
-    states=$(timeout 2s systemctl is-active iwd systemd-networkd systemd-resolved avahi-daemon 2>/dev/null || echo "inactive
-inactive
-inactive
-inactive")
-    
-    # Read into flat vars (POSIX safe)
-    # The order matches the systemctl call args above
-    _SVC_CACHE_IWD=$(echo "$states" | sed -n '1p')
-    _SVC_CACHE_NETWORKD=$(echo "$states" | sed -n '2p')
-    _SVC_CACHE_RESOLVED=$(echo "$states" | sed -n '3p')
-    _SVC_CACHE_AVAHI=$(echo "$states" | sed -n '4p')
+    # H-1 FIX: Query services individually to prevent line shifting.
+    # If a service (e.g., avahi-daemon) is not installed, bulk query outputs shift,
+    # corrupting the state cache. The minimal fork overhead guarantees correctness.
+    _SVC_CACHE_IWD=$(timeout 1s systemctl is-active iwd 2>/dev/null || echo "inactive")
+    _SVC_CACHE_NETWORKD=$(timeout 1s systemctl is-active systemd-networkd 2>/dev/null || echo "inactive")
+    _SVC_CACHE_RESOLVED=$(timeout 1s systemctl is-active systemd-resolved 2>/dev/null || echo "inactive")
+    _SVC_CACHE_AVAHI=$(timeout 1s systemctl is-active avahi-daemon 2>/dev/null || echo "inactive")
     
     _SVC_TS_IWD=$now
     _SVC_TS_NETWORKD=$now
@@ -127,8 +109,10 @@ configure_standalone_gadget() {
     ip link set "$iface" up
     ip addr add "${ip}/24" dev "$iface" 2>/dev/null
     
-    # Generate temporary busybox dhcpd config
-    local conf="/tmp/udhcpd.${iface}.conf"
+    # M-5 FIX: Generate temporary busybox dhcpd config in root-owned RUN_DIR 
+    # instead of world-writable /tmp to prevent arbitrary DNS hijacking
+    local conf="${RUN_DIR}/udhcpd.${iface}.conf"
+    
     # Use printf for safety instead of heredoc in potentially quirky shells
     printf 'start 169.254.10.10\nend 169.254.10.20\ninterface %s\noption subnet 255.255.255.0\noption router %s\noption dns %s\n' "$iface" "$ip" "$ip" > "$conf"
 
@@ -138,9 +122,6 @@ configure_standalone_gadget() {
 
 # --- Lifecycle Actions ---
 
-# NOTE: init_template_cache() was a no-op removed in v1.1.0-rc1.
-# If template conflict pre-scanning is implemented in a future version,
-# add a build_template_conflict_map warmup call here with a TTL cache.
 action_setup() {
     log_info "Initializing Network Manager..."
     ensure_dirs
@@ -472,27 +453,10 @@ disable_nat_masquerade() {
         for table in nat filter mangle; do
             local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
             if [ -n "$rules" ]; then
-                set -f
-                local _old_ifs="$IFS"
-                # Safe POSIX newline split
-                IFS='
-'
-                # shellcheck disable=SC2086
-                for line in $rules; do
-                    [ -z "$line" ] && continue
-                    # Basic parsing to extract rule for deletion
-                    # remove leading '-A '
-                    local rule="${line#-A * }"
-                    local chain
-                    # Extract chain from line: -A CHAIN ...
-                    chain=$(echo "$line" | awk '{print $2}')
-                    
-                    # Delete it
-                    # shellcheck disable=SC2086
-                    timeout 2s iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
-                done
-                IFS="$_old_ifs"
-                set +f
+                # C-2 FIX: Safely convert Append commands to Delete commands and evaluate them.
+                # This guarantees that the nested `--comment "rocknix"` strings are properly parsed
+                # by the shell and deleted correctly, preventing stale NAT rule buildup.
+                printf '%s\n' "$rules" | sed "s/^-A /timeout 2s iptables -t $table -D /" | sh
             fi
         done
     elif [ "$fw_tool" = "nft" ]; then

@@ -313,14 +313,20 @@ run_passive_monitor() {
     # Initial check
     evaluate_roaming_state "$iface" "false"
     
-    # Block on DBus signal changes (Zero CPU usage)
-    busctl monitor net.connman.iwd --match "member='PropertiesChanged',interface='net.connman.iwd.Station'" | \
-    while read -r line; do
-        case "$line" in
-            *"SignalStrength"*|*"ConnectedNetwork"*)
-                evaluate_roaming_state "$iface" "false"
-                ;;
-        esac
+    # H-7 FIX: Wrap pipe in while true loop to catch DBus/IWD restarts
+    # This prevents the passive monitor from dying silently if the underlying daemon crashes.
+    while true; do
+        busctl monitor net.connman.iwd --match "member='PropertiesChanged',interface='net.connman.iwd.Station'" | \
+        while read -r line; do
+            case "$line" in
+                *"SignalStrength"*|*"ConnectedNetwork"*)
+                    evaluate_roaming_state "$iface" "false"
+                    ;;
+            esac
+        done
+        # If we get here, busctl exited. Wait and reconnect.
+        log_roam "DBus monitor disconnected. Reconnecting in 5s..."
+        sleep 5
     done
 }
 

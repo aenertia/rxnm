@@ -28,6 +28,16 @@ _sync_active_configs() {
 _task_profile_save_global() {
     local name="$1"
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
+    
+    # H-5 FIX: Validate the directory prefix to prevent rm -rf /global/* if $STORAGE_PROFILES_DIR is empty
+    case "$profile_dir" in
+        "${STORAGE_PROFILES_DIR}/"*) ;;
+        *) 
+            log_error "Safety Guard: Invalid profile directory path '$profile_dir'"
+            return 1 
+            ;;
+    esac
+    
     local iwd_dir="${STATE_DIR}/iwd"
     
     rm -rf "${profile_dir:?}/"
@@ -60,11 +70,24 @@ _task_profile_load_global() {
     local profile_dir="${STORAGE_PROFILES_DIR}/global/${name}"
     local iwd_dir="${STATE_DIR}/iwd"
     
-    local staging_dir="${RUN_DIR}/profile_staging_$$"
-    rm -rf "$staging_dir"
-    mkdir -p "$staging_dir"
+    # PROACTIVE FIX: Secure temporary directories instead of predictable PID ($$) paths
+    local staging_dir
+    staging_dir=$(umask 077 && mktemp -d "${RUN_DIR}/profile_staging_XXXXXX") || return 1
     
     _sync_active_configs "${profile_dir}" "${staging_dir}"
+    
+    # H-4 FIX: Verify staging successfully populated BEFORE wiping the live network configuration.
+    # Prevents total network loss if out of space or profile is empty.
+    local has_files="false"
+    for f in "$staging_dir"/*; do
+        if [ -e "$f" ]; then has_files="true"; break; fi
+    done
+    
+    if [ "$has_files" = "false" ] && [ "$name" != "default" ]; then
+        rm -rf "$staging_dir"
+        log_error "Profile is empty or sync failed. Aborted to prevent network loss."
+        return 1
+    fi
     
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
     find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete

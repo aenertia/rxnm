@@ -24,7 +24,7 @@ get_wifi_iface() {
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
     
     local now
-    now=$(printf '%(%s)T' -1) 2>/dev/null || now=$(date +%s)
+    now=$(printf '%(%s)T' -1 2>/dev/null) || now=$(date +%s)
     local cache_ttl=30
     
     # Check cache validity
@@ -155,17 +155,18 @@ _task_host_mode() {
     fi
     
     if [ "$mode" != "adhoc" ]; then
-         { set +x; } 2>/dev/null
+         # M-6 FIX: Safely toggle set -x state to prevent debug trace pollution
+         local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
          secure_write "$ap_conf" "$ap_data" "600"
-         set -x 2>/dev/null
+         if [ "$was_x" -eq 1 ]; then set -x; fi
     fi
     
     case "$mode" in
         adhoc)
              if [ -n "$pass" ]; then
-                { set +x; } 2>/dev/null
+                local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
                 printf "%s" "$pass" | timeout 10s iwctl ad-hoc "$iface" start "$ssid" --stdin 2>&1
-                set -x 2>/dev/null
+                if [ "$was_x" -eq 1 ]; then set -x; fi
              else
                 timeout 10s iwctl ad-hoc "$iface" start "$ssid" 2>&1
              fi
@@ -204,9 +205,10 @@ _task_client_mode() {
 _task_save_wifi_creds() {
     local ssid="$1" pass="$2"
     ensure_dirs
-    { set +x; } 2>/dev/null
+    # M-6 FIX: Safely toggle set -x state to prevent credential leakage
+    local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
     secure_write "${STATE_DIR}/iwd/${ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
-    set -x 2>/dev/null
+    if [ "$was_x" -eq 1 ]; then set -x; fi
 }
 
 _task_set_country() {
@@ -579,6 +581,12 @@ action_connect() {
         echo
     fi
     
+    # C-4 FIX: Validate passphrase BEFORE allowing it to be saved to disk
+    # This prevents short/malformed passphrases from breaking IWD state files forever.
+    if [ -n "$pass" ]; then
+        if ! validate_passphrase "$pass"; then return 0; fi
+    fi
+    
     if [ -n "$pass" ] && [ "${EPHEMERAL_CREDS:-false}" != "true" ]; then
         with_iface_lock "$iface" _task_save_wifi_creds "$ssid" "$pass"
     fi
@@ -616,16 +624,30 @@ action_connect() {
     local max_attempts=3
     
     while [ "$attempts" -lt "$max_attempts" ]; do
-        if [ "${EPHEMERAL_CREDS:-false}" = "true" ] && [ -n "${pass:-}" ]; then
-             { set +x; } 2>/dev/null
-             printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin >/dev/null 2>&1 || true
-             set -x 2>/dev/null
-        else
-             timeout 15s iwctl station "$iface" "$cmd" "$ssid" >/dev/null 2>&1 || true
+        
+        # H-2 FIX: Check current state BEFORE issuing a connect command.
+        # If IWD is actively performing a WPA handshake, issuing another connect
+        # will cause it to abort and error out.
+        local skip_cmd="false"
+        if [ "$attempts" -gt 0 ]; then
+            local current_state
+            current_state=$(iwctl station "$iface" show 2>/dev/null | grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+            case "$current_state" in connecting|authenticating) skip_cmd="true" ;; esac
+        fi
+
+        if [ "$skip_cmd" = "false" ]; then
+            if [ "${EPHEMERAL_CREDS:-false}" = "true" ] && [ -n "${pass:-}" ]; then
+                 # M-6 FIX: Guard set -x toggle to prevent trace leakage
+                 local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
+                 printf "%s" "$pass" | timeout 15s iwctl station "$iface" "$cmd" "$ssid" --stdin >/dev/null 2>&1 || true
+                 if [ "$was_x" -eq 1 ]; then set -x; fi
+            else
+                 timeout 15s iwctl station "$iface" "$cmd" "$ssid" >/dev/null 2>&1 || true
+            fi
         fi
         
-        # Explicit station state query instead of inferring from stdout
-        sleep 1
+        # Allow time for status transition
+        sleep 2
         local conn_state
         conn_state=$(iwctl station "$iface" show 2>/dev/null | \
             grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
@@ -635,6 +657,11 @@ action_connect() {
                 audit_log "WIFI_CONNECT" "Connected to $ssid via iwctl"
                 json_success '{"connected":true,"ssid":"'"$safe_ssid"'","iface":"'"$iface"'"}'
                 return 0
+                ;;
+            connecting|authenticating)
+                # H-2 FIX: Wait patiently for slow SoCs without failing out
+                attempts=$((attempts + 1))
+                continue
                 ;;
             *"not found"*|*"no network"*)
                 json_error "Network '$ssid' not found"; return 0 ;;
@@ -674,7 +701,12 @@ action_host() {
     
     local safe_ssid; safe_ssid=$(json_escape "$ssid")
     
-    with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"
+    # M-9 FIX: Check the return status of the internal task to prevent false successes
+    if ! with_iface_lock "$iface" _task_host_mode "$iface" "$ip" "$use_share" "$mode" "$ssid" "$pass" "$channel" "$ipv6_pd"; then
+        json_error "Failed to start Hotspot mode"
+        return 1
+    fi
+    
     json_success '{"status": "host_started", "ssid": "'"$safe_ssid"'", "mode": "'"$mode"'", "open": '"$( [ -z "$pass" ] && echo true || echo false )"', "ipv6_pd": "'"$ipv6_pd"'"}'
     return 0
 }
