@@ -208,7 +208,14 @@ action_set_static() {
     for addr in $ip; do
         addr=$(echo "$addr" | tr -d ' ')
         [ -z "$addr" ] && continue
-        case "$addr" in */*) ;; *) addr="${addr}/24" ;; esac
+        
+        # L-2 FIX: Only apply default /24 to bare IPv4 addresses, leave IPv6 alone
+        case "$addr" in 
+            *:*) ;; # IPv6: Do not append /24
+            */*) ;; # Already has CIDR
+            *) addr="${addr}/24" ;; 
+        esac
+        
         if ! validate_ip "$addr"; then IFS="$_old_ifs"; set +f; return 1; fi
         final_ips="${final_ips:+$final_ips,}$addr"
     done

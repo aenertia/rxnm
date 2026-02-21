@@ -227,15 +227,16 @@ _task_forget() {
         timeout 5s iwctl known-networks "$ssid" forget >/dev/null 2>&1 || true
     fi
     
-    local safe_ssid
-    safe_ssid=$(sanitize_ssid "$ssid")
     local removed_count=0
     
-    # POSIX safe glob cleanup
-    for f in "${STORAGE_NET_DIR}"/75-config-*-"${safe_ssid}".network; do
+    # L-4 FIX: Use grep to find the exact SSID match rather than relying on sanitized glob filenames
+    # This prevents missing edge-case filenames or orphaned configs
+    for f in "${STORAGE_NET_DIR}"/75-config-*.network; do
         if [ -f "$f" ]; then
-            rm -f "$f"
-            removed_count=$((removed_count + 1))
+            if grep -q "^SSID=${ssid}$" "$f" 2>/dev/null; then
+                rm -f "$f"
+                removed_count=$((removed_count + 1))
+            fi
         fi
     done
     

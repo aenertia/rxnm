@@ -310,7 +310,18 @@ bool dyn_buf_append(dyn_buf_t *b, const void *data, size_t dlen) {
     return true;
 }
 
+bool dyn_buf_align4(dyn_buf_t *b) {
+    uint8_t pad = 0;
+    while (b->len % 4 != 0) {
+        if (!dyn_buf_append(b, &pad, 1)) return false;
+    }
+    return true;
+}
+
 bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
+    /* L-1 FIX: Ensure 4-byte alignment before appending string length (D-Bus Spec) */
+    if (!dyn_buf_align4(b)) return false;
+    
     /* M-8 Fix: Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
     uint32_t len = strlen(str);
     uint8_t len_bytes[4] = {
