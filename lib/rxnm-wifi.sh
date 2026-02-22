@@ -290,7 +290,7 @@ _task_p2p_scan() {
     fi
     
     local p2p_dev_path
-    p2p_dev_path=$(echo "$objects_json" | "$JQ_BIN" -r '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Device"] != null) | .key' | head -n1)
+    p2p_dev_path=$(echo "$objects_json" | "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Device"] != null) | .key' | head -n1)
     
     [ -z "$p2p_dev_path" ] && { echo "No P2P-capable device found" >&2; return 1; }
     
@@ -311,7 +311,7 @@ _task_p2p_scan() {
     local peers
     peers=$(echo "$objects_json" | "$JQ_BIN" -r '
         [
-            .data | to_entries[] |
+            .data[0] | to_entries[] |
             select(.value["net.connman.iwd.p2p.Peer"] != null) |
             {
                 name: .value["net.connman.iwd.p2p.Peer"].Name.data,
@@ -332,7 +332,7 @@ _task_p2p_connect() {
     
     local peer_path
     # shellcheck disable=SC2016
-    peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
+    peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
     
@@ -351,7 +351,7 @@ _task_p2p_disconnect() {
                    
     local connected_peer
     connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '
-        .data | to_entries[] |
+        .data[0] | to_entries[] |
         select(.value["net.connman.iwd.p2p.Peer"] != null) |
         select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
         .key
@@ -382,7 +382,7 @@ _task_p2p_status() {
     
     # shellcheck disable=SC2016
     "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$objects_json" '
-        ($iwd.data | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) |
+        ($iwd.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) |
          select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) |
          {name: .value["net.connman.iwd.p2p.Peer"].Name.data, mac: .value["net.connman.iwd.p2p.Peer"].DeviceAddress.data}
         ) as $peers |
@@ -466,7 +466,7 @@ action_scan() {
 
     local device_path
     # shellcheck disable=SC2016
-    device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
+    device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data[0] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
@@ -494,7 +494,7 @@ action_scan() {
     # shellcheck disable=SC2016
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         ([
-                .data | to_entries[] |
+                .data[0] | to_entries[] |
                 select(.value["net.connman.iwd.AccessPoint"] != null) |
                 select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) |
                 {
@@ -507,7 +507,7 @@ action_scan() {
         ) as $ap_map |
         
         [
-            .data | to_entries[] |
+            .data[0] | to_entries[] |
             select(.value["net.connman.iwd.Network"] != null) |
             select(.value["net.connman.iwd.Network"].Device.data == $dev) |
             {
