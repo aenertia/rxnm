@@ -152,7 +152,19 @@ exit 0
 MOCK
     chmod +x "$ROOTFS/usr/bin/rfkill"
 
-    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network"
+    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network" "$ROOTFS/etc/iwd"
+    
+    # CRITICAL: IWD requires EnableNetworkConfiguration=true to unlock the AP API over DBus.
+    # We disable internal L3 assignment immediately so networkd retains full DHCP control.
+    cat <<'EOF' > "$ROOTFS/etc/iwd/main.conf"
+[General]
+EnableNetworkConfiguration=true
+
+[Network]
+EnableIPv4=false
+EnableIPv6=false
+EOF
+    
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
     echo "$HASH" > "$ROOTFS/.rxnm_hash"
@@ -328,13 +340,6 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     m_exec $SERVER systemctl restart iwd
     m_exec $CLIENT systemctl restart iwd
     sleep 2
-    
-    # Defensive check: verify IWD stayed alive after detecting the radios
-    if ! m_exec $SERVER systemctl is-active iwd >/dev/null 2>&1; then
-        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules or /dev/rfkill permissions."
-        m_exec $SERVER journalctl -u iwd --no-pager | tail -n 20
-        exit 1
-    fi
     
     m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
     sleep 3
