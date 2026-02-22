@@ -46,6 +46,7 @@ cleanup() {
     machinectl terminate $SERVER 2>/dev/null || true
     machinectl terminate $CLIENT 2>/dev/null || true
     ip link delete $BRIDGE 2>/dev/null || true
+    sudo modprobe -r mac80211_hwsim 2>/dev/null || true
     rm -f /tmp/rxnm_bundle_success
     [ $EXIT_CODE -eq 0 ] && rm -f "$PCAP_FILE" 2>/dev/null || info "PCAP retained at $PCAP_FILE"
 }
@@ -178,15 +179,9 @@ COMMON_ARGS=(
     "--ephemeral"
 )
 
-SRV_IFACE_OPT=""
-CLI_IFACE_OPT=""
-if [ "$HWSIM_LOADED" = "true" ]; then
-    SRV_IFACE_OPT="--network-interface=$WLAN_SRV"
-    CLI_IFACE_OPT="--network-interface=$WLAN_CLI"
-fi
-
-systemd-nspawn -D "$ROOTFS" -M "$SERVER" $SRV_IFACE_OPT "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
-systemd-nspawn -D "$ROOTFS" -M "$CLIENT" $CLI_IFACE_OPT "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
+# Launch containers without --network-interface injection to prevent mac80211 hangs
+systemd-nspawn -D "$ROOTFS" -M "$SERVER" "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
+systemd-nspawn -D "$ROOTFS" -M "$CLIENT" "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
 
 info "Waiting for systemd initialization..."
 for i in {1..30}; do
@@ -204,6 +199,30 @@ check_ready() {
 }
 check_ready $SERVER || { err "$SERVER failed"; exit 1; }
 check_ready $CLIENT || { err "$CLIENT failed"; exit 1; }
+
+# CRITICAL: Manually map the mac80211 PHYs into the containers.
+# nspawn's standard --network-interface fails on WiFi because it uses standard netdev routing,
+# whereas 802.11 interfaces must be moved by their base PHY.
+if [ "$HWSIM_LOADED" = "true" ]; then
+    info "Injecting Virtual WiFi Radios into containers via PHY..."
+    
+    SRV_PID=$(machinectl show $SERVER -p Leader | cut -d= -f2)
+    CLI_PID=$(machinectl show $CLIENT -p Leader | cut -d= -f2)
+    
+    if [ -n "$SRV_PID" ] && [ -n "$WLAN_SRV" ]; then
+        SRV_PHY=$(iw dev "$WLAN_SRV" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
+        if [ -n "$SRV_PHY" ]; then
+            sudo iw phy "$SRV_PHY" set netns "$SRV_PID" 2>/dev/null || warn "Failed to move $SRV_PHY to $SERVER"
+        fi
+    fi
+    
+    if [ -n "$CLI_PID" ] && [ -n "$WLAN_CLI" ]; then
+        CLI_PHY=$(iw dev "$WLAN_CLI" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
+        if [ -n "$CLI_PHY" ]; then
+            sudo iw phy "$CLI_PHY" set netns "$CLI_PID" 2>/dev/null || warn "Failed to move $CLI_PHY to $CLIENT"
+        fi
+    fi
+fi
 
 m_exec $SERVER ethtool -K host0 tx off || true
 m_exec $CLIENT ethtool -K host0 tx off || true
