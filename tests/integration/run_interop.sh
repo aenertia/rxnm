@@ -80,7 +80,6 @@ cleanup() {
     machinectl terminate $CLIENT 2>/dev/null || true
     
     ip link delete $BRIDGE 2>/dev/null || true
-    sudo modprobe -r mac80211_hwsim 2>/dev/null || true
     rm -f /tmp/rxnm_success
     
     if [ $EXIT_CODE -eq 0 ]; then
@@ -111,18 +110,9 @@ HWSIM_LOADED=false
 WLAN_SRV=""
 WLAN_CLI=""
 
-# Self-healing: if module is missing on the Azure/GitHub runner, install it dynamically
-if ! modinfo mac80211_hwsim >/dev/null 2>&1; then
-    warn "mac80211_hwsim not indexed. Attempting to fetch linux-modules-extra..."
-    export DEBIAN_FRONTEND=noninteractive
-    sudo apt-get update -y -qq >/dev/null || true
-    sudo apt-get install -y -qq linux-modules-extra-$(uname -r) iw >/dev/null 2>&1 || sudo apt-get install -y -qq linux-modules-extra-azure iw >/dev/null 2>&1 || true
-    sudo depmod -a >/dev/null 2>&1 || true
-fi
-
-# Load with verbose output to ensure we don't hide critical loading errors
-if sudo modprobe -v mac80211_hwsim radios=2 || lsmod | grep -q mac80211_hwsim; then
-    info "mac80211_hwsim loaded successfully. Waiting for udev..."
+# Check if loaded (either by CI compilation step or native modprobe)
+if lsmod | grep -q mac80211_hwsim || sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
+    info "mac80211_hwsim active. Waiting for udev..."
     sleep 3 # Wait for udev and kernel to fully map the virtual radios
     
     # Grab the first two wireless interfaces using iw (more reliable than sysfs timing)
@@ -149,7 +139,6 @@ if sudo modprobe -v mac80211_hwsim radios=2 || lsmod | grep -q mac80211_hwsim; t
     fi
 else
     warn "mac80211_hwsim module not available on host. Virtual WiFi tests will be skipped."
-    warn "Hint: Run 'sudo apt-get install linux-modules-extra-\$(uname -r)' to enable it."
 fi
 
 if command -v tcpdump >/dev/null; then
@@ -369,6 +358,7 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     
     # 1. Bring up the AP on the Server
     # Note: We rely on rxnm's internal auto-detection rather than passing exact interface strings,
+    # as systemd-nspawn abstracts the injected physical link securely.
     m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
     
     # 2. Wait for simulated beaconing to initialize
