@@ -41,6 +41,7 @@ _load_roaming_state() {
 _save_roaming_state() {
     if [ "$RXNM_HAS_JQ" = "true" ]; then
         # Atomic save to prevent corruption
+        # shellcheck disable=SC2016
         "$JQ_BIN" -n \
             --arg lst "$LAST_SCAN_TIME" \
             --arg lmv "$LAST_MATCH_VAL" \
@@ -278,7 +279,7 @@ _logic_signal_steering() {
     local scan_reason=""
     
     # Linear Backoff (POSIX math) with safety cap to prevent long-running overflow
-    local safe_nudge=$NUDGE_COUNT
+    local safe_nudge="$NUDGE_COUNT"
     [ "$safe_nudge" -gt 1000 ] && safe_nudge=1000
     local dynamic_cooldown=$(( SCAN_COOLDOWN_SEEK * (1 + safe_nudge) ))
     [ "$dynamic_cooldown" -gt "${MAX_NUDGE_BACKOFF:-3600}" ] && dynamic_cooldown="${MAX_NUDGE_BACKOFF:-3600}"
