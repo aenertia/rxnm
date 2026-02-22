@@ -239,9 +239,8 @@ cat <<'EOF' > "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
 PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
 [ -z "$PHY" ] && exit 0
 
-# Grab the wdev ID precisely by looking two lines above the P2P-device label
-# to bypass the intermediate addr MAC line inserted by the kernel.
-for wdev in $(iw dev | grep -B2 'type P2P-device' | awk '/wdev 0x/ {print $2}'); do
+# Grab the wdev ID precisely by looking for the wdev hex immediately preceding a P2P-device assignment
+for wdev in $(iw dev | awk '/wdev 0x/{w=$2} /type P2P-device/{print w}'); do
     iw wdev "$wdev" del 2>/dev/null || true
 done
 
@@ -452,7 +451,8 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     
     # 1. Bring up the AP on the Server
     info "Starting Virtual AP (Debug Mode)..."
-    m_exec $SERVER rxnm --debug wifi ap start "RXNM_Test_Net" --password "supersecret"
+    # Added --share so that AP mode acts as a router and emits a pingable gateway default route
+    m_exec $SERVER rxnm --debug wifi ap start "RXNM_Test_Net" --password "supersecret" --share
     
     # 2. Wait for simulated beaconing to initialize
     sleep 3
@@ -495,7 +495,8 @@ if [ "$HWSIM_LOADED" = "true" ]; then
                 GW=$(m_exec $CLIENT ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/default/ {print $3; exit}')
                 
                 # If no explicit default gateway (e.g. ad-hoc or strict IWD subnet), try to ping the AP root IP.
-                [ -z "$GW" ] && GW=$(m_exec $CLIENT ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/src/ {print $1; exit}' | cut -d/ -f1)
+                # The regex replaces the trailing .0.0 or .0 of the extracted subnet base to form the AP IP (usually .1 or .1.1)
+                [ -z "$GW" ] && GW=$(m_exec $CLIENT ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/src/ {print $1; exit}' | cut -d/ -f1 | sed 's/\.0\.0$/.1.1/; s/\.0$/.1/')
 
                 if [ -n "$IP" ] && [ -n "$GW" ]; then
                     if m_exec $CLIENT ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
