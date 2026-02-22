@@ -19,28 +19,40 @@ jobs:
       run: |
         echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw wget xz-utils
+        
+        # We need the extra modules for cfg80211 and mac80211 base dependencies
+        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw wget xz-utils || true
         
         # Cloud kernels (Azure/AWS) strip the hwsim module. We compile it out-of-tree natively.
         KERNEL_VER=$(uname -r | cut -d'-' -f1)
-        TAR_VER=$(echo $KERNEL_VER | sed 's/\.0$//') # kernel.org uses .x format, drops trailing zeros
+        TAR_VER=$(echo $KERNEL_VER | sed 's/\.0$//')
         MAJOR_VER=$(echo $KERNEL_VER | cut -d'.' -f1)
         
         echo "Fetching Linux $TAR_VER source..."
-        wget -q https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VER}.x/linux-${TAR_VER}.tar.xz
+        wget -qO linux.tar.xz https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VER}.x/linux-${TAR_VER}.tar.xz || \
+        wget -qO linux.tar.xz https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VER}.x/linux-${KERNEL_VER}.tar.xz
         
-        echo "Extracting mac80211_hwsim isolated driver code..."
-        tar -xf linux-${TAR_VER}.tar.xz linux-${TAR_VER}/drivers/net/wireless/mac80211_hwsim
-        cd linux-${TAR_VER}/drivers/net/wireless/mac80211_hwsim
+        echo "Extracting mac80211_hwsim files..."
+        # Use wildcards to target the specific .c and .h files, bypassing exact root dir matches
+        tar -xf linux.tar.xz --wildcards '*/drivers/net/wireless/mac80211_hwsim.[ch]' || true
         
-        echo "Compiling module against running headers..."
-        # We pass CONFIG_MAC80211_HWSIM=m to force Kbuild to compile this specific object
-        sudo make -C /lib/modules/$(uname -r)/build M=$(pwd) CONFIG_MAC80211_HWSIM=m modules
+        mkdir -p hwsim_build
+        find . -type f -name "mac80211_hwsim.[ch]" -exec cp {} hwsim_build/ \;
         
-        echo "Loading dependencies and module..."
-        sudo modprobe cfg80211 || true
-        sudo modprobe mac80211 || true
-        sudo insmod ./mac80211_hwsim.ko radios=2 || echo "Failed to load custom module"
+        cd hwsim_build
+        if [ -f "mac80211_hwsim.c" ]; then
+            echo "obj-m += mac80211_hwsim.o" > Makefile
+            echo "Compiling module against running headers..."
+            sudo make -C /lib/modules/$(uname -r)/build M=$(pwd) modules || true
+            
+            echo "Loading dependencies and module..."
+            sudo depmod -a || true
+            sudo modprobe cfg80211 || true
+            sudo modprobe mac80211 || true
+            sudo insmod ./mac80211_hwsim.ko radios=2 || echo "Failed to load custom module"
+        else
+            echo "Failed to extract source files. Archive may be missing or path changed."
+        fi
         
         # Ensure Host RFKill isn't blocking our virtual radios
         sudo rfkill unblock all || true
@@ -65,6 +77,7 @@ jobs:
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
         
         # 3. Ensure Cgroup delegation is clean
+        # (GitHub runners use cgroup v2, which is good, but nspawn needs delegation)
         sudo mkdir -p /sys/fs/cgroup/systemd
         sudo mount -t cgroup -o none,name=systemd cgroup /sys/fs/cgroup/systemd || true
 
@@ -73,8 +86,10 @@ jobs:
         echo "=== PHASE 1: Build & Unit Tests ==="
         make tiny
         
+        # Run linting explicitly (will also fail build if shellcheck finds errors)
         make lint
         
+        # Run foundation tests
         export GITHUB_ACTIONS=true
         make test-all
 
@@ -85,6 +100,10 @@ jobs:
         echo "=== Step 1: dash -n syntax check on lib/*.sh ==="
         FAIL=0
         for f in lib/*.sh; do
+          # rxnm-config-schema.sh uses Bash-only syntax below its POSIX guard.
+          # 'dash -n' does not execute the guard's 'return 0', so it would fail
+          # on the declare -A syntax below it. Exclude it here — it is covered
+          # by shellcheck --shell=bash in the shellcheck step.
           case "$f" in lib/rxnm-config-schema.sh) continue ;; esac
           if ! dash -n "$f"; then
             echo "POSIX FAIL [dash -n]: $f"
@@ -101,6 +120,7 @@ jobs:
         [ "$FAIL" -eq 0 ] || { echo "dash -n check failed"; exit 1; }
 
         echo "=== Step 2: shellcheck strict POSIX on key lib files ==="
+        # SC3043: 'local' is not POSIX but is universally supported by ash/dash
         shellcheck --shell=sh --exclude=SC3043 \
           lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
           lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
@@ -129,13 +149,16 @@ jobs:
     - name: Run Integration Tests
       run: |
         echo "=== PHASE 4: Standard Integration Tests (Systemd-Nspawn) ==="
+        # Run with sudo as creating network bridges/machines requires privileges
         sudo chmod +x tests/integration/run_interop.sh
         sudo ./tests/integration/run_interop.sh
 
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
         echo "=== PHASE 5: ROCKNIX Bundle Integration Tests (Systemd-Nspawn) ==="
+        # Build the minimal deployment bundle first
         make rocknix-release
+        
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo ./tests/integration/run_rocknix_interop.sh
 
@@ -143,5 +166,6 @@ jobs:
       run: |
         echo "=== PHASE 6: Full Combined Bundle Integration Tests (Systemd-Nspawn) ==="
         make combined-full
+        
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh
