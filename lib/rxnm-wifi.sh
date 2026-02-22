@@ -121,6 +121,21 @@ _task_host_mode() {
     ensure_interface_active "$iface"
     ensure_dirs
     
+    if [ "${RXNM_TEST_MODE:-0}" -ne 1 ] && ! is_service_active "iwd"; then
+        echo "IWD not running" >&2; exit 1
+    fi
+    
+    timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
+    
+    # Explicitly switch the device mode BEFORE configuring networkd.
+    # networkd matches WLANInterfaceType=ap/adhoc based on the actual kernel state!
+    if [ "$mode" = "adhoc" ]; then
+        timeout 5s iwctl device "$iface" set-property Mode ad-hoc >/dev/null 2>&1 || true
+    else
+        timeout 5s iwctl device "$iface" set-property Mode ap >/dev/null 2>&1 || true
+    fi
+    sleep 1 # Allow kernel and IWD DBus objects to settle
+    
     # Mask conflicting templates
     if type build_template_conflict_map >/dev/null 2>&1; then
         local conflicts
@@ -128,7 +143,8 @@ _task_host_mode() {
         for t in $conflicts; do mask_system_template "$t"; done
     fi
     
-    local host_file="${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
+    # Prefix with 65 to beat default 70-* system templates
+    local host_file="${STORAGE_NET_DIR}/65-wifi-host-${iface}.network"
     local content
     content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes" "$ipv6_pd")
     
@@ -148,21 +164,6 @@ _task_host_mode() {
     
     tune_network_stack "host"
     if [ "$use_share" = "true" ]; then enable_nat_masquerade "$iface"; else disable_nat_masquerade; fi
-    
-    if [ "${RXNM_TEST_MODE:-0}" -ne 1 ] && ! is_service_active "iwd"; then
-        echo "IWD not running" >&2; exit 1
-    fi
-    
-    timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
-    
-    # Explicitly switch the device mode to expose the appropriate D-Bus interfaces
-    # Newer iwd versions refuse to start profiles unless the net.connman.iwd.AccessPoint dbus interface is exposed
-    if [ "$mode" = "adhoc" ]; then
-        timeout 5s iwctl device "$iface" set-property Mode ad-hoc >/dev/null 2>&1 || true
-    else
-        timeout 5s iwctl device "$iface" set-property Mode ap >/dev/null 2>&1 || true
-    fi
-    sleep 1 # Allow IWD DBus objects to settle
     
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
@@ -201,7 +202,23 @@ Passphrase=${pass}
 
 _task_client_mode() {
     local iface="$1"
-    rm -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
+    
+    if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
+        if is_service_active "iwd"; then
+            timeout 5s iwctl ap "$iface" stop >/dev/null 2>&1 || true
+            timeout 5s iwctl ad-hoc "$iface" stop >/dev/null 2>&1 || true
+            
+            # Revert to station mode BEFORE reconfiguring networkd
+            timeout 5s iwctl device "$iface" set-property Mode station >/dev/null 2>&1 || true
+            sleep 1
+            
+            timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
+            timeout 5s iwctl station "$iface" scan >/dev/null 2>&1 || true
+        fi
+    fi
+    
+    rm -f "${STORAGE_NET_DIR}/65-wifi-host-${iface}.network"
+    rm -f "${STORAGE_NET_DIR}/70-wifi-host-${iface}.network" # legacy cleanup
     rm -f "${STORAGE_NET_DIR}/70-share-${iface}.network"
     rm -f "$STORAGE_HOST_NET_FILE"
     
@@ -214,20 +231,6 @@ _task_client_mode() {
     reload_networkd
     reconfigure_iface "$iface"
     disable_nat_masquerade
-    
-    if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
-        if is_service_active "iwd"; then
-            timeout 5s iwctl ap "$iface" stop >/dev/null 2>&1 || true
-            timeout 5s iwctl ad-hoc "$iface" stop >/dev/null 2>&1 || true
-            
-            # Revert to station mode
-            timeout 5s iwctl device "$iface" set-property Mode station >/dev/null 2>&1 || true
-            sleep 1
-            
-            timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
-            timeout 5s iwctl station "$iface" scan >/dev/null 2>&1 || true
-        fi
-    fi
 }
 
 _task_save_wifi_creds() {
