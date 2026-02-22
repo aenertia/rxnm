@@ -214,19 +214,7 @@ exit 0
 MOCK
     chmod +x "$ROOTFS/usr/bin/rfkill"
 
-    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network" "$ROOTFS/etc/iwd"
-    
-    # CRITICAL: IWD requires EnableNetworkConfiguration=true to unlock the AP API over DBus.
-    # We disable internal L3 assignment immediately so networkd retains full DHCP control.
-    cat <<'EOF' > "$ROOTFS/etc/iwd/main.conf"
-[General]
-EnableNetworkConfiguration=true
-
-[Network]
-EnableIPv4=false
-EnableIPv6=false
-EOF
-    
+    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network"
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
     echo "$HASH" > "$ROOTFS/.rxnm_hash"
@@ -307,6 +295,29 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     
     # IMPORTANT: Wait for container udevd to process the new PHYs and map them to netdevs
     sleep 3
+    
+    # -----------------------------------------------------------------------------
+    # PHY SANITIZATION:
+    # Host systems often attach hidden P2P-device interfaces to virtual radios.
+    # When moved to the container, these ghost interfaces consume the 'AP' capability 
+    # slot, causing IWD to report 'No ap on device'. We must flush them and recreate 
+    # a clean wlan0.
+    # -----------------------------------------------------------------------------
+    cat <<'EOF' > "$ROOTFS/tmp/sanitize_wifi.sh"
+#!/bin/bash
+PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
+[ -z "$PHY" ] && exit 0
+for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
+    iw dev "$dev" del 2>/dev/null || true
+done
+iw phy "$PHY" interface add wlan0 type managed
+ip link set wlan0 up
+EOF
+    chmod +x "$ROOTFS/tmp/sanitize_wifi.sh"
+    
+    info "Sanitizing Virtual Radios..."
+    m_exec $SERVER /tmp/sanitize_wifi.sh
+    m_exec $CLIENT /tmp/sanitize_wifi.sh
 fi
 
 m_exec $SERVER ethtool -K host0 tx off || true
@@ -417,7 +428,7 @@ sleep 2
 if [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability ---"
     
-    # Restart IWD to ensure it registers the newly injected hardware radios
+    # Restart IWD to ensure it registers the clean, sanitized wlan0 radios
     m_exec $SERVER systemctl restart iwd
     m_exec $CLIENT systemctl restart iwd
     sleep 2

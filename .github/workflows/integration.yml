@@ -55,6 +55,16 @@ jobs:
                 sudo modprobe $mod >/dev/null 2>&1 || true
             done
             
+            # --- BLACKLIST HOST INTERFERENCE ---
+            # Prevent the host OS NetworkManager/wpa_supplicant from touching our simulated radios
+            # and spawning unwanted ghost P2P interfaces before nspawn consumes them.
+            echo "Masking host wpa_supplicant and blacklisting hwsim driver in NetworkManager..."
+            sudo mkdir -p /etc/NetworkManager/conf.d
+            echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
+            sudo systemctl reload NetworkManager || true
+            sudo systemctl stop wpa_supplicant || true
+            sudo systemctl mask wpa_supplicant || true
+            
             sudo insmod ./mac80211_hwsim.ko radios=2 || echo "Failed to load custom module"
         else
             echo "Failed to extract source files. Archive may be missing or path changed."
