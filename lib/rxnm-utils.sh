@@ -211,13 +211,22 @@ with_iface_lock() {
 # --- Logging ---
 
 log_debug() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2 || true
+    if [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ]; then
+        echo "[DEBUG] $*" >&2
+    fi
+    return 0
 }
 log_info() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2 || true
+    if [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ]; then
+        echo "[INFO] $*" >&2
+    fi
+    return 0
 }
 log_warn() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2 || true
+    if [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ]; then
+        echo "[WARN] $*" >&2
+    fi
+    return 0
 }
 log_error() {
     echo "[ERROR] $*" >&2
