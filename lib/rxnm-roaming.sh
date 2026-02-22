@@ -20,6 +20,37 @@ CURRENT_PROFILE=""
 NUDGE_COUNT=0
 LAST_NUDGE_BSSID=""
 _ROAM_MAP_UPDATE_PID=""
+ROAM_STATE_FILE="${RUN_DIR}/roaming.state"
+
+_load_roaming_state() {
+    if [ -f "$ROAM_STATE_FILE" ] && [ "$RXNM_HAS_JQ" = "true" ]; then
+        LAST_SCAN_TIME=$("$JQ_BIN" -r '.last_scan_time // 0' "$ROAM_STATE_FILE" 2>/dev/null || echo 0)
+        LAST_MATCH_VAL=$("$JQ_BIN" -r '.last_match_val // ""' "$ROAM_STATE_FILE" 2>/dev/null || echo "")
+        CURRENT_PROFILE=$("$JQ_BIN" -r '.current_profile // ""' "$ROAM_STATE_FILE" 2>/dev/null || echo "")
+        NUDGE_COUNT=$("$JQ_BIN" -r '.nudge_count // 0' "$ROAM_STATE_FILE" 2>/dev/null || echo 0)
+        LAST_NUDGE_BSSID=$("$JQ_BIN" -r '.last_nudge_bssid // ""' "$ROAM_STATE_FILE" 2>/dev/null || echo "")
+    else
+        LAST_SCAN_TIME=0
+        LAST_MATCH_VAL=""
+        CURRENT_PROFILE=""
+        NUDGE_COUNT=0
+        LAST_NUDGE_BSSID=""
+    fi
+}
+
+_save_roaming_state() {
+    if [ "$RXNM_HAS_JQ" = "true" ]; then
+        # Atomic save to prevent corruption
+        "$JQ_BIN" -n \
+            --arg lst "$LAST_SCAN_TIME" \
+            --arg lmv "$LAST_MATCH_VAL" \
+            --arg cp "$CURRENT_PROFILE" \
+            --arg nc "$NUDGE_COUNT" \
+            --arg lnb "$LAST_NUDGE_BSSID" \
+            '{last_scan_time: ($lst|tonumber), last_match_val: $lmv, current_profile: $cp, nudge_count: ($nc|tonumber), last_nudge_bssid: $lnb}' > "${ROAM_STATE_FILE}.tmp" 2>/dev/null
+        mv -f "${ROAM_STATE_FILE}.tmp" "$ROAM_STATE_FILE" 2>/dev/null || true
+    fi
+}
 
 log_roam() {
     if [ -t 2 ]; then
@@ -144,6 +175,7 @@ evaluate_roaming_state() {
         log_roam "Roam detected ($LAST_NUDGE_BSSID -> $bssid). Resetting backoff."
         NUDGE_COUNT=0
         LAST_NUDGE_BSSID=""
+        _save_roaming_state
     fi
     
     # 3. Evaluate
@@ -169,6 +201,7 @@ evaluate_roaming_state() {
             log_roam "Disconnected."
             LAST_MATCH_VAL=""
             NUDGE_COUNT=0
+            _save_roaming_state
         fi
         return 1
     fi
@@ -229,6 +262,7 @@ _logic_profile_switch() {
         if type action_profile >/dev/null 2>&1; then
             action_profile "load" "$target_profile" >/dev/null
             CURRENT_PROFILE="$target_profile"
+            _save_roaming_state
         fi
     fi
 }
@@ -288,6 +322,7 @@ _logic_signal_steering() {
             LAST_SCAN_TIME="$now"
             LAST_NUDGE_BSSID="$bssid"
             NUDGE_COUNT=$((NUDGE_COUNT + 1))
+            _save_roaming_state
             
             # Update our map in background (Guard against fork bombs)
             if [ -z "${_ROAM_MAP_UPDATE_PID:-}" ] || ! kill -0 "$_ROAM_MAP_UPDATE_PID" 2>/dev/null; then
@@ -363,6 +398,7 @@ action_wifi_roaming_trigger() {
     fi
     
     load_roaming_config
+    _load_roaming_state
     log_roam "Opportunistic Trigger: Checking location context for $iface..."
     if evaluate_roaming_state "$iface" "true"; then
         log_roam "Context evaluation complete."
@@ -385,6 +421,7 @@ action_wifi_roaming_monitor() {
     : "${STORAGE_PROFILES_DIR:=${CONF_DIR}/network/profiles}"
     
     load_roaming_config
+    _load_roaming_state
     rm -f "$ROAM_MAP_FILE"
     
     log_roam "Starting Roaming Monitor on $iface"

@@ -87,51 +87,62 @@ build_template_conflict_map() {
             [ ! -f "$f" ] && continue
             local fname="${f##*/}"
             
-            # Parse metadata
-            local meta=""
-            if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
-                eval 'meta="${TEMPLATE_CACHE['"\"$f\""']:-}"'
-                # Restore newlines if cached
-                [ -n "$meta" ] && meta=$(printf '%s' "$meta" | tr '\035' '\n')
-            fi
-            [ -z "$meta" ] && meta=$(parse_template_metadata "$f")
+            # Fixed-string exact matching to prevent glob injection
+            local is_match="false"
             
-            local match_pattern
-            if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
-                match_pattern=$(echo "$meta" | "$JQ_BIN" -r '.name')
-                wlan_type=$(echo "$meta" | "$JQ_BIN" -r '.wlan_type')
+            # Check for exact match (e.g. Name=wlan0)
+            if grep -qFx "Name=$iface" "$f" 2>/dev/null; then
+                is_match="true"
             else
-                match_pattern=$(printf '%s' "$meta" | grep -o '"name":"[^"]*"' | sed 's/"name":"\([^"]*\)"/\1/')
-                wlan_type=$(printf '%s' "$meta" | grep -o '"wlan_type":"[^"]*"' | sed 's/"wlan_type":"\([^"]*\)"/\1/')
+                # Check for known systemd wildcards using fixed-string grep
+                case "$iface" in
+                    wlan*) grep -qF "wlan*" "$f" 2>/dev/null && is_match="true" ;;
+                    mlan*) grep -qF "mlan*" "$f" 2>/dev/null && is_match="true" ;;
+                    eth*)  grep -qF "eth*" "$f" 2>/dev/null && is_match="true" ;;
+                    en*)   grep -qF "en*" "$f" 2>/dev/null && is_match="true" ;;
+                    p2p*)  grep -qF "p2p*" "$f" 2>/dev/null && is_match="true" ;;
+                    usb*)  grep -qF "usb*" "$f" 2>/dev/null && is_match="true" ;;
+                    rndis*) grep -qF "rndis*" "$f" 2>/dev/null && is_match="true" ;;
+                    bnep*) grep -qF "bnep*" "$f" 2>/dev/null && is_match="true" ;;
+                esac
             fi
             
-            # Pattern matching via case for POSIX compatibility
-            # shellcheck disable=SC2254
-            # We intentionally leave $match_pattern unquoted because systemd
-            # templates use glob patterns (e.g. wlan*) in the Name= field.
-            case "$iface" in
-                $match_pattern)
-                    # Conflict logic:
-                    local is_conflict="false"
-                    
-                    if [ "$intent_role" = "ap" ]; then
-                        # If we want AP, anything station-like is a conflict
-                        if [ "$wlan_type" = "station" ] || [ "$wlan_type" = "null" ] || [ -z "$wlan_type" ]; then
-                            # Assume default is station if not specified for wlan type
-                            is_conflict="true"
-                        fi
-                    elif [ "$intent_role" = "station" ]; then
-                        # If we want Station, anything AP-like is a conflict
-                        if [ "$wlan_type" = "ap" ] || [ "${wlan_type#p2p}" != "$wlan_type" ]; then
-                            is_conflict="true"
-                        fi
+            if [ "$is_match" = "true" ]; then
+                # Parse metadata
+                local meta=""
+                if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+                    eval 'meta="${TEMPLATE_CACHE['"\"$f\""']:-}"'
+                    # Restore newlines if cached
+                    [ -n "$meta" ] && meta=$(printf '%s' "$meta" | tr '\035' '\n')
+                fi
+                [ -z "$meta" ] && meta=$(parse_template_metadata "$f")
+                
+                local wlan_type=""
+                if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
+                    wlan_type=$(echo "$meta" | "$JQ_BIN" -r '.wlan_type')
+                else
+                    wlan_type=$(printf '%s' "$meta" | grep -o '"wlan_type":"[^"]*"' | sed 's/"wlan_type":"\([^"]*\)"/\1/')
+                fi
+                
+                # Conflict logic:
+                local is_conflict="false"
+                
+                if [ "$intent_role" = "ap" ]; then
+                    # If we want AP, anything station-like is a conflict
+                    if [ "$wlan_type" = "station" ] || [ "$wlan_type" = "null" ] || [ -z "$wlan_type" ]; then
+                        is_conflict="true"
                     fi
-                    
-                    if [ "$is_conflict" = "true" ]; then
-                        conflict_list="${conflict_list}${fname} "
+                elif [ "$intent_role" = "station" ]; then
+                    # If we want Station, anything AP-like is a conflict
+                    if [ "$wlan_type" = "ap" ] || [ "${wlan_type#p2p}" != "$wlan_type" ]; then
+                        is_conflict="true"
                     fi
-                    ;;
-            esac
+                fi
+                
+                if [ "$is_conflict" = "true" ]; then
+                    conflict_list="${conflict_list}${fname} "
+                fi
+            fi
         done
     done
     

@@ -111,7 +111,6 @@ bool g_filter_table = true; /* If false, dump all tables */
 /* Optimized for SG2002/RK3326: Start slow to allow CPU yield, cap lower for responsiveness */
 #define DBUS_BACKOFF_START_US 2000       /* 2.0ms Initial Backoff (Yield CPU) */
 #define DBUS_BACKOFF_CAP_US 100000       /* 100ms Cap (Ensure < 0.1s latency on wake) */
-#define DBUS_IO_TIMEOUT_SEC 2            /* 2 Seconds I/O Timeout (Select/SO_RCV) */
 
 #ifndef IWD_DBUS_MAX_KB
 #define IWD_DBUS_MAX_KB 512
@@ -560,6 +559,10 @@ int dbus_connect_system(void) {
     int sock = -1;
     int res = -1;
 
+    // Proportionally scale the internal select/recv IO timeout to 40% of the total budget
+    long io_timeout_us = (g_dbus_timeout_us * 40) / 100;
+    if (io_timeout_us < 1000000) io_timeout_us = 1000000; // Safeguard: minimum 1 second
+
     while (total_waited < g_dbus_timeout_us) {
         if (sock >= 0) close(sock); // Clean up previous attempt
         
@@ -607,7 +610,7 @@ int dbus_connect_system(void) {
         fd_set wfds;
         FD_ZERO(&wfds);
         FD_SET(sock, &wfds);
-        struct timeval tv = { .tv_sec = DBUS_IO_TIMEOUT_SEC, .tv_usec = 0 };
+        struct timeval tv = { .tv_sec = io_timeout_us / 1000000, .tv_usec = io_timeout_us % 1000000 };
         
         if (select(sock + 1, NULL, &wfds, NULL, &tv) <= 0) {
             close(sock);
@@ -627,8 +630,8 @@ int dbus_connect_system(void) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
     
-    /* Set RCV/SND Timeouts to prevent hangs on read/write */
-    struct timeval tv = { .tv_sec = DBUS_IO_TIMEOUT_SEC, .tv_usec = 0 };
+    /* Set RCV/SND Timeouts to prevent hangs on read/write proportionally */
+    struct timeval tv = { .tv_sec = io_timeout_us / 1000000, .tv_usec = io_timeout_us % 1000000 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     
