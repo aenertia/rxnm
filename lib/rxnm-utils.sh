@@ -211,19 +211,20 @@ with_iface_lock() {
 # --- Logging ---
 
 log_debug() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_DEBUG" ] && echo "[DEBUG] $*" >&2 || true
 }
 log_info() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_INFO" ] && echo "[INFO] $*" >&2 || true
 }
 log_warn() {
-    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2
+    [ "${LOG_LEVEL:-2}" -ge "$LOG_LEVEL_WARN" ] && echo "[WARN] $*" >&2 || true
 }
 log_error() {
     echo "[ERROR] $*" >&2
     if [ "${RXNM_FORMAT:-human}" != "json" ]; then
          echo "Try 'rxnm --help' for usage information." >&2
     fi
+    return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -308,7 +309,7 @@ cli_error() {
 audit_log() {
     local event="$1"
     local details="$2"
-    logger -t rxnm-audit -p auth.notice "$event: $details"
+    logger -t rxnm-audit -p auth.notice "$event: $details" || true
 }
 
 # --- Output Formatting ---
