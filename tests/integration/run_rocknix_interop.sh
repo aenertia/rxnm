@@ -389,7 +389,7 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     CONVERGED=false
     for ((i=1; i<=20; i++)); do
         # Dynamically fetch the wlan interface name assigned inside the client container
-        CLI_WLAN=$(m_exec $CLIENT /bin/bash -c "source /usr/lib/rocknix-network-manager/lib/rxnm-wifi.sh && get_wifi_iface" || echo "")
+        CLI_WLAN=$(m_exec $CLIENT iw dev | awk '$1=="Interface"{print $2; exit}')
         STATE="unknown"
         
         if [ -n "$CLI_WLAN" ]; then
