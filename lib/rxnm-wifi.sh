@@ -148,12 +148,8 @@ _task_host_mode() {
     local content
     content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes" "$ipv6_pd")
     
-    # Inject WLANInterfaceType to prevent networkd from managing it as a station and fighting iwd
-    if [ "$mode" = "adhoc" ]; then
-        content=$(echo "$content" | sed "s/\[Match\]/[Match]\nWLANInterfaceType=adhoc/")
-    else
-        content=$(echo "$content" | sed "s/\[Match\]/[Match]\nWLANInterfaceType=ap/")
-    fi
+    # Intentionally omitted WLANInterfaceType injection here to prevent networkd 
+    # from incorrectly rejecting the match rule while the kernel is in transition state.
     
     secure_write "$host_file" "$content" "644"
     
