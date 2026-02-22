@@ -266,6 +266,9 @@ if [ "$HWSIM_LOADED" = "true" ]; then
             sudo iw phy "$CLI_PHY" set netns "$CLI_PID" 2>/dev/null || warn "Failed to move $CLI_PHY to $CLIENT"
         fi
     fi
+    
+    # IMPORTANT: Wait for container udevd to process the new PHYs and map them to netdevs
+    sleep 3
 fi
 
 m_exec $SERVER ethtool -K host0 tx off || true
@@ -374,6 +377,13 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     m_exec $SERVER systemctl restart iwd
     m_exec $CLIENT systemctl restart iwd
     sleep 2
+    
+    # Defensive check: verify IWD stayed alive after detecting the radios
+    if ! m_exec $SERVER systemctl is-active iwd >/dev/null 2>&1; then
+        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules."
+        m_exec $SERVER journalctl -u iwd --no-pager | tail -n 20
+        exit 1
+    fi
     
     # 1. Bring up the AP on the Server
     # Note: We rely on rxnm's internal auto-detection rather than passing exact interface strings,
