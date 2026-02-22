@@ -21,6 +21,7 @@ TCPDUMP_PID=""
 # Helper for colored output
 info() { echo -e "\033[0;36m[TEST-BUNDLE]\033[0m $1"; }
 err() { echo -e "\033[0;31m[FAIL-BUNDLE]\033[0m $1"; }
+warn() { echo -e "\033[0;33m[WARN]\033[0m $1"; }
 
 m_exec() {
     local machine=$1
@@ -45,6 +46,7 @@ cleanup() {
     machinectl terminate $SERVER 2>/dev/null || true
     machinectl terminate $CLIENT 2>/dev/null || true
     ip link delete $BRIDGE 2>/dev/null || true
+    sudo modprobe -r mac80211_hwsim 2>/dev/null || true
     rm -f /tmp/rxnm_bundle_success
     [ $EXIT_CODE -eq 0 ] && rm -f "$PCAP_FILE" 2>/dev/null || info "PCAP retained at $PCAP_FILE"
 }
@@ -71,6 +73,36 @@ fi
 
 # Ensure Host Kernel allows unprivileged BPF if restricted (helps inside container context)
 sysctl -w kernel.unprivileged_bpf_disabled=0 2>/dev/null || true
+
+info "Setting up Virtual WiFi (mac80211_hwsim)..."
+HWSIM_LOADED=false
+WLAN_SRV=""
+WLAN_CLI=""
+if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
+    sleep 1
+    for iface in /sys/class/net/*; do
+        if [ -L "$iface/device/driver" ]; then
+            driver=$(basename "$(readlink -f "$iface/device/driver")")
+            if [ "$driver" = "mac80211_hwsim" ]; then
+                if [ -z "$WLAN_SRV" ]; then
+                    WLAN_SRV=$(basename "$iface")
+                elif [ -z "$WLAN_CLI" ]; then
+                    WLAN_CLI=$(basename "$iface")
+                    break
+                fi
+            fi
+        fi
+    done
+    
+    if [ -n "$WLAN_SRV" ] && [ -n "$WLAN_CLI" ]; then
+        HWSIM_LOADED=true
+        info "✓ Virtual radios allocated: $WLAN_SRV (Server), $WLAN_CLI (Client)"
+    else
+        warn "mac80211_hwsim loaded but interfaces not found."
+    fi
+else
+    warn "mac80211_hwsim module not available on host. Virtual WiFi tests will be skipped."
+fi
 
 info "Building Test RootFS..."
 HASH=$(md5sum tests/integration/Containerfile 2>/dev/null | cut -d ' ' -f 1 || echo "nohash")
@@ -140,8 +172,16 @@ COMMON_ARGS=(
     "--rlimit=RLIMIT_MEMLOCK=infinity"
     "--ephemeral"
 )
-systemd-nspawn -D "$ROOTFS" -M "$SERVER" "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
-systemd-nspawn -D "$ROOTFS" -M "$CLIENT" "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
+
+SRV_IFACE_OPT=""
+CLI_IFACE_OPT=""
+if [ "$HWSIM_LOADED" = "true" ]; then
+    SRV_IFACE_OPT="--network-interface=$WLAN_SRV"
+    CLI_IFACE_OPT="--network-interface=$WLAN_CLI"
+fi
+
+systemd-nspawn -D "$ROOTFS" -M "$SERVER" $SRV_IFACE_OPT "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
+systemd-nspawn -D "$ROOTFS" -M "$CLIENT" $CLI_IFACE_OPT "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
 
 info "Waiting for systemd initialization..."
 for i in {1..30}; do
@@ -247,6 +287,54 @@ m_exec $CLIENT rxnm system ipv4 disable
 SYSCTL_VAL=$(m_exec $CLIENT /usr/sbin/sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null || echo "0")
 [ "$SYSCTL_VAL" != "1" ] && { err "IPv4 tuning failed"; exit 1; }
 info "✓ IPv4 chatter silenced"
+
+if [ "$HWSIM_LOADED" = "true" ]; then
+    info "--- [PHASE 6] IWD Virtual WiFi Interoperability (Bundle) ---"
+    
+    m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
+    sleep 3
+    
+    info "Scanning for Virtual AP..."
+    SCAN_RESULT=$(m_exec $CLIENT rxnm wifi scan --format json || echo "{}")
+    if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then
+        info "✓ Simulated AP detected in client scan"
+    else
+        err "Failed to detect simulated AP"
+        echo "Scan Output: $SCAN_RESULT"
+        exit 1
+    fi
+    
+    info "Connecting to Virtual AP..."
+    m_exec $CLIENT rxnm wifi connect "RXNM_Test_Net" --password "supersecret"
+    
+    info "Waiting for WiFi L2/L3 Convergence..."
+    CONVERGED=false
+    for ((i=1; i<=20; i++)); do
+        # Dynamically fetch the wlan interface name assigned inside the client container
+        CLI_WLAN=$(m_exec $CLIENT /bin/bash -c "source /usr/lib/rocknix-network-manager/lib/rxnm-wifi.sh && get_wifi_iface" || echo "")
+        STATE="unknown"
+        
+        if [ -n "$CLI_WLAN" ]; then
+            STATE=$(m_exec $CLIENT rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
+            
+            if [ "$STATE" == "connected" ]; then
+                IP=$(m_exec $CLIENT ip -j addr show "$CLI_WLAN" | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.212." | head -n1 || true)
+                if [ -n "$IP" ]; then
+                    if m_exec $CLIENT ping -c 1 -W 2 192.168.212.1 >/dev/null 2>&1; then
+                        info "✓ Client successfully authenticated and routed over Virtual WiFi (IP: $IP)"
+                        CONVERGED=true
+                        break
+                    fi
+                fi
+            fi
+        fi
+        sleep 2
+    done
+    
+    [ "$CONVERGED" = "false" ] && { err "Simulated WiFi connection or DHCP failed"; exit 1; }
+else
+    info "--- [PHASE 6] SKIPPED (Virtual WiFi module unavailable) ---"
+fi
 
 touch /tmp/rxnm_bundle_success
 info "All Bundled Integration Phases Passed."
