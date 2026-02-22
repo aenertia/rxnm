@@ -166,9 +166,14 @@ _task_host_mode() {
     
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
-    local ap_data="[General]\nChannel=${channel:-1}\n"
+    
+    local ap_data="[General]
+Channel=${channel:-1}
+"
     if [ -n "$pass" ]; then
-        ap_data="${ap_data}[Security]\nPassphrase=${pass}\n"
+        ap_data="${ap_data}[Security]
+Passphrase=${pass}
+"
     fi
     
     if [ "$mode" != "adhoc" ]; then
@@ -232,7 +237,11 @@ _task_save_wifi_creds() {
     safe_ssid=$(iwd_encode_ssid "$ssid")
     # M-6 FIX: Safely toggle set -x state to prevent credential leakage
     local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
-    secure_write "${STATE_DIR}/iwd/${safe_ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
+    
+    local psk_data="[Security]
+Passphrase=${pass}
+"
+    secure_write "${STATE_DIR}/iwd/${safe_ssid}.psk" "$psk_data" "600"
     if [ "$was_x" -eq 1 ]; then set -x; fi
 }
 
