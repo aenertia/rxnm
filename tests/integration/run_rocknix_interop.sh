@@ -179,6 +179,12 @@ COMMON_ARGS=(
     "--ephemeral"
 )
 
+# CRITICAL: IWD requires the /dev/rfkill character device to operate.
+# By default, systemd-nspawn hides this device. We must explicitly bind it.
+if [ -c /dev/rfkill ]; then
+    COMMON_ARGS+=("--bind=/dev/rfkill")
+fi
+
 # Launch containers without --network-interface injection to prevent mac80211 hangs
 systemd-nspawn -D "$ROOTFS" -M "$SERVER" "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
 systemd-nspawn -D "$ROOTFS" -M "$CLIENT" "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
@@ -325,7 +331,7 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     
     # Defensive check: verify IWD stayed alive after detecting the radios
     if ! m_exec $SERVER systemctl is-active iwd >/dev/null 2>&1; then
-        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules."
+        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules or /dev/rfkill permissions."
         m_exec $SERVER journalctl -u iwd --no-pager | tail -n 20
         exit 1
     fi

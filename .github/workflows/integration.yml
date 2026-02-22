@@ -20,8 +20,8 @@ jobs:
         echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
         
-        # We need the extra modules for cfg80211, mac80211, and Crypto API base dependencies
-        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw wget xz-utils || true
+        # We need the extra modules for cfg80211 and mac80211 base dependencies, plus rfkill for the host
+        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw wget xz-utils rfkill || true
         
         # Cloud kernels (Azure/AWS) strip the hwsim module. We compile it out-of-tree natively.
         KERNEL_VER=$(uname -r | cut -d'-' -f1)
@@ -50,8 +50,9 @@ jobs:
             
             # CRITICAL: Load all kernel crypto modules required by IWD via AF_ALG. 
             # Cloud kernels often omit auto-loading these, causing IWD to crash inside the container.
-            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211; do
-                sudo modprobe $mod || true
+            # We redirect stderr to dev/null because some cloud kernels compile these natively (=y) instead of as modules.
+            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill; do
+                sudo modprobe $mod >/dev/null 2>&1 || true
             done
             
             sudo insmod ./mac80211_hwsim.ko radios=2 || echo "Failed to load custom module"
