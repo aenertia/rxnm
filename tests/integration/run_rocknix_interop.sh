@@ -152,7 +152,15 @@ exit 0
 MOCK
     chmod +x "$ROOTFS/usr/bin/rfkill"
 
-    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network"
+    mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network" "$ROOTFS/etc/iwd"
+    
+    # CRITICAL: IWD requires EnableNetworkConfiguration=true to unlock the AP API over DBus.
+    # We omit EnableIPv4=false because IWD's AP mode mandates its internal IPv4 DHCP server 
+    # to initialize the AP DBUS object.
+    cat <<'EOF' > "$ROOTFS/etc/iwd/main.conf"
+[General]
+EnableNetworkConfiguration=true
+EOF
     
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
@@ -238,23 +246,32 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     # Host systems often attach hidden P2P-device interfaces to virtual radios.
     # When moved to the container, these ghost interfaces consume the 'AP' capability 
     # slot, causing IWD to report 'No ap on device'. We must flush them and recreate 
-    # a clean wlan0.
+    # a clean wlan0. We place this script in /root/ to avoid the /tmp systemd tmpfs mask.
     # -----------------------------------------------------------------------------
-    cat <<'EOF' > "$ROOTFS/tmp/sanitize_wifi.sh"
+    cat <<'EOF' > "$ROOTFS/root/sanitize_wifi.sh"
 #!/bin/bash
 PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
 [ -z "$PHY" ] && exit 0
+
+# Wipe all existing named interfaces
 for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
     iw dev "$dev" del 2>/dev/null || true
 done
+
+# Wipe any remaining unnamed wdevs (like P2P-device)
+for wdev in $(iw dev | grep -o 'wdev 0x[0-9a-fA-F]*' | awk '{print $2}'); do
+    iw wdev "$wdev" del 2>/dev/null || true
+done
+
+# Recreate a single, clean managed interface
 iw phy "$PHY" interface add wlan0 type managed
 ip link set wlan0 up
 EOF
-    chmod +x "$ROOTFS/tmp/sanitize_wifi.sh"
+    chmod +x "$ROOTFS/root/sanitize_wifi.sh"
     
     info "Sanitizing Virtual Radios..."
-    m_exec $SERVER /tmp/sanitize_wifi.sh
-    m_exec $CLIENT /tmp/sanitize_wifi.sh
+    m_exec $SERVER /root/sanitize_wifi.sh
+    m_exec $CLIENT /root/sanitize_wifi.sh
 fi
 
 m_exec $SERVER ethtool -K host0 tx off || true
@@ -264,7 +281,7 @@ m_exec $SERVER rxnm system setup
 m_exec $CLIENT rxnm system setup
 
 info "--- [PHASE 1] DHCP Convergence (Bundle) ---"
-m_exec $SERVER rxnm interface host0 set static 192.168.213.1/24
+m_exec $SERVER rxnm interface host0 set static 192.168.213.2/24
 m_exec $SERVER /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
 m_exec $SERVER networkctl reload && m_exec $SERVER networkctl reconfigure host0
 
@@ -275,7 +292,7 @@ CONVERGED=false
 for ((i=1; i<=30; i++)); do
     IP=$(m_exec $CLIENT ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.213." | head -n1 || true)
     if [ -n "$IP" ]; then
-        if m_exec $CLIENT ping -c 1 -W 2 192.168.213.1 >/dev/null 2>&1; then
+        if m_exec $CLIENT ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1; then
             info "✓ DHCP Bidirectional Link Verified (IP: $IP)"
             CONVERGED=true; break
         fi
