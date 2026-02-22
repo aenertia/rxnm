@@ -26,9 +26,11 @@ warn() { echo -e "\033[0;33m[WARN]\033[0m $1"; }
 m_exec() {
     local machine=$1
     shift
+    # RXNM_FORCE_NETWORKCTL bypasses raw DBus broker strictness in Fedora nspawn
     timeout 40s systemd-run -M "$machine" \
         --quiet --wait --pipe \
         --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --setenv=RXNM_FORCE_NETWORKCTL=true \
         --property=After=dbus.service \
         --property=CollectMode=inactive \
         -- "$@"
@@ -389,7 +391,8 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     CONVERGED=false
     for ((i=1; i<=20; i++)); do
         # Dynamically fetch the wlan interface name assigned inside the client container
-        CLI_WLAN=$(m_exec $CLIENT iw dev | awk '$1=="Interface"{print $2; exit}')
+        # Safe extraction without bash subshells or sourcing missing libraries
+        CLI_WLAN=$(m_exec $CLIENT iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
         STATE="unknown"
         
         if [ -n "$CLI_WLAN" ]; then

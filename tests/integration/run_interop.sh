@@ -37,9 +37,11 @@ m_exec() {
     shift
     # --setenv is critical to avoid Exit 203 (command not found) in transient units
     # --wait --pipe ensures we get output and wait for completion
+    # RXNM_FORCE_NETWORKCTL bypasses raw DBus broker strictness in Fedora nspawn
     timeout 40s systemd-run -M "$machine" \
         --quiet --wait --pipe \
         --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --setenv=RXNM_FORCE_NETWORKCTL=true \
         --property=After=dbus.service \
         --property=CollectMode=inactive \
         -- "$@"

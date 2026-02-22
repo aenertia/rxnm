@@ -228,7 +228,7 @@ reload_networkd() {
     fix_permissions
     
     # Accelerator Path
-    if [ -x "$RXNM_AGENT_BIN" ]; then
+    if [ "${RXNM_FORCE_NETWORKCTL:-false}" != "true" ] && [ -x "$RXNM_AGENT_BIN" ]; then
         if "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1; then
             # Clear status cache on reload
             [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
@@ -252,7 +252,7 @@ reconfigure_iface() {
     fix_permissions
     
     # 1. Enforce Synchronization Barrier (Flaw B Mitigation)
-    if [ -x "$RXNM_AGENT_BIN" ]; then
+    if [ "${RXNM_FORCE_NETWORKCTL:-false}" != "true" ] && [ -x "$RXNM_AGENT_BIN" ]; then
         "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1
     elif is_service_active "systemd-networkd"; then
         timeout 5s networkctl reload 2>/dev/null
