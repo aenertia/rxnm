@@ -22,7 +22,9 @@ ROOTFS="/var/lib/machines/fedora-rxnm"
 SERVER="rxnm-server"
 CLIENT="rxnm-client"
 PCAP_FILE="/tmp/rxnm_bridge.pcap"
+WIFI_PCAP_FILE="/tmp/rxnm_wifi.pcap"
 TCPDUMP_PID=""
+WIFI_TCPDUMP_PID=""
 
 # Helper for colored output
 info() { echo -e "\033[0;36m[TEST]\033[0m $1"; }
@@ -52,12 +54,22 @@ cleanup() {
         wait "$TCPDUMP_PID" 2>/dev/null || true
     fi
     
+    if [ -n "$WIFI_TCPDUMP_PID" ]; then
+        kill "$WIFI_TCPDUMP_PID" 2>/dev/null || true
+        wait "$WIFI_TCPDUMP_PID" 2>/dev/null || true
+    fi
+    
     if [ $EXIT_CODE -ne 0 ] && [ ! -f /tmp/rxnm_success ]; then
         err "TEST FAILED - DUMPING LOGS"
         
-        echo ">>> NETWORK TRAFFIC (TCPDUMP) <<<"
+        echo ">>> NETWORK TRAFFIC (TCPDUMP BRIDGE) <<<"
         if [ -f "$PCAP_FILE" ] && command -v tcpdump >/dev/null; then
             tcpdump -n -e -vv -r "$PCAP_FILE" || echo "Error parsing pcap"
+        fi
+        
+        echo ">>> WIFI TRAFFIC (TCPDUMP HWSIM0) <<<"
+        if [ -f "$WIFI_PCAP_FILE" ] && command -v tcpdump >/dev/null; then
+            tcpdump -n -e -vv -r "$WIFI_PCAP_FILE" || echo "Error parsing wifi pcap"
         fi
         
         [ -f "/tmp/$SERVER.log" ] && { echo ">>> SERVER CONSOLE <<<"; cat "/tmp/$SERVER.log"; }
@@ -84,9 +96,9 @@ cleanup() {
     rm -f /tmp/rxnm_success
     
     if [ $EXIT_CODE -eq 0 ]; then
-        rm -f "$PCAP_FILE" 2>/dev/null
+        rm -f "$PCAP_FILE" "$WIFI_PCAP_FILE" 2>/dev/null
     else
-        info "Test failed: PCAP retained at $PCAP_FILE for forensics."
+        info "Test failed: PCAPs retained at /tmp/ for forensics."
     fi
 }
 trap cleanup EXIT
@@ -135,6 +147,14 @@ if lsmod | grep -q mac80211_hwsim || sudo modprobe mac80211_hwsim radios=2 2>/de
     if [ -n "$WLAN_SRV" ] && [ -n "$WLAN_CLI" ]; then
         HWSIM_LOADED=true
         info "✓ Virtual radios allocated: $WLAN_SRV (Server), $WLAN_CLI (Client)"
+        
+        # Start WiFi Sniffer on the virtual airwaves
+        if command -v tcpdump >/dev/null && ip link show hwsim0 >/dev/null 2>&1; then
+            sudo ip link set hwsim0 up
+            info "Starting WiFi packet capture on hwsim0..."
+            sudo tcpdump -U -i hwsim0 -w "$WIFI_PCAP_FILE" -s 0 >/dev/null 2>&1 &
+            WIFI_TCPDUMP_PID=$!
+        fi
     else
         warn "mac80211_hwsim loaded but interfaces not found (Found: $WLAN_IFACES)."
     fi
@@ -144,7 +164,7 @@ fi
 
 if command -v tcpdump >/dev/null; then
     info "Starting packet capture on $BRIDGE..."
-    tcpdump -U -i "$BRIDGE" -w "$PCAP_FILE" -s 0 >/dev/null 2>&1 &
+    sudo tcpdump -U -i "$BRIDGE" -w "$PCAP_FILE" -s 0 >/dev/null 2>&1 &
     TCPDUMP_PID=$!
 fi
 
@@ -391,17 +411,27 @@ if [ "$HWSIM_LOADED" = "true" ]; then
         exit 1
     fi
     
+    # DEBUG: Dump the exact physical and logical states before firing RXNM commands
+    info ">>> SERVER WIFI DIAGNOSTICS <<<"
+    m_exec $SERVER ip a || true
+    m_exec $SERVER iw dev || true
+    m_exec $SERVER iwctl device list || true
+    
     # 1. Bring up the AP on the Server
-    # Note: We rely on rxnm's internal auto-detection rather than passing exact interface strings,
-    # as systemd-nspawn abstracts the injected physical link securely.
-    m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
+    info "Starting Virtual AP (Debug Mode)..."
+    m_exec $SERVER rxnm --debug wifi ap start "RXNM_Test_Net" --password "supersecret"
     
     # 2. Wait for simulated beaconing to initialize
     sleep 3
     
     # 3. Perform a Scan on the Client
-    info "Scanning for Virtual AP..."
-    SCAN_RESULT=$(m_exec $CLIENT rxnm wifi scan --format json || echo "{}")
+    info ">>> CLIENT WIFI DIAGNOSTICS <<<"
+    m_exec $CLIENT ip a || true
+    m_exec $CLIENT iw dev || true
+    m_exec $CLIENT iwctl device list || true
+    
+    info "Scanning for Virtual AP (Debug Mode)..."
+    SCAN_RESULT=$(m_exec $CLIENT rxnm --debug wifi scan --format json || echo "{}")
     if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then
         info "✓ Simulated AP detected in client scan"
     else
@@ -411,8 +441,8 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     fi
     
     # 4. Connect the Client
-    info "Connecting to Virtual AP..."
-    m_exec $CLIENT rxnm wifi connect "RXNM_Test_Net" --password "supersecret"
+    info "Connecting to Virtual AP (Debug Mode)..."
+    m_exec $CLIENT rxnm --debug wifi connect "RXNM_Test_Net" --password "supersecret"
     
     # 5. Validate the L2 Connection and L3 IP Convergence
     info "Waiting for WiFi L2/L3 Convergence..."
