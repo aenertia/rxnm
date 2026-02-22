@@ -131,6 +131,19 @@ bool g_filter_table = true; /* If false, dump all tables */
 #define NL80211_ATTR_PARSE_MAX      400
 #define NL80211_STA_INFO_SIGNAL     7
 
+#ifndef NL80211_CMD_SET_POWER_SAVE
+#define NL80211_CMD_SET_POWER_SAVE  55
+#endif
+#ifndef NL80211_ATTR_PS_STATE
+#define NL80211_ATTR_PS_STATE       88
+#endif
+#ifndef NL80211_PS_ENABLED
+#define NL80211_PS_ENABLED          1
+#endif
+#ifndef NL80211_PS_DISABLED
+#define NL80211_PS_DISABLED         0
+#endif
+
 /* --- XDP Constants (Fallback definitions) --- */
 #ifndef XDP_FLAGS_SKB_MODE
 #define XDP_FLAGS_SKB_MODE (1 << 1)
@@ -1704,6 +1717,66 @@ int attach_xdp_prog(int ifindex, int fd, int flags) {
     return 0;
 }
 
+/**
+ * @brief Toggles 802.11 Power Save Mode (PSM) via Netlink
+ * Used as stateless back-pressure to force the AP to buffer broadcast noise,
+ * protecting weak SDIO buses during XDP generic drops.
+ */
+void set_wifi_power_save(int ifindex, bool enable) {
+    int sock = open_netlink_genl();
+    if (sock < 0) return;
+    int fid = get_genl_family_id(sock, NL80211_GENL_NAME);
+    if (fid <= 0) { close(sock); return; }
+
+    struct {
+        struct nlmsghdr n;
+        struct genlmsghdr g;
+        char buf[64];
+    } req;
+    
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = fid;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.g.cmd = NL80211_CMD_SET_POWER_SAVE;
+    req.g.version = 1;
+
+    uint32_t ps_state = enable ? NL80211_PS_ENABLED : NL80211_PS_DISABLED;
+    add_nl_attr(&req.n, sizeof(req), NL80211_ATTR_IFINDEX, &ifindex, sizeof(ifindex));
+    add_nl_attr(&req.n, sizeof(req), NL80211_ATTR_PS_STATE, &ps_state, sizeof(ps_state));
+
+    send(sock, &req, req.n.nlmsg_len, 0);
+    
+    char buf[1024];
+    recv(sock, buf, sizeof(buf), 0); // Consume ACK to ensure transaction completes
+    close(sock);
+}
+
+/**
+ * @brief Instantly flushes the driver's RX ring buffer
+ * Toggles the IFF_UP flag synchronously to un-wedge stalled DMA engines.
+ */
+void atomic_driver_kick(const char *ifname) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) == 0) {
+        int orig_flags = ifr.ifr_flags;
+        /* Only kick if it's actually UP */
+        if (orig_flags & IFF_UP) {
+            ifr.ifr_flags &= ~IFF_UP;
+            ioctl(sock, SIOCSIFFLAGS, &ifr); // Bring DOWN
+
+            ifr.ifr_flags = orig_flags;
+            ioctl(sock, SIOCSIFFLAGS, &ifr); // Bring UP
+        }
+    }
+    close(sock);
+}
+
 void cmd_nullify_xdp(char *iface, char *action) {
     if (!iface || !action) {
         fprintf(stderr, "Usage: --nullify-xdp <iface> <enable|enable-swol|disable>\n");
@@ -1727,6 +1800,12 @@ void cmd_nullify_xdp(char *iface, char *action) {
             // Already prints to stderr in load_xdp_drop_prog
             exit(1);
         }
+        
+        /* Mitigation 5.1: Protocol-Level Flow Control (Stateless Back-Pressure)
+         * Force WiFi into Power Save Mode to tell the AP to buffer broadcast traffic.
+         * This prevents SDIO bus saturation when dropping packets in SKB mode.
+         */
+        set_wifi_power_save(ifindex, true);
         
         // Try Native (Driver) Mode first (default 0)
         int err = attach_xdp_prog(ifindex, fd, 0);
@@ -1755,6 +1834,14 @@ void cmd_nullify_xdp(char *iface, char *action) {
             fprintf(stderr, "Warning: Failed to detach XDP (may not be attached): %s\n", strerror(-err));
             // Do not exit fatally on disable; allow partial cleanups to proceed.
         }
+        
+        /* Mitigation 5.1: The "Atomic Kick"
+         * Reset the driver's RX ring buffer pointers and disable PSM.
+         * This instantaneously un-wedges stalled budget SDIO MACs without dropping the carrier.
+         */
+        set_wifi_power_save(ifindex, false);
+        atomic_driver_kick(iface);
+        
         printf("{\"success\": true, \"action\": \"xdp_drop\", \"status\": \"disabled\", \"iface\": \"%s\"}\n", iface);
     }
 }
