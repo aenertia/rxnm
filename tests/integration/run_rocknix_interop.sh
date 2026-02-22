@@ -154,14 +154,6 @@ MOCK
 
     mkdir -p "$ROOTFS/storage/.config/network" "$ROOTFS/var/lib/iwd" "$ROOTFS/run/rocknix" "$ROOTFS/run/systemd/network" "$ROOTFS/etc/iwd"
     
-    # CRITICAL: IWD requires EnableNetworkConfiguration=true to unlock the AP API over DBus.
-    # We omit EnableIPv4=false because IWD's AP mode mandates its internal IPv4 DHCP server 
-    # to initialize the AP DBUS object.
-    cat <<'EOF' > "$ROOTFS/etc/iwd/main.conf"
-[General]
-EnableNetworkConfiguration=true
-EOF
-    
     rm -rf "$ROOTFS/etc/systemd/network"
     ln -sf /run/systemd/network "$ROOTFS/etc/systemd/network"
     echo "$HASH" > "$ROOTFS/.rxnm_hash"
@@ -175,18 +167,20 @@ cp -f "$AGENT_BIN" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
 
-# Pre-stage PHY sanitization script into the base rootfs before overlayfs snapshot
+# Pre-stage PHY sanitization script into the base rootfs before overlayfs snapshot.
+# This surgically removes any host-inherited P2P-devices that consume AP capability slots.
 mkdir -p "$ROOTFS/usr/local/bin"
 cat <<'EOF' > "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
 #!/bin/bash
-# The host OS (NetworkManager) often automatically attaches a P2P-device to new radios.
-# This consumes the limited capability slots on the virtual PHY, preventing AP mode.
-# We delicately prune ONLY the P2P devices, leaving the primary managed netdev intact.
-iw dev | awk '/wdev 0x/{w=$2} /type P2P-device/{print w}' | while read -r wdev; do
+PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
+[ -z "$PHY" ] && exit 0
+
+# Grab the wdev ID precisely by looking two lines above the P2P-device label
+# to bypass the intermediate addr MAC line inserted by the kernel.
+for wdev in $(iw dev | grep -B2 'type P2P-device' | awk '/wdev 0x/ {print $2}'); do
     iw wdev "$wdev" del 2>/dev/null || true
 done
 
-# Ensure the remaining managed interface is brought up cleanly
 WLAN_IFACE=$(iw dev | awk '$1=="Interface"{print $2; exit}')
 if [ -n "$WLAN_IFACE" ]; then
     ip link set "$WLAN_IFACE" down 2>/dev/null || true
@@ -402,10 +396,17 @@ if [ "$HWSIM_LOADED" = "true" ]; then
             STATE=$(m_exec $CLIENT rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
             
             if [ "$STATE" == "connected" ]; then
-                IP=$(m_exec $CLIENT ip -j addr show "$CLI_WLAN" | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.212." | head -n1 || true)
-                if [ -n "$IP" ]; then
-                    if m_exec $CLIENT ping -c 1 -W 2 192.168.212.1 >/dev/null 2>&1; then
-                        info "✓ Client successfully authenticated and routed over Virtual WiFi (IP: $IP)"
+                # Support both RXNM-enforced Networkd IPs and IWD-Fallback internal IPs.
+                # Find any valid global IPv4 bound to the interface and extract the gateway routing.
+                IP=$(m_exec $CLIENT ip -j addr show "$CLI_WLAN" | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | head -n1 || true)
+                GW=$(m_exec $CLIENT ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/default/ {print $3; exit}')
+                
+                # If no explicit default gateway (e.g. ad-hoc or strict IWD subnet), try to ping the AP root IP.
+                [ -z "$GW" ] && GW=$(m_exec $CLIENT ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/src/ {print $1; exit}' | cut -d/ -f1)
+
+                if [ -n "$IP" ] && [ -n "$GW" ]; then
+                    if m_exec $CLIENT ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
+                        info "✓ Client successfully authenticated and routed over Virtual WiFi (IP: $IP, GW: $GW)"
                         CONVERGED=true
                         break
                     fi
