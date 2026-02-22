@@ -175,6 +175,29 @@ cp -f "$AGENT_BIN" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
 
+# Pre-stage PHY sanitization script into the base rootfs before overlayfs snapshot
+mkdir -p "$ROOTFS/usr/local/bin"
+cat <<'EOF' > "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
+#!/bin/bash
+PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
+[ -z "$PHY" ] && exit 0
+
+# Wipe all existing named interfaces
+for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
+    iw dev "$dev" del 2>/dev/null || true
+done
+
+# Wipe any remaining unnamed wdevs (like P2P-device)
+for wdev in $(iw dev | grep -o 'wdev 0x[0-9a-fA-F]*' | awk '{print $2}'); do
+    iw wdev "$wdev" del 2>/dev/null || true
+done
+
+# Recreate a single, clean managed interface
+iw phy "$PHY" interface add wlan0 type managed
+ip link set wlan0 up
+EOF
+chmod +x "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
+
 info "Booting Bundle Machines..."
 # Use bash array to prevent word-splitting on the space-separated syscall filter list.
 # Also explicitly pass RLIMIT_MEMLOCK=infinity to nspawn to allow eBPF bytecode memory allocation.
@@ -241,37 +264,9 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     # IMPORTANT: Wait for container udevd to process the new PHYs and map them to netdevs
     sleep 3
     
-    # -----------------------------------------------------------------------------
-    # PHY SANITIZATION:
-    # Host systems often attach hidden P2P-device interfaces to virtual radios.
-    # When moved to the container, these ghost interfaces consume the 'AP' capability 
-    # slot, causing IWD to report 'No ap on device'. We must flush them and recreate 
-    # a clean wlan0. We place this script in /root/ to avoid the /tmp systemd tmpfs mask.
-    # -----------------------------------------------------------------------------
-    cat <<'EOF' > "$ROOTFS/root/sanitize_wifi.sh"
-#!/bin/bash
-PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
-[ -z "$PHY" ] && exit 0
-
-# Wipe all existing named interfaces
-for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
-    iw dev "$dev" del 2>/dev/null || true
-done
-
-# Wipe any remaining unnamed wdevs (like P2P-device)
-for wdev in $(iw dev | grep -o 'wdev 0x[0-9a-fA-F]*' | awk '{print $2}'); do
-    iw wdev "$wdev" del 2>/dev/null || true
-done
-
-# Recreate a single, clean managed interface
-iw phy "$PHY" interface add wlan0 type managed
-ip link set wlan0 up
-EOF
-    chmod +x "$ROOTFS/root/sanitize_wifi.sh"
-    
     info "Sanitizing Virtual Radios..."
-    m_exec $SERVER /root/sanitize_wifi.sh
-    m_exec $CLIENT /root/sanitize_wifi.sh
+    m_exec $SERVER sanitize_wifi.sh
+    m_exec $CLIENT sanitize_wifi.sh
 fi
 
 m_exec $SERVER ethtool -K host0 tx off || true
