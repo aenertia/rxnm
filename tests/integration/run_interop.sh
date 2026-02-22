@@ -408,6 +408,12 @@ SYSCTL_VAL=$(m_exec $CLIENT /usr/sbin/sysctl -n net.ipv4.icmp_echo_ignore_broadc
 [ "$SYSCTL_VAL" != "1" ] && { err "IPv4 tuning failed"; exit 1; }
 info "✓ IPv4 broadcast chatter silenced"
 
+info "Restoring System Stack for Phase 6..."
+m_exec $CLIENT rxnm system ipv6 enable
+m_exec $CLIENT rxnm system ipv4 enable
+m_exec $CLIENT rxnm system nullify disable >/dev/null 2>&1 || true
+sleep 2
+
 if [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability ---"
     

@@ -333,6 +333,12 @@ SYSCTL_VAL=$(m_exec $CLIENT /usr/sbin/sysctl -n net.ipv4.icmp_echo_ignore_broadc
 [ "$SYSCTL_VAL" != "1" ] && { err "IPv4 tuning failed"; exit 1; }
 info "✓ IPv4 chatter silenced"
 
+info "Restoring System Stack for Phase 6..."
+m_exec $CLIENT rxnm system ipv6 enable
+m_exec $CLIENT rxnm system ipv4 enable
+m_exec $CLIENT rxnm system nullify disable >/dev/null 2>&1 || true
+sleep 2
+
 if [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability (Bundle) ---"
     
@@ -340,6 +346,13 @@ if [ "$HWSIM_LOADED" = "true" ]; then
     m_exec $SERVER systemctl restart iwd
     m_exec $CLIENT systemctl restart iwd
     sleep 2
+    
+    # Defensive check: verify IWD stayed alive after detecting the radios
+    if ! m_exec $SERVER systemctl is-active iwd >/dev/null 2>&1; then
+        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules or /dev/rfkill permissions."
+        m_exec $SERVER journalctl -u iwd --no-pager | tail -n 20
+        exit 1
+    fi
     
     m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
     sleep 3
