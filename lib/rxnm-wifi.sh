@@ -131,6 +131,14 @@ _task_host_mode() {
     local host_file="${STORAGE_NET_DIR}/70-wifi-host-${iface}.network"
     local content
     content=$(build_gateway_config "$iface" "$ip" "$use_share" "WiFi Host Mode ($mode)" "yes" "yes" "$ipv6_pd")
+    
+    # Inject WLANInterfaceType to prevent networkd from managing it as a station and fighting iwd
+    if [ "$mode" = "adhoc" ]; then
+        content=$(echo "$content" | sed "s/\[Match\]/[Match]\nWLANInterfaceType=adhoc/")
+    else
+        content=$(echo "$content" | sed "s/\[Match\]/[Match]\nWLANInterfaceType=ap/")
+    fi
+    
     secure_write "$host_file" "$content" "644"
     
     reload_networkd
@@ -146,6 +154,15 @@ _task_host_mode() {
     fi
     
     timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
+    
+    # Explicitly switch the device mode to expose the appropriate D-Bus interfaces
+    # Newer iwd versions refuse to start profiles unless the net.connman.iwd.AccessPoint dbus interface is exposed
+    if [ "$mode" = "adhoc" ]; then
+        timeout 5s iwctl device "$iface" set-property Mode ad-hoc >/dev/null 2>&1 || true
+    else
+        timeout 5s iwctl device "$iface" set-property Mode ap >/dev/null 2>&1 || true
+    fi
+    sleep 1 # Allow IWD DBus objects to settle
     
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
@@ -196,6 +213,12 @@ _task_client_mode() {
     if [ -d "/sys/class/net/$iface/wireless" ] || [ -d "/sys/class/net/$iface/phy80211" ]; then
         if is_service_active "iwd"; then
             timeout 5s iwctl ap "$iface" stop >/dev/null 2>&1 || true
+            timeout 5s iwctl ad-hoc "$iface" stop >/dev/null 2>&1 || true
+            
+            # Revert to station mode
+            timeout 5s iwctl device "$iface" set-property Mode station >/dev/null 2>&1 || true
+            sleep 1
+            
             timeout 5s iwctl station "$iface" disconnect >/dev/null 2>&1 || true
             timeout 5s iwctl station "$iface" scan >/dev/null 2>&1 || true
         fi

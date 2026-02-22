@@ -51,7 +51,7 @@ jobs:
             # CRITICAL: Load all kernel crypto modules required by IWD via AF_ALG. 
             # Cloud kernels often omit auto-loading these, causing IWD to crash inside the container.
             # We redirect stderr to dev/null because some cloud kernels compile these natively (=y) instead of as modules.
-            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill; do
+            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
                 sudo modprobe $mod >/dev/null 2>&1 || true
             done
             
