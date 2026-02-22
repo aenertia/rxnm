@@ -18,7 +18,9 @@ jobs:
     - name: Prepare Host Environment
       run: |
         sudo apt-get update
-        # Install systemd-container for machinectl/nspawn and bridge-utils for networking
+        # 1. Install kernel extras to inject mac80211_hwsim (Virtual WiFi) into the runner
+        sudo apt-get install -y linux-modules-extra-$(uname -r) linux-modules-$(uname -r) iw || true
+        # 2. Install systemd-container for machinectl/nspawn and bridge-utils for networking
         # Added shellcheck for static analysis and valgrind for leak checks
         sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck valgrind
         

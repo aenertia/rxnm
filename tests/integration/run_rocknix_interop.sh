@@ -79,15 +79,19 @@ HWSIM_LOADED=false
 WLAN_SRV=""
 WLAN_CLI=""
 if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
-    sleep 1
+    sleep 2 # Wait for udev and kernel to fully map the virtual radios
     for iface in /sys/class/net/*; do
         if [ -L "$iface/device/driver" ]; then
             driver=$(basename "$(readlink -f "$iface/device/driver")")
             if [ "$driver" = "mac80211_hwsim" ]; then
                 if [ -z "$WLAN_SRV" ]; then
                     WLAN_SRV=$(basename "$iface")
+                    # Force DOWN to unhook from host NetworkManager before container injection
+                    ip link set "$WLAN_SRV" down 2>/dev/null || true
                 elif [ -z "$WLAN_CLI" ]; then
                     WLAN_CLI=$(basename "$iface")
+                    # Force DOWN to unhook from host NetworkManager before container injection
+                    ip link set "$WLAN_CLI" down 2>/dev/null || true
                     break
                 fi
             fi
@@ -102,6 +106,7 @@ if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
     fi
 else
     warn "mac80211_hwsim module not available on host. Virtual WiFi tests will be skipped."
+    warn "Hint: Run 'sudo apt-get install linux-modules-extra-\$(uname -r)' to enable it."
 fi
 
 info "Building Test RootFS..."
