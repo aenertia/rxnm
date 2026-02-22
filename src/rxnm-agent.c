@@ -2255,6 +2255,23 @@ int cmd_match(const char *str, const char *pat) {
     return (ret == 0) ? 0 : 1;
 }
 
+/**
+ * @brief Encodes an SSID strictly matching IWD's hex-encoding parity scheme.
+ * Replaces non-alphanumeric characters with '=XX'
+ */
+void cmd_encode_ssid(const char *ssid) {
+    if (!ssid) return;
+    for (int i = 0; ssid[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)ssid[i];
+        if (isalnum(c) || c == '_' || c == '.' || c == '-') {
+            putchar(c);
+        } else {
+            printf("=%02x", c);
+        }
+    }
+    putchar('\n');
+}
+
 void cmd_version() { printf("rxnm-agent %s\n", g_agent_version); }
 void cmd_health() { printf("{\"%s\": true, \"agent\": \"active\", \"version\": \"%s\"}\n", KEY_SUCCESS, g_agent_version); }
 void cmd_time() { struct timespec ts; if (clock_gettime(CLOCK_REALTIME, &ts) == 0) printf("%ld\n", ts.tv_sec); else exit(1); }
@@ -2315,6 +2332,7 @@ int main(int argc, char *argv[]) {
         {"threshold", required_argument, 0, 'S'},
         {"nullify", required_argument, 0, 'N'},
         {"nullify-xdp", required_argument, 0, 'X'},
+        {"encode-ssid", required_argument, 0, 'E'},
         {"ns-create", required_argument, 0, 1001},
         {"ns-delete", required_argument, 0, 1002},
         {"ns-list", no_argument, 0, 1003},
@@ -2325,7 +2343,7 @@ int main(int argc, char *argv[]) {
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:E:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
             case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n"); return 0;
@@ -2347,6 +2365,7 @@ int main(int argc, char *argv[]) {
             case 'i': g_connect_iface = optarg; break;
             case 'N': g_nullify_cmd = optarg; break;
             case 'X': g_nullify_xdp_iface = optarg; break;
+            case 'E': cmd_encode_ssid(optarg); return 0;
             case 1001: g_ns_create = optarg; break;
             case 1002: g_ns_delete = optarg; break;
             case 1003: cmd_ns_list(); return 0;

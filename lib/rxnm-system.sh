@@ -244,16 +244,25 @@ reload_networkd() {
     [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 
+# Description: Reconfigures a specific interface with a strict Reload barrier.
+# This prevents the "Split-Brain" race condition on low-power SoCs where
+# networkd might re-apply old in-memory state before inotify fires.
 reconfigure_iface() {
     local iface="$1"
     fix_permissions
-    if is_service_active "systemd-networkd"; then
-        if [ -n "$iface" ]; then
-            timeout 5s networkctl reconfigure "$iface" 2>/dev/null || networkctl reload
-        else
-            timeout 5s networkctl reload
-        fi
+    
+    # 1. Enforce Synchronization Barrier (Flaw B Mitigation)
+    if [ -x "$RXNM_AGENT_BIN" ]; then
+        "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1
+    elif is_service_active "systemd-networkd"; then
+        timeout 5s networkctl reload 2>/dev/null
     fi
+    
+    # 2. Apply State to Interface
+    if is_service_active "systemd-networkd" && [ -n "$iface" ]; then
+        timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
+    fi
+    
     [ -n "$RUN_DIR" ] && rm -f "$RUN_DIR/status.json" 2>/dev/null
 }
 

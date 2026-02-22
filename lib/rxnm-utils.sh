@@ -438,6 +438,38 @@ sanitize_ssid() {
     printf '%s' "$1" | sed 's/[^a-zA-Z0-9_.-]/_/g'
 }
 
+# Description: Encodes SSID to strictly match IWD's hex-encoding parity scheme.
+# Replaces non-alphanumeric characters with '=XX' to prevent Path Traversal.
+iwd_encode_ssid() {
+    local ssid="$1"
+    if [ -x "${RXNM_AGENT_BIN:-}" ]; then
+        if "$RXNM_AGENT_BIN" --encode-ssid "$ssid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    if [ "${RXNM_SHELL_IS_BASH:-false}" = "true" ]; then
+        eval '
+        local encoded=""
+        local i c hex
+        for (( i=0; i<${#ssid}; i++ )); do
+            c="${ssid:$i:1}"
+            case "$c" in
+                [a-zA-Z0-9_.-]) encoded="${encoded}${c}" ;;
+                *) 
+                    hex=$(printf "%02x" "'\''$c")
+                    encoded="${encoded}=${hex}" 
+                    ;;
+            esac
+        done
+        echo "$encoded"
+        '
+    else
+        # POSIX Fallback (Lossy, but prevents crash if agent is missing on dash)
+        printf '%s' "$ssid" | sed 's/[^a-zA-Z0-9_.-]/_/g'
+    fi
+}
+
 json_escape() {
     local s="$1"
     # 1. Append newline for POSIX sed safety to prevent dropping string on strict BSD/GNU seds.

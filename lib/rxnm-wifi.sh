@@ -205,9 +205,11 @@ _task_client_mode() {
 _task_save_wifi_creds() {
     local ssid="$1" pass="$2"
     ensure_dirs
+    local safe_ssid
+    safe_ssid=$(iwd_encode_ssid "$ssid")
     # M-6 FIX: Safely toggle set -x state to prevent credential leakage
     local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
-    secure_write "${STATE_DIR}/iwd/${ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
+    secure_write "${STATE_DIR}/iwd/${safe_ssid}.psk" "[Security]\nPassphrase=${pass}\n" "600"
     if [ "$was_x" -eq 1 ]; then set -x; fi
 }
 
