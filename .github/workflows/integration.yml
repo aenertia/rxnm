@@ -18,12 +18,24 @@ jobs:
     - name: Prepare Host Environment
       run: |
         sudo apt-get update
+        
         # 1. Install kernel extras to inject mac80211_hwsim (Virtual WiFi) into the runner
-        sudo apt-get install -y linux-modules-extra-$(uname -r) linux-modules-$(uname -r) iw || true
+        # GitHub Azure runners sometimes drop the specific uname -r package from the repo, so we fallback to generic.
+        sudo apt-get install -y linux-modules-extra-$(uname -r) iw || \
+        sudo apt-get install -y linux-modules-extra-azure iw || true
+        
         # 2. Install systemd-container for machinectl/nspawn and bridge-utils for networking
-        # Added shellcheck for static analysis and valgrind for leak checks
         sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck valgrind
         
+        # Update module dependencies
+        sudo depmod -a || true
+        
+        # Pre-load the module here so we can catch any errors in the CI logs
+        sudo modprobe mac80211_hwsim radios=2 || echo "Failed to load mac80211_hwsim. Virtual WiFi tests will be skipped."
+        
+        # Ensure Host RFKill isn't blocking our virtual radios
+        sudo rfkill unblock all || true
+
         # --- CI HARDENING FIXES ---
         # 1. Disable AppArmor: It blocks nspawn mounts in nested environments
         if systemctl is-active --quiet apparmor; then

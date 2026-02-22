@@ -110,23 +110,34 @@ info "Setting up Virtual WiFi (mac80211_hwsim)..."
 HWSIM_LOADED=false
 WLAN_SRV=""
 WLAN_CLI=""
-if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
-    sleep 2 # Wait for udev and kernel to fully map the virtual radios
-    for iface in /sys/class/net/*; do
-        if [ -L "$iface/device/driver" ]; then
-            driver=$(basename "$(readlink -f "$iface/device/driver")")
-            if [ "$driver" = "mac80211_hwsim" ]; then
-                if [ -z "$WLAN_SRV" ]; then
-                    WLAN_SRV=$(basename "$iface")
-                    # Force DOWN to unhook from host NetworkManager before container injection
-                    ip link set "$WLAN_SRV" down 2>/dev/null || true
-                elif [ -z "$WLAN_CLI" ]; then
-                    WLAN_CLI=$(basename "$iface")
-                    # Force DOWN to unhook from host NetworkManager before container injection
-                    ip link set "$WLAN_CLI" down 2>/dev/null || true
-                    break
-                fi
-            fi
+
+# Self-healing: if module is missing on the Azure/GitHub runner, install it dynamically
+if ! modinfo mac80211_hwsim >/dev/null 2>&1; then
+    warn "mac80211_hwsim not indexed. Attempting to fetch linux-modules-extra..."
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get update -y -qq >/dev/null || true
+    sudo apt-get install -y -qq linux-modules-extra-$(uname -r) iw >/dev/null 2>&1 || sudo apt-get install -y -qq linux-modules-extra-azure iw >/dev/null 2>&1 || true
+    sudo depmod -a >/dev/null 2>&1 || true
+fi
+
+# Load with verbose output to ensure we don't hide critical loading errors
+if sudo modprobe -v mac80211_hwsim radios=2 || lsmod | grep -q mac80211_hwsim; then
+    info "mac80211_hwsim loaded successfully. Waiting for udev..."
+    sleep 3 # Wait for udev and kernel to fully map the virtual radios
+    
+    # Grab the first two wireless interfaces using iw (more reliable than sysfs timing)
+    WLAN_IFACES=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')
+    
+    for iface in $WLAN_IFACES; do
+        if [ -z "$WLAN_SRV" ]; then
+            WLAN_SRV="$iface"
+            # Force DOWN to unhook from host NetworkManager before container injection
+            sudo ip link set "$WLAN_SRV" down 2>/dev/null || true
+        elif [ -z "$WLAN_CLI" ]; then
+            WLAN_CLI="$iface"
+            # Force DOWN to unhook from host NetworkManager before container injection
+            sudo ip link set "$WLAN_CLI" down 2>/dev/null || true
+            break
         fi
     done
     
@@ -134,7 +145,7 @@ if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
         HWSIM_LOADED=true
         info "✓ Virtual radios allocated: $WLAN_SRV (Server), $WLAN_CLI (Client)"
     else
-        warn "mac80211_hwsim loaded but interfaces not found."
+        warn "mac80211_hwsim loaded but interfaces not found (Found: $WLAN_IFACES)."
     fi
 else
     warn "mac80211_hwsim module not available on host. Virtual WiFi tests will be skipped."
@@ -351,9 +362,13 @@ info "✓ IPv4 broadcast chatter silenced"
 if [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability ---"
     
+    # Restart IWD to ensure it registers the newly injected hardware radios
+    m_exec $SERVER systemctl restart iwd
+    m_exec $CLIENT systemctl restart iwd
+    sleep 2
+    
     # 1. Bring up the AP on the Server
     # Note: We rely on rxnm's internal auto-detection rather than passing exact interface strings,
-    # as systemd-nspawn abstracts the injected physical link securely.
     m_exec $SERVER rxnm wifi ap start "RXNM_Test_Net" --password "supersecret"
     
     # 2. Wait for simulated beaconing to initialize
