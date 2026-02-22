@@ -243,22 +243,19 @@ cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/"
 mkdir -p "$ROOTFS/usr/local/bin"
 cat <<'EOF' > "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
 #!/bin/bash
-PHY=$(iw phy | awk '/Wiphy/{print "phy"$2}' | head -n1)
-[ -z "$PHY" ] && exit 0
-
-# Wipe all existing named interfaces
-for dev in $(iw dev | awk '$1=="Interface"{print $2}'); do
-    iw dev "$dev" del 2>/dev/null || true
-done
-
-# Wipe any remaining unnamed wdevs (like P2P-device)
-for wdev in $(iw dev | grep -o 'wdev 0x[0-9a-fA-F]*' | awk '{print $2}'); do
+# The host OS (NetworkManager) often automatically attaches a P2P-device to new radios.
+# This consumes the limited capability slots on the virtual PHY, preventing AP mode.
+# We delicately prune ONLY the P2P devices, leaving the primary managed netdev intact.
+iw dev | awk '/wdev 0x/{w=$2} /type P2P-device/{print w}' | while read -r wdev; do
     iw wdev "$wdev" del 2>/dev/null || true
 done
 
-# Recreate a single, clean managed interface
-iw phy "$PHY" interface add wlan0 type managed
-ip link set wlan0 up
+# Ensure the remaining managed interface is brought up cleanly
+WLAN_IFACE=$(iw dev | awk '$1=="Interface"{print $2; exit}')
+if [ -n "$WLAN_IFACE" ]; then
+    ip link set "$WLAN_IFACE" down 2>/dev/null || true
+    ip link set "$WLAN_IFACE" up 2>/dev/null || true
+fi
 EOF
 chmod +x "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
 
