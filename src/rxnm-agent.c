@@ -717,7 +717,7 @@ int dbus_send_method_call(int sock, const char *dest, const char *path, const ch
  * to ensure the next synchronous blocking read hits the exact expected method return.
  */
 static void dbus_drain_socket(int sock) {
-    safe_usleep(2000); /* Yield 2.0ms to allow dbus-broker to flush standard internal responses (NameAcquired etc) */
+    safe_usleep(10000); /* Yield 10.0ms to allow dbus-broker to flush standard internal responses (NameAcquired etc) */
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
     char discard[4096];
@@ -737,7 +737,7 @@ int dbus_trigger_reload() {
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
-                          "Hello", false);
+                          "Hello", true);
                           
     dbus_drain_socket(sock);
     
@@ -949,7 +949,7 @@ int cmd_connect(const char *ssid, const char *iface) {
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
-                          "Hello", false);
+                          "Hello", true);
     
     /* Deterministic drain: discard Hello responses and NameAcquired broadcasts */
     dbus_drain_socket(sock);
