@@ -25,6 +25,9 @@
 
 /* --- DBus Constants --- */
 #define DBUS_MESSAGE_TYPE_METHOD_CALL 1
+#define DBUS_MESSAGE_TYPE_METHOD_RETURN 2
+#define DBUS_MESSAGE_TYPE_ERROR 3
+#define DBUS_MESSAGE_TYPE_SIGNAL 4
 #define DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED 0x1
 
 /* Detect Endianness at Compile Time */
