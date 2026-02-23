@@ -673,14 +673,14 @@ int dbus_connect_system(void) {
 /**
  * @brief Constructs and sends a DBus Method Call using dynamic buffers.
  */
-int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method) {
+int dbus_send_method_call(int sock, const char *dest, const char *path, const char *iface, const char *method, bool expect_reply) {
     dyn_buf_t b = {0};
     
     dbus_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
     hdr.endian = DBUS_ENDIAN_LITTLE;
     hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
-    hdr.flags = DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED; // Will override for calls expecting reply
+    hdr.flags = expect_reply ? 0 : DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED;
     hdr.version = DBUS_PROTOCOL_VERSION;
     
     /* Ensure DBus Serial Number compliance (Unique per connection) */
@@ -737,7 +737,7 @@ int dbus_trigger_reload() {
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
-                          "Hello");
+                          "Hello", false);
                           
     dbus_drain_socket(sock);
     
@@ -746,7 +746,12 @@ int dbus_trigger_reload() {
                           "org.freedesktop.network1", 
                           "/org/freedesktop/network1", 
                           "org.freedesktop.network1.Manager", 
-                          "Reload");
+                          "Reload", true);
+                          
+    // Synchronously wait for MethodReturn to ensure broker dispatched it before we close the socket
+    char reply[4096];
+    recv(sock, reply, sizeof(reply), 0);
+    
     close(sock);
     return 0;
 }
@@ -944,7 +949,7 @@ int cmd_connect(const char *ssid, const char *iface) {
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
-                          "Hello");
+                          "Hello", false);
     
     /* Deterministic drain: discard Hello responses and NameAcquired broadcasts */
     dbus_drain_socket(sock);
@@ -956,8 +961,23 @@ int cmd_connect(const char *ssid, const char *iface) {
         return 1;
     }
     
-    /* Call Connect() on the specific network object path */
-    dbus_send_method_call(sock, "net.connman.iwd", path, "net.connman.iwd.Network", "Connect");
+    /* Call Connect() on the specific network object path and EXPECT reply */
+    dbus_send_method_call(sock, "net.connman.iwd", path, "net.connman.iwd.Network", "Connect", true);
+    
+    /* Wait for MethodReturn or Error. 
+     * If iwd hasn't parsed the inotify PSK file yet, it will return a NoAgent Error.
+     * Returning 1 forces the shell to fall back to the iwctl retry loop, 
+     * elegantly bridging the filesystem sync race condition. */
+    char reply[4096];
+    int len = recv(sock, reply, sizeof(reply), 0);
+    if (len >= (int)sizeof(dbus_header_t)) {
+        dbus_header_t *rh = (dbus_header_t *)reply;
+        if (rh->type == DBUS_MESSAGE_TYPE_ERROR) {
+            printf("{\"success\": false, \"error\": \"IWD rejected connection (Wait for inotify PSK sync)\"}\n");
+            close(sock);
+            return 1;
+        }
+    }
     
     printf("{\"success\": true, \"action\": \"connect\", \"ssid\": \"%s\", \"path\": \"%s\"}\n", ssid, path);
     close(sock);
@@ -1867,7 +1887,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             exit(1);
         }
         
-        /* Mitigation : Protocol-Level Flow Control (Stateless Back-Pressure)
+        /* Mitigation 5.1: Protocol-Level Flow Control (Stateless Back-Pressure)
          * Force WiFi into Power Save Mode to tell the AP to buffer broadcast traffic.
          * This prevents SDIO bus saturation when dropping packets in SKB mode.
          */
@@ -1901,7 +1921,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             // Do not exit fatally on disable; allow partial cleanups to proceed.
         }
         
-        /* Mitigation : The "Atomic Kick"
+        /* Mitigation 5.1: The "Atomic Kick"
          * Reset the driver's RX ring buffer pointers and disable PSM.
          * This instantaneously un-wedges stalled budget SDIO MACs without dropping the carrier.
          */
