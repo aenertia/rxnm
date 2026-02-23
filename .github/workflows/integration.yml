@@ -142,7 +142,16 @@ jobs:
       run: |
         echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw rfkill || true
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill || true
+        
+        # CRITICAL FIX: Always load kernel crypto and 80211 dependencies FIRST.
+        # insmod (used below) does not resolve dependencies automatically like modprobe.
+        # Without these, insmod fails with 'Unknown symbol in module'.
+        for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede \
+                    algif_skcipher algif_hash af_alg cfg80211 mac80211 \
+                    rfkill ccm cbc sha256_generic sha512_generic; do
+          sudo modprobe "$mod" >/dev/null 2>&1 || true
+        done
         
         # Fast path: try native modprobe first
         if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
@@ -150,7 +159,7 @@ jobs:
         else
           echo "Native modprobe failed. Fetching source and compiling out-of-tree..."
           
-          # Map e.g. 6.8.0-101-azure -> 6.8
+          # Map e.g. 6.11.0-1018-azure -> 6.11
           BASE_VER=$(uname -r | cut -d'.' -f1,2)
           mkdir -p /tmp/hwsim && cd /tmp/hwsim
           
@@ -174,13 +183,6 @@ jobs:
               exit 1
           fi
         fi
-
-        # Load IWD crypto module dependencies
-        for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede \
-                    algif_skcipher algif_hash af_alg cfg80211 mac80211 \
-                    rfkill ccm cbc sha256_generic sha512_generic; do
-          sudo modprobe "$mod" >/dev/null 2>&1 || true
-        done
 
         # Block NM from grabbing hwsim interfaces BEFORE they appear
         sudo mkdir -p /etc/NetworkManager/conf.d
