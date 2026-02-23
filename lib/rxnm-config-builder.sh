@@ -296,7 +296,7 @@ build_gateway_config() {
         # Local ULA for IPv6
         printf "Address=fd00:cafe:feed::a7ca:de/64\n"
         
-        printf "DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\n"
+        printf "DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\nEmitRouter=yes\n"
         printf "[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
     else
         # Local Mode: No Forwarding
