@@ -12,7 +12,7 @@ _get_dbus_adapters() {
     if [ "$RXNM_HAS_JQ" = "true" ]; then
         # Query ObjectManager for objects implementing the Adapter1 interface
         busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | \
-        "$JQ_BIN" -r '.data | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key' 2>/dev/null || echo ""
+        "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key' 2>/dev/null || echo ""
     fi
 }
 
@@ -110,7 +110,7 @@ action_bt_scan() {
     local devices
     devices=$(echo "$objects" | "$JQ_BIN" -r '
         [
-            .data | to_entries[] | 
+            .data[0] | to_entries[] | 
             select(.value["org.bluez.Device1"] != null) |
             {
                 mac: .value["org.bluez.Device1"].Address.data,

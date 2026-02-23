@@ -77,7 +77,7 @@ ACTION=""
 # --- ARGUMENT PARSING HELPER ---
 expand_alias() {
     local input="$1"
-    shift
+    [ "$#" -gt 0 ] && shift
     local match=""
 
     [ -z "$input" ] && return 0
@@ -127,7 +127,7 @@ _rs="$(printf '\036')"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --json)    RXNM_FORMAT="json"; shift ;;
+        --json)    RXNM_FORMAT="json"; [ "$#" -gt 0 ] && shift ;;
         --format)
             if [ "$#" -gt 1 ] && case "$2" in --*) false ;; *) true ;; esac; then
                 RXNM_FORMAT="$2"
@@ -137,7 +137,7 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             ;;
-        --simple)  RXNM_FORMAT="simple"; shift ;;
+        --simple)  RXNM_FORMAT="simple"; [ "$#" -gt 0 ] && shift ;;
         --get)
             RXNM_FORMAT="simple"
             if [ "$#" -gt 1 ] && case "$2" in --*) false ;; *) true ;; esac; then
@@ -148,10 +148,10 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             ;;
-        --yes|-y|--force) FORCE_ACTION="true"; shift ;;
-        --debug)   export RXNM_DEBUG=1; shift ;; # Delay set -x until after arg parsing
-        --help|-h) SHOW_HELP="true"; shift ;;
-        --stdin)   USE_STDIN="true"; shift ;;
+        --yes|-y|--force) FORCE_ACTION="true"; [ "$#" -gt 0 ] && shift ;;
+        --debug)   export RXNM_DEBUG=1; [ "$#" -gt 0 ] && shift ;; # Delay set -x until after arg parsing
+        --help|-h) SHOW_HELP="true"; [ "$#" -gt 0 ] && shift ;;
+        --stdin)   USE_STDIN="true"; [ "$#" -gt 0 ] && shift ;;
         --version) printf 'RXNM %s (API %s)\n' \
                            "${RXNM_VERSION:-1.1.0}" "${RXNM_API_VERSION:-1.1}"
                        exit 0 ;;
@@ -162,7 +162,7 @@ while [ "$#" -gt 0 ]; do
                 # Use standard variable concatenation instead of ANSI-C quoting
                 _accumulated_args="${_accumulated_args}${_rs}${1}"
             fi
-            shift
+            [ "$#" -gt 0 ] && shift
             ;;
     esac
 done
@@ -307,7 +307,7 @@ esac
 # 1. Plugin Dispatch
 PLUGIN_EXEC=$(find_plugin "$CATEGORY" || true)
 if [ -n "$PLUGIN_EXEC" ]; then
-    shift
+    [ "$#" -gt 0 ] && shift
     if [ "$SHOW_HELP" = "true" ]; then
         exec_plugin "$PLUGIN_EXEC" "--help"
         exit 0
@@ -338,7 +338,7 @@ if [ "$IS_VALID_CAT" = "false" ]; then
     json_error "Unknown command or category: $RAW_CMD" "1" "Try 'rxnm --help'"
     exit 1
 else
-    shift
+    [ "$#" -gt 0 ] && shift
 fi
 
 if [ "$SHOW_HELP" = "true" ]; then
@@ -483,27 +483,27 @@ case "$CATEGORY" in
             connect)
                 SSID="${1:-}"
                 if [ -n "$SSID" ]; then
-                    case "$SSID" in --*) SSID="" ;; *) shift ;; esac
+                    case "$SSID" in --*) SSID="" ;; *) [ "$#" -gt 0 ] && shift ;; esac
                 fi
                 PASS="${1:-}"
                 if [ -n "$PASS" ]; then
-                    case "$PASS" in --*) PASS="" ;; *) shift ;; esac
+                    case "$PASS" in --*) PASS="" ;; *) [ "$#" -gt 0 ] && shift ;; esac
                 fi
                 HIDDEN="false"
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
-                        --ssid) SSID="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --password) PASS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --password-stdin) PASS=$(cat); shift ;;
-                        --hidden) HIDDEN="true"; shift ;;
-                        --interface) ARG_IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        *) shift ;;
+                        --ssid) SSID="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --password) PASS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --password-stdin) PASS=$(cat); [ "$#" -gt 0 ] && shift ;;
+                        --hidden) HIDDEN="true"; [ "$#" -gt 0 ] && shift ;;
+                        --interface) ARG_IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        *) [ "$#" -gt 0 ] && shift ;;
                     esac
                 done
                 action_connect "$SSID" "$PASS" "$ARG_IFACE" "$HIDDEN"
                 ;;
             disconnect)
-                 while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; *) shift ;; esac; done
+                 while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                 action_disconnect "$ARG_IFACE"
                 ;;
             ap)
@@ -511,35 +511,35 @@ case "$CATEGORY" in
                 if [ "$SUBCMD" = "start" ]; then
                     SSID="${1:-}"
                     if [ -n "$SSID" ]; then
-                        case "$SSID" in --*) SSID="" ;; *) shift ;; esac
+                        case "$SSID" in --*) SSID="" ;; *) [ "$#" -gt 0 ] && shift ;; esac
                     fi
                     PASS="${1:-}"
                     if [ -n "$PASS" ]; then
-                        case "$PASS" in --*) PASS="" ;; *) shift ;; esac
+                        case "$PASS" in --*) PASS="" ;; *) [ "$#" -gt 0 ] && shift ;; esac
                     fi
                     MODE="ap"; SHARE="false"; IP=""; IPV6_PD="yes"
                      while [ "$#" -gt 0 ]; do
                         case "$1" in
-                            --ssid) SSID="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --password) PASS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --mode) MODE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --share) SHARE="true"; shift ;;
-                            --ip) IP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --interface) ARG_IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --ipv6-pd) IPV6_PD="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            *) shift ;;
+                            --ssid) SSID="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --password) PASS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --mode) MODE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --share) SHARE="true"; [ "$#" -gt 0 ] && shift ;;
+                            --ip) IP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --interface) ARG_IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --ipv6-pd) IPV6_PD="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            *) [ "$#" -gt 0 ] && shift ;;
                         esac
                     done
                     action_host "$ARG_IFACE" "$IP" "$SHARE" "$MODE" "$SSID" "$PASS" "" "$IPV6_PD"
                 elif [ "$SUBCMD" = "stop" ]; then
-                    while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; *) shift ;; esac; done
+                    while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                     action_client "$ARG_IFACE"
                 fi
                 ;;
             wps) action_wps "$ARG_IFACE" ;;
             networks|list) action_list_known_networks ;;
             forget)
-                 SSID="${1:-}"; [ -n "$SSID" ] && shift
+                 SSID="${1:-}"; [ -n "$SSID" ] && [ "$#" -gt 0 ] && shift
                  confirm_action "Forget network '$SSID'?" "$FORCE_ACTION"
                  action_forget "$SSID"
                  ;;
@@ -592,7 +592,7 @@ case "$CATEGORY" in
             if [ "$#" -gt 0 ]; then
                 case "$1" in
                     --*) ;;
-                    *) TARGET="$1"; shift ;;
+                    *) TARGET="$1"; [ "$#" -gt 0 ] && shift ;;
                 esac
             fi
         else
@@ -602,7 +602,7 @@ case "$CATEGORY" in
             # Identify action or default safely without evaluating empty args
             if [ "$#" -gt 0 ] && case "$1" in --*) false ;; *) true ;; esac; then
                 ACTION_RAW="$1"
-                shift
+                [ "$#" -gt 0 ] && shift
             else
                 ACTION_RAW="status"
             fi
@@ -636,14 +636,14 @@ case "$CATEGORY" in
                      SPEED=""; DUPLEX=""; AUTONEG=""; WOL=""; MACPOL=""; NAMEPOL=""; MAC=""
                      while [ "$#" -gt 0 ]; do
                         case "$1" in
-                            --speed) SPEED="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --duplex) DUPLEX="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --autoneg) AUTONEG="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --wol) WOL="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --mac-policy) MACPOL="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --name-policy) NAMEPOL="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --mac) MAC="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            *) shift ;;
+                            --speed) SPEED="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --duplex) DUPLEX="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --autoneg) AUTONEG="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --wol) WOL="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --mac-policy) MACPOL="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --name-policy) NAMEPOL="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --mac) MAC="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            *) [ "$#" -gt 0 ] && shift ;;
                         esac
                      done
                      action_set_hardware "$TARGET" "$SPEED" "$DUPLEX" "$AUTONEG" "$WOL" "$MACPOL" "$NAMEPOL" "$MAC"
@@ -655,16 +655,16 @@ case "$CATEGORY" in
                          ROUTES=""; DNS=""; DOMAINS=""
                          while [ "$#" -gt 0 ]; do
                             case "$1" in 
-                                --metric) METRIC="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; 
-                                --mtu) MTU="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --mac) MAC="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --ipv6-privacy) IPV6_PRIV="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --dhcp-id) DHCP_ID="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --ipv6-pd) IPV6_PD="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --routes) ROUTES="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --dns) DNS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --domains) DOMAINS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                *) shift ;; 
+                                --metric) METRIC="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;; 
+                                --mtu) MTU="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --mac) MAC="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --ipv6-privacy) IPV6_PRIV="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --dhcp-id) DHCP_ID="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --ipv6-pd) IPV6_PD="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --routes) ROUTES="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --dns) DNS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --domains) DOMAINS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                *) [ "$#" -gt 0 ] && shift ;; 
                             esac
                         done
                          action_set_dhcp "$TARGET" "" "$DNS" "$DOMAINS" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID" "$IPV6_PD"
@@ -674,17 +674,17 @@ case "$CATEGORY" in
                          GW=""; DNS=""; ROUTES=""; DOMAINS=""
                          while [ "$#" -gt 0 ]; do
                             case "$1" in
-                                --ip) IP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --gateway) GW="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --dns) DNS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --domains) DOMAINS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --metric) METRIC="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --mtu) MTU="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --mac) MAC="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --ipv6-privacy) IPV6_PRIV="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --dhcp-id) DHCP_ID="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --routes) ROUTES="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                *) shift ;;
+                                --ip) IP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --gateway) GW="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --dns) DNS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --domains) DOMAINS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --metric) METRIC="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --mtu) MTU="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --mac) MAC="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --ipv6-privacy) IPV6_PRIV="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --dhcp-id) DHCP_ID="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --routes) ROUTES="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                *) [ "$#" -gt 0 ] && shift ;;
                             esac
                         done
                          action_set_static "$TARGET" "$IP" "$GW" "$DNS" "" "$DOMAINS" "$ROUTES" "yes" "yes" "$METRIC" "$MTU" "$MAC" "$IPV6_PRIV" "$DHCP_ID"
@@ -717,11 +717,11 @@ case "$CATEGORY" in
                     HTTP=""; HTTPS=""; NO=""; IFACE=""
                     while [ "$#" -gt 0 ]; do
                         case "$1" in
-                            --http) HTTP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --https) HTTPS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --noproxy) NO="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --interface) IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            *) shift ;;
+                            --http) HTTP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --https) HTTPS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --noproxy) NO="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --interface) IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            *) [ "$#" -gt 0 ] && shift ;;
                         esac
                     done
                     action_set_proxy "$IFACE" "$HTTP" "$HTTPS" "$NO"
@@ -752,10 +752,10 @@ case "$CATEGORY" in
                     enable)
                         while [ "$#" -gt 0 ]; do
                             case "$1" in
-                                --mode) MODE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                --share) SHARE="true"; shift ;;
-                                --ip) IP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                                *) shift ;;
+                                --mode) MODE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                --share) SHARE="true"; [ "$#" -gt 0 ] && shift ;;
+                                --ip) IP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                                *) [ "$#" -gt 0 ] && shift ;;
                             esac
                         done
                         action_pan_net "enable" "" "" "$IP" "$MODE" "$SHARE"
@@ -799,7 +799,7 @@ case "$CATEGORY" in
                 if [ "$ACTION" = "add-member" ]; then
                      IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      BRIDGE=""
-                     while [ "$#" -gt 0 ]; do case "$1" in --bridge) BRIDGE="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+                     while [ "$#" -gt 0 ]; do case "$1" in --bridge) BRIDGE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                      action_set_member "$IFACE" "$BRIDGE"
                 fi
                 ;;
@@ -808,20 +808,20 @@ case "$CATEGORY" in
                 if [ "$ACTION" = "add-slave" ]; then
                      IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      BOND=""
-                     while [ "$#" -gt 0 ]; do case "$1" in --bond) BOND="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+                     while [ "$#" -gt 0 ]; do case "$1" in --bond) BOND="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                      action_set_bond_slave "$IFACE" "$BOND"
                 fi
                 ;;
             vrf)
                 if [ "$ACTION" = "create" ]; then
                      TABLE=""
-                     while [ "$#" -gt 0 ]; do case "$1" in --table) TABLE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; *) shift ;; esac; done
+                     while [ "$#" -gt 0 ]; do case "$1" in --table) TABLE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                      action_create_vrf "$NAME" "$TABLE"
                 fi
                 if [ "$ACTION" = "add-member" ]; then
                      IFACE="${1:-}"; if [ -z "$IFACE" ] || [ "${IFACE#--}" != "$IFACE" ]; then IFACE="$NAME"; fi
                      VRF=""
-                     while [ "$#" -gt 0 ]; do case "$1" in --vrf) VRF="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+                     while [ "$#" -gt 0 ]; do case "$1" in --vrf) VRF="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                      action_set_vrf_member "$IFACE" "$VRF"
                 fi
                 ;;
@@ -830,9 +830,9 @@ case "$CATEGORY" in
                      PARENT=""; ID=""
                      while [ "$#" -gt 0 ]; do
                         case "$1" in 
-                            --parent) PARENT="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --id) ID="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            *) shift ;;
+                            --parent) PARENT="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --id) ID="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            *) [ "$#" -gt 0 ] && shift ;;
                         esac
                      done
                      [ -z "$PARENT" ] && { json_error "Parent required (--parent)"; exit 1; }
@@ -845,9 +845,9 @@ case "$CATEGORY" in
                      PARENT=""; MODE="bridge"
                      while [ "$#" -gt 0 ]; do
                         case "$1" in
-                            --parent) PARENT="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            --mode) MODE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                            *) shift ;;
+                            --parent) PARENT="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            --mode) MODE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                            *) [ "$#" -gt 0 ] && shift ;;
                         esac
                      done
                      action_create_macvlan "$NAME" "$PARENT" "$MODE"
@@ -858,37 +858,37 @@ case "$CATEGORY" in
 
     vpn|tun|tap)
         if [ "$CATEGORY" = "tun" ] || [ "$CATEGORY" = "tap" ]; then
-             KIND="$CATEGORY"; ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) shift ;; esac; USER=""; GROUP=""
+             KIND="$CATEGORY"; ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) [ "$#" -gt 0 ] && shift ;; esac; USER=""; GROUP=""
              if [ "$ACTION" = "delete" ]; then action_delete_vpn "$NAME"; exit 0; fi
              if [ "$ACTION" = "list" ]; then action_status ""; exit 0; fi
-             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; --group) GROUP="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; --group) GROUP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
              [ "$KIND" = "tun" ] && action_create_tun "$NAME" "$USER" "$GROUP"
              [ "$KIND" = "tap" ] && action_create_tap "$NAME" "$USER" "$GROUP"
              exit 0
         fi
         if [ "$1" = "tun" ] || [ "$1" = "tap" ]; then
-             KIND="$1"; [ "$#" -gt 0 ] && shift; ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) shift ;; esac; USER=""; GROUP=""
+             KIND="$1"; [ "$#" -gt 0 ] && shift; ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) [ "$#" -gt 0 ] && shift ;; esac; USER=""; GROUP=""
              if [ "$ACTION" = "delete" ]; then action_delete_vpn "$NAME"; exit 0; fi
              if [ "$ACTION" = "list" ]; then action_status ""; exit 0; fi
-             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; --group) GROUP="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+             while [ "$#" -gt 0 ]; do case "$1" in --user) USER="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; --group) GROUP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
              [ "$KIND" = "tun" ] && action_create_tun "$NAME" "$USER" "$GROUP"
              [ "$KIND" = "tap" ] && action_create_tap "$NAME" "$USER" "$GROUP"
              exit 0
         fi
         if [ "$1" = "wireguard" ]; then [ "$#" -gt 0 ] && shift; fi
-        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) shift ;; esac
+        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) [ "$#" -gt 0 ] && shift ;; esac
         if [ "$ACTION" = "list" ]; then action_status ""; exit 0; fi
         case "$ACTION" in
             connect)
                 PRIV=""; PEER=""; ENDP=""; IPS=""; IP=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
-                        --private-key) PRIV="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --peer-key) PEER="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --endpoint) ENDP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --allowed-ips) IPS="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        --address) IP="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                        *) shift ;;
+                        --private-key) PRIV="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --peer-key) PEER="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --endpoint) ENDP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --allowed-ips) IPS="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        --address) IP="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                        *) [ "$#" -gt 0 ] && shift ;;
                     esac
                 done
                 action_connect_wireguard "$NAME" "$PRIV" "$PEER" "$ENDP" "$IPS" "$IP" ""
@@ -898,13 +898,13 @@ case "$CATEGORY" in
         ;;
 
     profile)
-        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) shift ;; esac
+        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) [ "$#" -gt 0 ] && shift ;; esac
         IFACE=""; FILE=""
         while [ "$#" -gt 0 ]; do
              case "$1" in 
-                 --interface) IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; 
-                 --file) FILE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;;
-                 *) shift ;; 
+                 --interface) IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;; 
+                 --file) FILE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift ;;
+                 *) [ "$#" -gt 0 ] && shift ;; 
              esac
         done
         if [ "$ACTION" = "import" ] && [ -z "$FILE" ] && [ -f "$NAME" ]; then FILE="$NAME"; fi
@@ -912,18 +912,18 @@ case "$CATEGORY" in
         ;;
     
     service)
-        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) shift ;; esac
+        ACTION="${1:-list}"; [ "$#" -gt 0 ] && shift; NAME="${1:-}"; [ "$#" -gt 0 ] && case "$NAME" in --*) NAME="";; *) [ "$#" -gt 0 ] && shift ;; esac
         case "$ACTION" in
             create) action_service_create "$NAME" ;;
             delete) action_service_delete "$NAME" ;;
             list) action_service_list ;;
             attach)
-                IFACE=""; while [ "$#" -gt 0 ]; do case "$1" in --interface) IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+                IFACE=""; while [ "$#" -gt 0 ]; do case "$1" in --interface) IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                 [ -z "$IFACE" ] && { IFACE="$NAME"; NAME=""; }
                 action_service_attach "$NAME" "$IFACE"
                 ;;
             detach)
-                IFACE=""; while [ "$#" -gt 0 ]; do case "$1" in --interface) IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift;; *) shift ;; esac; done
+                IFACE=""; while [ "$#" -gt 0 ]; do case "$1" in --interface) IFACE="${2:-}"; [ "$#" -gt 0 ] && shift; [ "$#" -gt 0 ] && shift;; *) [ "$#" -gt 0 ] && shift ;; esac; done
                 [ -z "$IFACE" ] && { IFACE="$NAME"; NAME=""; }
                 action_service_detach "$NAME" "$IFACE"
                 ;;

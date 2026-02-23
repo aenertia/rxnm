@@ -117,7 +117,7 @@ action_status_legacy() {
     
     local iwd_json="{}"
     if is_service_active "iwd"; then
-        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data // {}' || echo "{}")
+        iwd_json=$(busctl --timeout=3s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | "$JQ_BIN" -r '.data[0] // {}' || echo "{}")
     fi
     
     local legacy_wifi_json="{}"
