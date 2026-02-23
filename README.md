@@ -122,6 +122,39 @@ How `rxnm` translates from traditional Linux networking tools.
 | **Internet Check** | `rxnm system check internet` | `nmcli networking connectivity` | *(None)* | `ping -c 1 8.8.8.8` | 
 | **Power Silence** | `rxnm system nullify enable` | *(None)* | *(None)* | *(Requires custom XDP/eBPF code)* | 
 
+## ⚙️ Advanced Internals & Environment Variables
+
+RXNM utilizes a dynamic "Hybrid" architecture that routes execution logic based on the host environment and specific feature flags. These behaviors can be overridden via environment variables for debugging, integration testing, or running in heavily constrained environments (like initramfs).
+
+### The "Intelligent Shell Upgrade" (Hidden Behavior)
+By default, RXNM is completely POSIX compliant and can run under `ash` or `dash`. However, on boot, if RXNM detects it was invoked by a basic `/bin/sh` shell but sees `/bin/bash` available on the system, it will implicitly execute an **`exec bash "$0" "$@"`** upgrade. 
+This unlocks Bash-specific performance optimizations (like associative arrays to cache `sysfs` data and native regular expressions) transparently to the user.
+
+### Execution Path Forcing
+
+You can force RXNM to degrade into different architectural fallback states:
+
+| Environment Variable | Behavior / Effect | Use Case |
+| -------------------- | ----------------- | -------- |
+| `RXNM_NO_REEXEC=1` | Disables the automatic Bash upgrade, forcing the script to run in strict POSIX mode (`dash`/`ash`). | Testing Busybox compatibility; Initramfs execution. |
+| `RXNM_AGENT_BIN=/nonexistent` | Points RXNM away from the native C-Accelerator, forcing it to fall back to executing shell logic and system tools (`jq`, `ip`, `busctl`). | Testing the legacy path; running on an architecture where the C binary wasn't compiled. |
+| `RXNM_FORCE_NETWORKCTL=true` | Forces RXNM to use `networkctl reload` via the shell instead of the Agent's raw D-Bus wire protocol when committing state changes. | Running inside `systemd-nspawn` where `dbus-broker` rejects raw, untyped socket connections. |
+
+**Example: The Lowest Common Denominator Test:**
+To test how RXNM behaves in an absolute bare-bones environment (No Bash, No C-Agent):
+```bash
+RXNM_NO_REEXEC=1 RXNM_AGENT_BIN=/nonexistent rxnm system status
+```
+
+### Feature Flags & Tuning
+
+| Environment Variable | Behavior / Effect |
+| -------------------- | ----------------- |
+| `RXNM_EXPERIMENTAL=true` | Unlocks bleeding-edge "Service Oriented Architecture" features (Namespaces, Tunnels, MPLS routing stubs). If false, these return a 501 Not Implemented API error. |
+| `RXNM_DEBUG=1` | Enables verbose `set -x` shell tracing. *Warning: May leak WiFi passwords or VPN keys to `stderr`.* |
+| `RXNM_DBUS_TIMEOUT_MS=<int>` | Overrides the C-Agent's hardcoded 5000ms D-Bus socket timeout. |
+| `FORCE_FW_TOOL=<iptables|nft|none>`| Bypasses auto-detection and forces a specific firewall backend for Hotspot NAT/Masquerading. |
+
 ## 📖 Documentation & Usage Examples
 
 This section provides a definitive reference for all RXNM capabilities.
