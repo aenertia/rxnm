@@ -105,6 +105,9 @@ jobs:
         sudo sysctl -w net.ipv4.ip_forward=1
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
+    - name: Build RXNM Agent
+      run: make tiny
+
     - name: Run Integration Tests
       run: |
         echo "=== PHASE 4: Standard Integration Tests (Wired) ==="
@@ -202,6 +205,9 @@ jobs:
         
         sudo sysctl -w net.ipv4.ip_forward=1
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+    - name: Build RXNM Agent
+      run: make tiny
 
     - name: Run Integration Tests
       run: |
