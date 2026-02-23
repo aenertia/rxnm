@@ -138,41 +138,41 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Load Virtual WiFi (mac80211_hwsim)
+    - name: Compile and Load Virtual WiFi (mac80211_hwsim)
       run: |
         echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
+        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw rfkill || true
         
         # Fast path: try native modprobe first
         if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
           echo "HWSIM_METHOD=modprobe" >> $GITHUB_ENV
         else
-          # Extract pre-built .ko from the generic kernel package
-          # This is version-matched by apt and takes ~30s, no toolchain needed
-          GENERIC_EXTRA=$(apt-cache depends linux-image-generic | grep -o 'linux-modules-extra-[0-9.-]*generic' | head -1)
+          echo "Native modprobe failed. Fetching source and compiling out-of-tree..."
           
-          if [ -z "$GENERIC_EXTRA" ]; then
-            echo "Failed to find linux-modules-extra dependency from apt-cache!"
-            exit 1
+          # Map e.g. 6.8.0-101-azure -> 6.8
+          BASE_VER=$(uname -r | cut -d'.' -f1,2)
+          mkdir -p /tmp/hwsim && cd /tmp/hwsim
+          
+          URL_BASE="https://raw.githubusercontent.com/torvalds/linux/v${BASE_VER}/drivers/net/wireless"
+          
+          # Try modern path first, then fallback to older pre-virtualization location
+          wget -q "$URL_BASE/virtual/mac80211_hwsim.c" -O mac80211_hwsim.c || \
+          wget -q "$URL_BASE/mac80211_hwsim.c" -O mac80211_hwsim.c
+          
+          # Grab header if it exists in this tree version
+          wget -q "$URL_BASE/virtual/mac80211_hwsim.h" -O mac80211_hwsim.h || \
+          wget -q "$URL_BASE/mac80211_hwsim.h" -O mac80211_hwsim.h || true
+          
+          if [ -s mac80211_hwsim.c ]; then
+              echo "obj-m += mac80211_hwsim.o" > Makefile
+              sudo make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
+              sudo insmod ./mac80211_hwsim.ko radios=2
+              echo "HWSIM_METHOD=compiled" >> $GITHUB_ENV
+          else
+              echo "ERROR: Failed to fetch mac80211_hwsim.c for v${BASE_VER}"
+              exit 1
           fi
-          
-          echo "Found dependency: $GENERIC_EXTRA"
-          sudo apt-get install -y --no-install-recommends $GENERIC_EXTRA zstd xz-utils
-          
-          # Extract the exact version string (e.g., 6.8.0-45-generic) to locate the .ko
-          GENERIC_VER=${GENERIC_EXTRA#linux-modules-extra-}
-          
-          HWSIM_KO=$(find /lib/modules/${GENERIC_VER} -name 'mac80211_hwsim.ko*' | head -1)
-          [ -z "$HWSIM_KO" ] && { echo "hwsim .ko not found in $GENERIC_EXTRA"; exit 1; }
-          
-          # Decompress if needed (.zst or .xz on newer Ubuntu)
-          case "$HWSIM_KO" in
-            *.zst) zstd -d "$HWSIM_KO" -o /tmp/mac80211_hwsim.ko ;;
-            *.xz)  xz -d -k "$HWSIM_KO" -c > /tmp/mac80211_hwsim.ko ;;
-            *)     cp "$HWSIM_KO" /tmp/mac80211_hwsim.ko ;;
-          esac
-          sudo insmod /tmp/mac80211_hwsim.ko radios=2
-          echo "HWSIM_METHOD=extracted_ko" >> $GITHUB_ENV
         fi
 
         # Load IWD crypto module dependencies
