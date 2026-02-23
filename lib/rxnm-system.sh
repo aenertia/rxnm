@@ -252,6 +252,7 @@ reconfigure_iface() {
     fix_permissions
     
     # 1. Enforce Synchronization Barrier (Flaw B Mitigation)
+    # reload: re-reads all .network/.netdev files from disk (affects all interfaces)
     if [ "${RXNM_FORCE_NETWORKCTL:-false}" != "true" ] && [ -x "$RXNM_AGENT_BIN" ]; then
         "$RXNM_AGENT_BIN" --reload >/dev/null 2>&1
     elif is_service_active "systemd-networkd"; then
@@ -259,6 +260,8 @@ reconfigure_iface() {
     fi
     
     # 2. Apply State to Interface
+    # reconfigure: forces re-evaluation of this specific interface against new config
+    # Both are needed: reload alone won't re-apply to an already-configured interface.
     if is_service_active "systemd-networkd" && [ -n "$iface" ]; then
         timeout 5s networkctl reconfigure "$iface" >/dev/null 2>&1
     fi

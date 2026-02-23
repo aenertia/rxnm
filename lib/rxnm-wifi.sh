@@ -115,6 +115,11 @@ ensure_interface_active() {
 
 # --- Host Mode Tasks (AP/AdHoc) ---
 
+# -----------------------------------------------------------------------------
+# INTERNAL TASK: _task_host_mode
+# CONTRACT: (iface, ip, use_share, mode, ssid, pass, channel, ipv6_pd)
+# Canonical mapping strictly enforced to align with public action_host.
+# -----------------------------------------------------------------------------
 _task_host_mode() {
     local iface="$1" ip="$2" use_share="$3" mode="$4" ssid="$5" pass="$6" channel="$7" ipv6_pd="${8:-yes}"
     
@@ -721,8 +726,13 @@ action_disconnect() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# PUBLIC ACTION: action_host
+# CONTRACT: (iface, ip, share, mode, ssid, pass, channel, ipv6_pd)
+# Canonical signature mirroring the dispatcher to prevent positional drift.
+# -----------------------------------------------------------------------------
 action_host() {
-    local ssid="$1" pass="$2" mode="${3:-ap}" share="$4" ip="$5" iface="$6" channel="$7" ipv6_pd="${8:-yes}"
+    local iface="$1" ip="$2" share="$3" mode="${4:-ap}" ssid="$5" pass="$6" channel="$7" ipv6_pd="${8:-yes}"
     [ -z "$ssid" ] && return 0
     [ -z "$iface" ] && iface=$(get_wifi_iface || echo "")
     
@@ -731,7 +741,7 @@ action_host() {
     
     local use_share="false"
     [ "$mode" = "ap" ] && use_share="true"
-    [ -n "$share" ] && use_share="$share"
+    [ -n "$share" ] && [ "$share" = "true" ] && use_share="true"
     
     local safe_ssid; safe_ssid=$(json_escape "$ssid")
     

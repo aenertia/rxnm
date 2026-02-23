@@ -58,5 +58,14 @@ else
     echo "Skipping IP check (no system IPs found)"
 fi
 
+# 6. Experimental Module Syntax Guard
+echo "Testing experimental modules syntax..."
+for mod in rxnm-pppoe rxnm-mpls rxnm-tunnel; do
+    RXNM_SHELL_IS_BASH=true RXNM_AGENT_BIN=/nonexistent \
+        bash -c ". ./lib/${mod}.sh && echo OK > /dev/null" \
+        || { fail "Syntax error sourcing $mod"; exit 1; }
+done
+pass "Experimental modules parsed successfully"
+
 echo "--- All Phase 2 Tests Passed ---"
 exit 0

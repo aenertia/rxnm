@@ -7,95 +7,18 @@ on:
     branches: [ "main", "master", "v1.1.0" ]
 
 jobs:
-  test:
-    name: Systemd Nspawn Suite
+  unit-and-posix:
+    name: "Unit Tests & POSIX Compat"
     runs-on: ubuntu-24.04
     
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Compile and Load Virtual WiFi (mac80211_hwsim)
+    - name: Install Dependencies
       run: |
-        echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
-        
-        # We need the extra modules for cfg80211 and mac80211 base dependencies, plus rfkill for the host
-        sudo apt-get install -y linux-headers-$(uname -r) linux-modules-extra-$(uname -r) build-essential iw wget xz-utils rfkill || true
-        
-        # Cloud kernels (Azure/AWS) strip the hwsim module. We compile it out-of-tree natively.
-        KERNEL_VER=$(uname -r | cut -d'-' -f1)
-        TAR_VER=$(echo $KERNEL_VER | sed 's/\.0$//')
-        MAJOR_VER=$(echo $KERNEL_VER | cut -d'.' -f1)
-        
-        echo "Fetching Linux $TAR_VER source..."
-        wget -qO linux.tar.xz https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VER}.x/linux-${TAR_VER}.tar.xz || \
-        wget -qO linux.tar.xz https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VER}.x/linux-${KERNEL_VER}.tar.xz
-        
-        echo "Extracting mac80211_hwsim files..."
-        # Use --no-anchored to aggressively find these files regardless of their exact path in the kernel tree
-        tar -xf linux.tar.xz --wildcards --no-anchored 'mac80211_hwsim.c' 'mac80211_hwsim.h' || true
-        
-        mkdir -p hwsim_build
-        find . -type f -name "mac80211_hwsim.[ch]" -exec cp {} hwsim_build/ \;
-        
-        cd hwsim_build
-        if [ -f "mac80211_hwsim.c" ]; then
-            echo "obj-m += mac80211_hwsim.o" > Makefile
-            echo "Compiling module against running headers..."
-            sudo make -C /lib/modules/$(uname -r)/build M=$(pwd) modules || true
-            
-            echo "Loading dependencies and module..."
-            sudo depmod -a || true
-            
-            # CRITICAL: Load all kernel crypto modules required by IWD via AF_ALG. 
-            # Cloud kernels often omit auto-loading these, causing IWD to crash inside the container.
-            # We redirect stderr to dev/null because some cloud kernels compile these natively (=y) instead of as modules.
-            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
-                sudo modprobe $mod >/dev/null 2>&1 || true
-            done
-            
-            # --- BLACKLIST HOST INTERFERENCE ---
-            # Prevent the host OS NetworkManager/wpa_supplicant from touching our simulated radios
-            # and spawning unwanted ghost P2P interfaces before nspawn consumes them.
-            echo "Masking host wpa_supplicant and blacklisting hwsim driver in NetworkManager..."
-            sudo mkdir -p /etc/NetworkManager/conf.d
-            echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
-            sudo systemctl reload NetworkManager || true
-            sudo systemctl stop wpa_supplicant || true
-            sudo systemctl mask wpa_supplicant || true
-            
-            sudo insmod ./mac80211_hwsim.ko radios=2 || echo "Failed to load custom module"
-        else
-            echo "Failed to extract source files. Archive may be missing or path changed."
-        fi
-        
-        # Ensure Host RFKill isn't blocking our virtual radios
-        sudo rfkill unblock all || true
-        
-        lsmod | grep mac80211_hwsim || true
-        iw dev || true
-
-    - name: Prepare Host Environment
-      run: |
-        # Install systemd-container for machinectl/nspawn and bridge-utils for networking
-        sudo apt-get install -y systemd-container bridge-utils dbus-user-session shellcheck valgrind
-        
-        # --- CI HARDENING FIXES ---
-        # 1. Disable AppArmor: It blocks nspawn mounts in nested environments
-        if systemctl is-active --quiet apparmor; then
-            sudo systemctl stop apparmor
-            sudo systemctl disable apparmor
-        fi
-        
-        # 2. Enable IP Forwarding for the bridge
-        sudo sysctl -w net.ipv4.ip_forward=1
-        sudo sysctl -w net.ipv6.conf.all.forwarding=1
-        
-        # 3. Ensure Cgroup delegation is clean
-        # (GitHub runners use cgroup v2, which is good, but nspawn needs delegation)
-        sudo mkdir -p /sys/fs/cgroup/systemd
-        sudo mount -t cgroup -o none,name=systemd cgroup /sys/fs/cgroup/systemd || true
+        sudo apt-get install -y dash shellcheck valgrind jq
 
     - name: Build & Unit Tests
       run: |
@@ -111,15 +34,10 @@ jobs:
 
     - name: "Path B: POSIX/dash compatibility"
       run: |
-        sudo apt-get install -y dash
-
         echo "=== Step 1: dash -n syntax check on lib/*.sh ==="
         FAIL=0
         for f in lib/*.sh; do
           # rxnm-config-schema.sh uses Bash-only syntax below its POSIX guard.
-          # 'dash -n' does not execute the guard's 'return 0', so it would fail
-          # on the declare -A syntax below it. Exclude it here — it is covered
-          # by shellcheck --shell=bash in the shellcheck step.
           case "$f" in lib/rxnm-config-schema.sh) continue ;; esac
           if ! dash -n "$f"; then
             echo "POSIX FAIL [dash -n]: $f"
@@ -136,7 +54,6 @@ jobs:
         [ "$FAIL" -eq 0 ] || { echo "dash -n check failed"; exit 1; }
 
         echo "=== Step 2: shellcheck strict POSIX on key lib files ==="
-        # SC3043: 'local' is not POSIX but is universally supported by ash/dash
         shellcheck --shell=sh --exclude=SC3043 \
           lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
           lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
@@ -162,26 +79,146 @@ jobs:
             echo "POSIX source all: OK"
           ' || exit 1
 
+  integration-wired:
+    name: "Integration: Wired & Bridge"
+    runs-on: ubuntu-24.04
+    needs: unit-and-posix
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Prepare Host Environment
+      run: |
+        # Install systemd-container for machinectl/nspawn and bridge-utils for networking
+        sudo apt-get update
+        sudo apt-get install -y systemd-container bridge-utils dbus-user-session jq
+        
+        # --- CI HARDENING FIXES ---
+        # 1. Disable AppArmor: It blocks nspawn mounts in nested environments
+        if systemctl is-active --quiet apparmor; then
+            sudo systemctl stop apparmor
+            sudo systemctl disable apparmor
+        fi
+        
+        # 2. Enable IP Forwarding for the bridge
+        sudo sysctl -w net.ipv4.ip_forward=1
+        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
     - name: Run Integration Tests
       run: |
-        echo "=== PHASE 4: Standard Integration Tests (Systemd-Nspawn) ==="
-        # Run with sudo as creating network bridges/machines requires privileges
+        echo "=== PHASE 4: Standard Integration Tests (Wired) ==="
         sudo chmod +x tests/integration/run_interop.sh
-        sudo ./tests/integration/run_interop.sh
+        sudo ./tests/integration/run_interop.sh --skip-wifi
 
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
-        echo "=== PHASE 5: ROCKNIX Bundle Integration Tests (Systemd-Nspawn) ==="
-        # Build the minimal deployment bundle first
+        echo "=== PHASE 5: ROCKNIX Bundle Integration Tests (Wired) ==="
         make rocknix-release
-        
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        sudo ./tests/integration/run_rocknix_interop.sh
+        sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
 
     - name: Run Full Combined Bundle Integration Tests
       run: |
-        echo "=== PHASE 6: Full Combined Bundle Integration Tests (Systemd-Nspawn) ==="
+        echo "=== PHASE 6: Full Combined Bundle Integration Tests (Wired) ==="
         make combined-full
-        
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh
+        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi
+
+  integration-wifi:
+    name: "Integration: Virtual WiFi (hwsim)"
+    runs-on: ubuntu-24.04
+    needs: unit-and-posix
+    continue-on-error: true   # hwsim is best-effort on cloud runners
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Load Virtual WiFi (mac80211_hwsim)
+      run: |
+        echo "=== Setting up Virtual WiFi for Azure Kernel ==="
+        sudo apt-get update
+        
+        # Fast path: try native modprobe first
+        if sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
+          echo "HWSIM_METHOD=modprobe" >> $GITHUB_ENV
+        else
+          # Extract pre-built .ko from the generic kernel package
+          # This is version-matched by apt and takes ~30s, no toolchain needed
+          GENERIC_VER=$(apt-cache show linux-image-generic \
+            | grep '^Depends:' \
+            | grep -oP 'linux-image-\K[\d.]+-generic' \
+            | head -1)
+          sudo apt-get install -y --no-install-recommends \
+            linux-modules-extra-${GENERIC_VER} zstd xz-utils
+          HWSIM_KO=$(find /lib/modules/${GENERIC_VER} -name 'mac80211_hwsim.ko*' | head -1)
+          [ -z "$HWSIM_KO" ] && { echo "hwsim .ko not found in generic package"; exit 1; }
+          # Decompress if needed (.zst or .xz on newer Ubuntu)
+          case "$HWSIM_KO" in
+            *.zst) zstd -d "$HWSIM_KO" -o /tmp/mac80211_hwsim.ko ;;
+            *.xz)  xz -d -k "$HWSIM_KO" -c > /tmp/mac80211_hwsim.ko ;;
+            *)     cp "$HWSIM_KO" /tmp/mac80211_hwsim.ko ;;
+          esac
+          sudo insmod /tmp/mac80211_hwsim.ko radios=2
+          echo "HWSIM_METHOD=extracted_ko" >> $GITHUB_ENV
+        fi
+
+        # Load IWD crypto module dependencies
+        for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede \
+                    algif_skcipher algif_hash af_alg cfg80211 mac80211 \
+                    rfkill ccm cbc sha256_generic sha512_generic; do
+          sudo modprobe "$mod" >/dev/null 2>&1 || true
+        done
+
+        # Block NM from grabbing hwsim interfaces BEFORE they appear
+        sudo mkdir -p /etc/NetworkManager/conf.d
+        echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" \
+          | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
+        sudo systemctl reload-or-restart NetworkManager || true
+        sleep 1
+
+        sudo systemctl stop wpa_supplicant 2>/dev/null || true
+        sudo systemctl mask wpa_supplicant || true
+
+        # Force interfaces DOWN so nspawn can claim them cleanly
+        sleep 2
+        for iface in $(iw dev | awk '$1=="Interface"{print $2}'); do
+          sudo ip link set "$iface" down
+        done
+
+        sudo rfkill unblock all || true
+        lsmod | grep mac80211_hwsim || true
+        iw dev || true
+
+    - name: Prepare Host Environment
+      run: |
+        sudo apt-get install -y systemd-container bridge-utils dbus-user-session jq
+        
+        if systemctl is-active --quiet apparmor; then
+            sudo systemctl stop apparmor
+            sudo systemctl disable apparmor
+        fi
+        
+        sudo sysctl -w net.ipv4.ip_forward=1
+        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+    - name: Run Integration Tests
+      run: |
+        echo "=== PHASE 4: Standard Integration Tests (WiFi Only) ==="
+        sudo chmod +x tests/integration/run_interop.sh
+        sudo ./tests/integration/run_interop.sh --wifi-only
+
+    - name: Run ROCKNIX Bundle Integration Tests
+      run: |
+        echo "=== PHASE 5: ROCKNIX Bundle Integration Tests (WiFi Only) ==="
+        make rocknix-release
+        sudo chmod +x tests/integration/run_rocknix_interop.sh
+        sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
+
+    - name: Run Full Combined Bundle Integration Tests
+      run: |
+        echo "=== PHASE 6: Full Combined Bundle Integration Tests (WiFi Only) ==="
+        make combined-full
+        sudo chmod +x tests/integration/run_rocknix_interop.sh
+        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only

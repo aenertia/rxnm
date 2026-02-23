@@ -95,15 +95,20 @@ expand_alias() {
         case "$opt" in
             "${input}"*)
                 if [ -n "$match" ]; then
-                    printf 'ambiguous\n'
-                    return 1
+                    return 2
                 fi
                 match="$opt"
                 ;;
         esac
     done
 
-    [ -n "$match" ] && printf '%s\n' "$match" || printf '%s\n' "$input"
+    if [ -n "$match" ]; then
+        printf '%s\n' "$match"
+        return 0
+    else
+        printf '%s\n' "$input"
+        return 0
+    fi
 }
 
 # --- GLOBAL OPTIONS PARSING ---
@@ -276,7 +281,7 @@ CATEGORY=""
 if [ -n "$RAW_CMD" ]; then
     # shellcheck disable=SC2086
     CATEGORY=$(expand_alias "$RAW_CMD" $CATS)
-    if [ "$CATEGORY" = "ambiguous" ]; then
+    if [ $? -eq 2 ]; then
         json_error "Ambiguous command: '$RAW_CMD'. Please be more specific." "1"
         exit 1
     fi
@@ -457,7 +462,7 @@ case "$CATEGORY" in
 
     wifi)
         ACTION=$(expand_alias "${1:-status}" "scan" "connect" "disconnect" "ap" "wps" "networks" "country" "list" "forget" "p2p" "dpp" "roaming" "nullify")
-        if [ "$ACTION" = "ambiguous" ]; then
+        if [ $? -eq 2 ]; then
             json_error "Ambiguous action for 'wifi'. Please be more specific." "1"
             exit 1
         fi
@@ -525,7 +530,7 @@ case "$CATEGORY" in
                             *) shift ;;
                         esac
                     done
-                    action_host "$SSID" "$PASS" "$MODE" "$SHARE" "$IP" "$ARG_IFACE" "" "$IPV6_PD"
+                    action_host "$ARG_IFACE" "$IP" "$SHARE" "$MODE" "$SSID" "$PASS" "" "$IPV6_PD"
                 elif [ "$SUBCMD" = "stop" ]; then
                     while [ "$#" -gt 0 ]; do case "$1" in --interface) ARG_IFACE="${2:-}"; shift; [ "$#" -gt 0 ] && shift ;; *) shift ;; esac; done
                     action_client "$ARG_IFACE"
@@ -602,7 +607,7 @@ case "$CATEGORY" in
                 ACTION_RAW="status"
             fi
             ACTION=$(expand_alias "$ACTION_RAW" "show" "status" "set" "enable" "disable" "list" "hotplug" "nullify")
-            if [ "$ACTION" = "ambiguous" ]; then
+            if [ $? -eq 2 ]; then
                 json_error "Ambiguous action for 'interface'. Please be more specific." "1"
                 exit 1
             fi
@@ -693,7 +698,7 @@ case "$CATEGORY" in
         
     system)
         ACTION=$(expand_alias "${1:-status}" "status" "check" "proxy" "reload" "setup" "start" "stop" "nullify" "ipv4" "ipv6")
-        if [ "$ACTION" = "ambiguous" ]; then
+        if [ $? -eq 2 ]; then
             json_error "Ambiguous action for 'system'. Please be more specific." "1"
             exit 1
         fi

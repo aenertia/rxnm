@@ -7,7 +7,7 @@ STOPSIGNAL SIGRTMIN+3
 
 # --- Build & Runtime Dependency Installation ---
 # Note: dbus-daemon is CRITICAL for systemd-networkd/machinectl interaction
-RUN dnf -y install \
+RUN dnf -y --setopt=install_weak_deps=False install \
     gcc \
     make \
     binutils \
@@ -17,8 +17,6 @@ RUN dnf -y install \
     systemd \
     systemd-networkd \
     systemd-resolved \
-    NetworkManager \
-    firewalld \
     iproute \
     iputils \
     procps-ng \
@@ -44,10 +42,6 @@ RUN cd /lib/systemd/system/sysinit.target.wants/ && \
     rm -f /lib/systemd/system/sockets.target.wants/*initctl* && \
     rm -f /lib/systemd/system/basic.target.wants/* && \
     rm -f /lib/systemd/system/anaconda.target.wants/*
-
-# --- Conflict Resolution ---
-# Mask interfering services to ensure networkd/RXNM exclusivity
-RUN systemctl mask NetworkManager NetworkManager-wait-online firewalld
 
 # Enable core stack
 RUN systemctl enable systemd-networkd systemd-resolved iwd

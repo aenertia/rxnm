@@ -5,6 +5,12 @@
 # FILE: rxnm-interfaces.sh
 # PURPOSE: Standard Interface Operations
 # ARCHITECTURE: Logic / Interfaces
+#
+# NOTE on State Application:
+# Many tasks here call reconfigure_iface(). This safely pairs 'networkctl reload' 
+# (reads new configs from disk) with 'networkctl reconfigure' (forces interface 
+# to evaluate the new config). Both are strictly required; reload alone won't 
+# re-apply to an already-configured interface.
 # -----------------------------------------------------------------------------
 
 _task_set_member() {

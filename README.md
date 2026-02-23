@@ -254,6 +254,8 @@ The [api-schema.json](https://codeberg.org/aenertia/rxnm/src/branch/main/api-sch
 
 ## 📦 Deployment & Build Profiles
 
+> **Security Note:** The native `rxnm-agent` C-accelerator requires `CAP_SYS_ADMIN` to perform namespace isolation and XDP/eBPF attachment. Ensure it runs as `root`, has capabilities set via `setcap cap_sys_admin+ep`, or uses `AmbientCapabilities=CAP_SYS_ADMIN` in its systemd unit.
+
 RXNM uses standard `make` targets to adapt to various target environments:
 
 * **Standard Build (`make install`):** Dynamically linked C-Agent and modular bash libraries in `/usr/lib/rocknix-network-manager`.
