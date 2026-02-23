@@ -177,7 +177,7 @@ build_rootfs() {
         if command -v dnf >/dev/null 2>&1; then
             dnf -y --installroot="$ROOTFS" --releasever=43 install \
                 systemd systemd-networkd systemd-resolved iwd dbus-daemon \
-                iproute iputils procps-ng ethtool tcpdump hostname bash jq sed coreutils \
+                iproute iputils procps-ng ethtool tcpdump hostname bash jq sed coreutils iw \
                 --setopt=install_weak_deps=False
         elif command -v docker >/dev/null 2>&1; then
             docker build -t rxnm-test-base -f tests/integration/Containerfile tests/integration
