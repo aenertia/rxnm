@@ -142,15 +142,19 @@ jobs:
       run: |
         echo "=== Setting up Virtual WiFi for Azure Kernel ==="
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill || true
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill
+        
+        # Cloud kernels strip mac80211/cfg80211 by default. We MUST install the extra modules.
+        # Done conditionally to prevent hard failures on runners that build it in.
+        sudo apt-get install -y linux-modules-extra-$(uname -r) || echo "Note: linux-modules-extra unavailable."
         
         # CRITICAL FIX: Always load kernel crypto and 80211 dependencies FIRST.
         # insmod (used below) does not resolve dependencies automatically like modprobe.
-        # Without these, insmod fails with 'Unknown symbol in module'.
+        # We removed the silent redirect so failures are clearly visible in the logs.
         for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede \
                     algif_skcipher algif_hash af_alg cfg80211 mac80211 \
                     rfkill ccm cbc sha256_generic sha512_generic; do
-          sudo modprobe "$mod" >/dev/null 2>&1 || true
+          sudo modprobe "$mod" || echo "Warning: Failed to load $mod (may be built-in or missing)"
         done
         
         # Fast path: try native modprobe first
@@ -176,7 +180,13 @@ jobs:
           if [ -s mac80211_hwsim.c ]; then
               echo "obj-m += mac80211_hwsim.o" > Makefile
               sudo make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
-              sudo insmod ./mac80211_hwsim.ko radios=2
+              
+              # Safely attempt insertion. If it fails, dump dmesg to reveal exactly which symbol was missing.
+              if ! sudo insmod ./mac80211_hwsim.ko radios=2; then
+                  echo "ERROR: insmod failed. Dumping dmesg for root cause analysis:"
+                  sudo dmesg | tail -n 30
+                  exit 1
+              fi
               echo "HWSIM_METHOD=compiled" >> $GITHUB_ENV
           else
               echo "ERROR: Failed to fetch mac80211_hwsim.c for v${BASE_VER}"
