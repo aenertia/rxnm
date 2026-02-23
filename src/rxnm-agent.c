@@ -293,6 +293,7 @@ typedef struct {
     bool is_wifi;
     bool is_bridge;
     bool is_bond;
+    uint32_t wiphy_id;
     char ssid[33];
     char bssid[18];
     int signal_dbm;
@@ -712,18 +713,33 @@ int dbus_send_method_call(int sock, const char *dest, const char *path, const ch
 }
 
 /**
+ * @brief Drains the DBus socket of initial Hello broadcasts or queued signals
+ * to ensure the next synchronous blocking read hits the exact expected method return.
+ */
+static void dbus_drain_socket(int sock) {
+    safe_usleep(2000); /* Yield 2.0ms to allow dbus-broker to flush standard internal responses (NameAcquired etc) */
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    char discard[4096];
+    while (recv(sock, discard, sizeof(discard), 0) > 0) {}
+    fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+}
+
+/**
  * @brief Triggers 'Reload' on org.freedesktop.network1 via DBus socket.
  */
 int dbus_trigger_reload() {
     int sock = dbus_connect_system();
     if (sock < 0) return sock;
     
-    // FIX: Appease dbus-broker strict state machine requirement
+    // Appease dbus-broker strict state machine requirement
     dbus_send_method_call(sock, 
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
                           "Hello");
+                          
+    dbus_drain_socket(sock);
     
     // Now trigger the actual payload
     dbus_send_method_call(sock, 
@@ -761,9 +777,9 @@ int check_variant_sig_string(const char *buf, int pos) {
 }
 
 /**
- * @brief Finds an IWD network object path by SSID (Robust Scanner)
+ * @brief Finds an IWD network object path by SSID and optional hardware prefix
  */
-int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max_len) {
+int find_iwd_network_path(int sock, const char *ssid, const char *prefix, char *out_path, size_t max_len) {
     /* 1. Request ObjectManager Dump */
     dyn_buf_t req = {0};
     dbus_header_t hdr;
@@ -866,6 +882,14 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
         
         /* Is this an Object Path? */
         if (len > 15 && strncmp(&buf[i+4], "/net/connman/iwd", 16) == 0) {
+            /* If a hardware interface prefix is provided, strictly enforce it */
+            if (prefix && prefix[0] != '\0') {
+                if (strncmp(&buf[i+4], prefix, strlen(prefix)) != 0) {
+                    last_path[0] = '\0'; /* Invalidate cache for mismatched interface */
+                    continue;
+                }
+            }
+            
             strncpy(last_path, &buf[i+4], 255);
             last_path[len] = '\0'; // Ensure null term if not present in buffer logic (it is in dbus)
             continue;
@@ -891,8 +915,23 @@ int find_iwd_network_path(int sock, const char *ssid, char *out_path, size_t max
     return result;
 }
 
+void collect_network_state(); /* Forward declare for interface resolution */
+
 int cmd_connect(const char *ssid, const char *iface) {
-    (void)iface; /* Hint: We could filter by device path if needed, but SSID is usually unique per scan result */
+    char target_prefix[64] = "";
+    
+    /* Map logical interface name to physical IWD DBus Path */
+    if (iface && iface[0] != '\0') {
+        collect_network_state(); /* Populates global ifaces dynamically */
+        for (size_t i = 0; i < ifaces_count; i++) {
+            if (ifaces[i]->exists && strcmp(ifaces[i]->name, iface) == 0) {
+                /* IWD paths map deterministically to the underlying kernel wiphy_id and ifindex */
+                snprintf(target_prefix, sizeof(target_prefix), "/net/connman/iwd/phy%u/%u", 
+                         ifaces[i]->wiphy_id, ifaces[i]->index);
+                break;
+            }
+        }
+    }
     
     int sock = dbus_connect_system();
     if (sock < 0) {
@@ -900,25 +939,24 @@ int cmd_connect(const char *ssid, const char *iface) {
         return 1;
     }
     
-    /* FIX: Appease dbus-broker strict state machine requirement */
+    /* Appease dbus-broker strict state machine requirement */
     dbus_send_method_call(sock, 
                           "org.freedesktop.DBus", 
                           "/org/freedesktop/DBus", 
                           "org.freedesktop.DBus", 
                           "Hello");
     
-    /* Discard the Hello MethodReturn to keep the buffer clean for GetManagedObjects */
-    char discard_buf[1024];
-    recv(sock, discard_buf, sizeof(discard_buf), 0);
+    /* Deterministic drain: discard Hello responses and NameAcquired broadcasts */
+    dbus_drain_socket(sock);
     
     char path[256];
-    if (find_iwd_network_path(sock, ssid, path, sizeof(path)) != 0) {
-        printf("{\"success\": false, \"error\": \"Network '%s' not found\"}\n", ssid);
+    if (find_iwd_network_path(sock, ssid, target_prefix, path, sizeof(path)) != 0) {
+        printf("{\"success\": false, \"error\": \"Network '%s' not found on %s\"}\n", ssid, iface ? iface : "any interface");
         close(sock);
         return 1;
     }
     
-    /* Call Connect() on the object path */
+    /* Call Connect() on the specific network object path */
     dbus_send_method_call(sock, "net.connman.iwd", path, "net.connman.iwd.Network", "Connect");
     
     printf("{\"success\": true, \"action\": \"connect\", \"ssid\": \"%s\", \"path\": \"%s\"}\n", ssid, path);
@@ -1218,6 +1256,11 @@ void process_nl80211_msg(struct nlmsghdr *nh, int cmd) {
     entry->is_wifi = true;
     
     if (cmd == NL80211_CMD_GET_INTERFACE) {
+        /* Map underlying kernel PHY hierarchy into interface array dynamically */
+        if (tb[NL80211_ATTR_WIPHY]) {
+            entry->wiphy_id = *(uint32_t *)RTA_DATA(tb[NL80211_ATTR_WIPHY]);
+        }
+        
         if (tb[NL80211_ATTR_SSID]) {
             char *ssid_data = (char *)RTA_DATA(tb[NL80211_ATTR_SSID]);
             int ssid_len = RTA_PAYLOAD(tb[NL80211_ATTR_SSID]);
@@ -1824,7 +1867,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             exit(1);
         }
         
-        /* Mitigation 5.1: Protocol-Level Flow Control (Stateless Back-Pressure)
+        /* Mitigation : Protocol-Level Flow Control (Stateless Back-Pressure)
          * Force WiFi into Power Save Mode to tell the AP to buffer broadcast traffic.
          * This prevents SDIO bus saturation when dropping packets in SKB mode.
          */
@@ -1858,7 +1901,7 @@ void cmd_nullify_xdp(char *iface, char *action) {
             // Do not exit fatally on disable; allow partial cleanups to proceed.
         }
         
-        /* Mitigation 5.1: The "Atomic Kick"
+        /* Mitigation : The "Atomic Kick"
          * Reset the driver's RX ring buffer pointers and disable PSM.
          * This instantaneously un-wedges stalled budget SDIO MACs without dropping the carrier.
          */
