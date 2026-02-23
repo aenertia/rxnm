@@ -718,7 +718,19 @@ int dbus_trigger_reload() {
     int sock = dbus_connect_system();
     if (sock < 0) return sock;
     
-    dbus_send_method_call(sock, "org.freedesktop.network1", "/org/freedesktop/network1", "org.freedesktop.network1.Manager", "Reload");
+    // FIX: Appease dbus-broker strict state machine requirement
+    dbus_send_method_call(sock, 
+                          "org.freedesktop.DBus", 
+                          "/org/freedesktop/DBus", 
+                          "org.freedesktop.DBus", 
+                          "Hello");
+    
+    // Now trigger the actual payload
+    dbus_send_method_call(sock, 
+                          "org.freedesktop.network1", 
+                          "/org/freedesktop/network1", 
+                          "org.freedesktop.network1.Manager", 
+                          "Reload");
     close(sock);
     return 0;
 }
@@ -887,6 +899,17 @@ int cmd_connect(const char *ssid, const char *iface) {
         printf("{\"success\": false, \"error\": \"DBus connection failed\"}\n");
         return 1;
     }
+    
+    /* FIX: Appease dbus-broker strict state machine requirement */
+    dbus_send_method_call(sock, 
+                          "org.freedesktop.DBus", 
+                          "/org/freedesktop/DBus", 
+                          "org.freedesktop.DBus", 
+                          "Hello");
+    
+    /* Discard the Hello MethodReturn to keep the buffer clean for GetManagedObjects */
+    char discard_buf[1024];
+    recv(sock, discard_buf, sizeof(discard_buf), 0);
     
     char path[256];
     if (find_iwd_network_path(sock, ssid, path, sizeof(path)) != 0) {
