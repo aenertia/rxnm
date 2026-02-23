@@ -149,14 +149,22 @@ jobs:
         else
           # Extract pre-built .ko from the generic kernel package
           # This is version-matched by apt and takes ~30s, no toolchain needed
-          GENERIC_VER=$(apt-cache show linux-image-generic \
-            | grep '^Depends:' \
-            | grep -oP 'linux-image-\K[\d.]+-generic' \
-            | head -1)
-          sudo apt-get install -y --no-install-recommends \
-            linux-modules-extra-${GENERIC_VER} zstd xz-utils
+          GENERIC_EXTRA=$(apt-cache depends linux-image-generic | grep -o 'linux-modules-extra-[0-9.-]*generic' | head -1)
+          
+          if [ -z "$GENERIC_EXTRA" ]; then
+            echo "Failed to find linux-modules-extra dependency from apt-cache!"
+            exit 1
+          fi
+          
+          echo "Found dependency: $GENERIC_EXTRA"
+          sudo apt-get install -y --no-install-recommends $GENERIC_EXTRA zstd xz-utils
+          
+          # Extract the exact version string (e.g., 6.8.0-45-generic) to locate the .ko
+          GENERIC_VER=${GENERIC_EXTRA#linux-modules-extra-}
+          
           HWSIM_KO=$(find /lib/modules/${GENERIC_VER} -name 'mac80211_hwsim.ko*' | head -1)
-          [ -z "$HWSIM_KO" ] && { echo "hwsim .ko not found in generic package"; exit 1; }
+          [ -z "$HWSIM_KO" ] && { echo "hwsim .ko not found in $GENERIC_EXTRA"; exit 1; }
+          
           # Decompress if needed (.zst or .xz on newer Ubuntu)
           case "$HWSIM_KO" in
             *.zst) zstd -d "$HWSIM_KO" -o /tmp/mac80211_hwsim.ko ;;
