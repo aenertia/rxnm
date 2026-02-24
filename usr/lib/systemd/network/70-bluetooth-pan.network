@@ -6,8 +6,8 @@ Name=bnep*
 Description=Rocknix Bluetooth PAN Host
 Address=192.168.44.1/24
 DHCPServer=yes
-IPMasquerade=ipv4
-IPv4Forwarding=yes
+# IP Forwarding (v255.8 compliant). NAT is handled externally by rxnm-system.
+IPForward=yes
 # Disabled to avoid conflict with Avahi
 MulticastDNS=no
 LLMNR=yes

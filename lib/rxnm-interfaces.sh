@@ -5,20 +5,27 @@
 # FILE: rxnm-interfaces.sh
 # PURPOSE: Standard Interface Operations
 # ARCHITECTURE: Logic / Interfaces
-#
-# NOTE on State Application:
-# Many tasks here call reconfigure_iface(). This safely pairs 'networkctl reload' 
-# (reads new configs from disk) with 'networkctl reconfigure' (forces interface 
-# to evaluate the new config). Both are strictly required; reload alone won't 
-# re-apply to an already-configured interface.
 # -----------------------------------------------------------------------------
 
 _task_set_member() {
     local iface="$1" bridge="$2"
     ensure_dirs
+    
+    # Handheld Guard: Clean up any residual WiFi AP host configs.
+    # If the interface is moving to a bridge, the AP logic is no longer valid.
+    # 65- prefixes win over 75- bridge configs; we must delete to ensure bridge wins.
+    rm -f "${STORAGE_NET_DIR}/65-wifi-host-${iface}.network" 2>/dev/null
+    
     local cfg_file="${STORAGE_NET_DIR}/75-config-${iface}.network"
     local content
-    content=$(build_network_config --match-name "$iface" --dhcp "no" --description "Bridge Member" --bridge "$bridge" --mdns "no" --llmnr "no")
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --dhcp "no" \
+        --description "Bridge Member" \
+        --bridge "$bridge" \
+        --mdns "no" \
+        --llmnr "no")
+        
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
     reconfigure_iface "$bridge"
@@ -48,9 +55,30 @@ _task_set_dhcp() {
         esac
     done
 
+    # Clean up static overrides before enabling DHCP
     rm -f "${STORAGE_NET_DIR}/75-static-${iface}.network" 2>/dev/null
     ensure_dirs
-    set_network_cfg "$iface" "yes" "" "" "$dns" "$ssid" "$domains" "$routes" "$mdns" "$llmnr" "$metric" "" "$mtu" "$mac" "$ipv6_priv" "$dhcp_id" "$ipv6_pd"
+    
+    # 1.1.0 Migration: Direct use of build_network_config with named flags
+    local content
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --match-ssid "$ssid" \
+        --dhcp "yes" \
+        --description "DHCP Configuration" \
+        --dns "$dns" \
+        --domains "$domains" \
+        --routes "$routes" \
+        --mdns "$mdns" \
+        --llmnr "$llmnr" \
+        --metric "$metric" \
+        --mtu "$mtu" \
+        --mac-addr "$mac" \
+        --ipv6-privacy "$ipv6_priv" \
+        --dhcp-client-id "$dhcp_id" \
+        --ipv6-pd "$ipv6_pd")
+
+    secure_write "${STORAGE_NET_DIR}/75-config-${iface}.network" "$content" "644"
     reconfigure_iface "$iface"
 }
 
@@ -80,11 +108,32 @@ _task_set_static() {
         esac
     done
     
+    # Handheld Defensive Guard: Quotes and existence check for SSID glob cleaning
     rm -f "${STORAGE_NET_DIR}/75-config-${iface}.network" 2>/dev/null
-    rm -f "${STORAGE_NET_DIR}/75-config-${iface}-"*.network 2>/dev/null
+    for f in "${STORAGE_NET_DIR}/75-config-${iface}-"*.network; do
+        [ -e "$f" ] && rm -f "$f"
+    done
+
     ensure_dirs
     local content
-    content=$(build_network_config --match-name "$iface" --match-ssid "$ssid" --dhcp "no" --description "Static Configuration" --address "$ip" --gateway "$gw" --dns "$dns" --domains "$domains" --routes "$routes" --mdns "$mdns" --llmnr "$llmnr" --metric "$metric" --mtu "$mtu" --mac-addr "$mac" --ipv6-privacy "$ipv6_priv" --dhcp-client-id "$dhcp_id")
+    content=$(build_network_config \
+        --match-name "$iface" \
+        --match-ssid "$ssid" \
+        --dhcp "no" \
+        --description "Static Configuration" \
+        --address "$ip" \
+        --gateway "$gw" \
+        --dns "$dns" \
+        --domains "$domains" \
+        --routes "$routes" \
+        --mdns "$mdns" \
+        --llmnr "$llmnr" \
+        --metric "$metric" \
+        --mtu "$mtu" \
+        --mac-addr "$mac" \
+        --ipv6-privacy "$ipv6_priv" \
+        --dhcp-client-id "$dhcp_id")
+
     secure_write "${STORAGE_NET_DIR}/75-static-${iface}.network" "$content" "644"
     reconfigure_iface "$iface"
 }
@@ -127,11 +176,20 @@ _task_set_proxy() {
     fi
 }
 
+# --- DEPRECATED HELPERS ---
+# @deprecated: use build_network_config directly with named flags.
 set_network_cfg() {
     local iface=$1 dhcp=$2 ip=$3 gw=$4 dns=$5 ssid=$6 domains=$7 routes=$8 mdns=$9 llmnr=${10} metric=${11} vrf=${12} mtu=${13} mac=${14} ipv6_priv=${15} dhcp_id=${16} ipv6_pd=${17}
+    log_warn "Positional API set_network_cfg is deprecated and scheduled for removal."
+    
     local safe_ssid="${ssid:+$(sanitize_ssid "$ssid")}"
     local cfg
-    cfg=$(build_network_config --match-name "$iface" --match-ssid "$ssid" --dhcp "$dhcp" --description "User Config" --address "$ip" --gateway "$gw" --dns "$dns" --domains "$domains" --routes "$routes" --mdns "$mdns" --llmnr "$llmnr" --metric "$metric" --vrf "$vrf" --mtu "$mtu" --mac-addr "$mac" --ipv6-privacy "$ipv6_priv" --dhcp-client-id "$dhcp_id" --ipv6-pd "$ipv6_pd")
+    cfg=$(build_network_config \
+        --match-name "$iface" --match-ssid "$ssid" --dhcp "$dhcp" --description "User Config" \
+        --address "$ip" --gateway "$gw" --dns "$dns" --domains "$domains" --routes "$routes" \
+        --mdns "$mdns" --llmnr "$llmnr" --metric "$metric" --vrf "$vrf" --mtu "$mtu" \
+        --mac-addr "$mac" --ipv6-privacy "$ipv6_priv" --dhcp-client-id "$dhcp_id" --ipv6-pd "$ipv6_pd")
+    
     local filename="${STORAGE_NET_DIR}/75-config-${iface}${safe_ssid:+-${safe_ssid}}.network"
     secure_write "$filename" "$cfg" 644
 }

@@ -1,4 +1,7 @@
 # 70-wifi-p2p.network
+# Fallback template for P2P interfaces.
+# Note: 69-wifi-p2p-go.network will supersede this for Group Owner (GO) roles.
+# WLANInterfaceType=p2p-client is valid in systemd v248+.
 [Match]
 Name=p2p*
 WLANInterfaceType=p2p-client p2p-go

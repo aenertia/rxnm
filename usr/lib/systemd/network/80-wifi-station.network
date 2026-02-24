@@ -14,5 +14,5 @@ LLMNR=yes
 IPv6AcceptRA=yes
 
 [DHCPv4]
-# Higher metric than wired to prefer ethernet
+# Metric 20: Established hierarchy: Wired(10) > WiFi(20) > Tether(30)
 RouteMetric=20

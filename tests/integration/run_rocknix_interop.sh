@@ -8,7 +8,6 @@
 
 set -eo pipefail
 
-# Constants
 BRIDGE="rxnm-bundle-br"
 ROOTFS="/var/lib/machines/fedora-rxnm-bundle"
 SERVER="rxnm-bdl-server"
@@ -36,8 +35,7 @@ setup_bridge
 build_rootfs
 
 info "Installing Bundle into RootFS..."
-mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin"
-mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/lib"
+mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin" "$ROOTFS/usr/lib/rocknix-network-manager/lib"
 cp -f "$BUNDLE_BIN" "$ROOTFS/usr/bin/rxnm"
 cp -f "$AGENT_BIN" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
@@ -45,23 +43,18 @@ cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null |
 
 boot_machines
 
-# CRITICAL: Manually map the mac80211 PHYs into the containers.
 if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     info "Injecting Virtual WiFi Radios into containers via PHY..."
-    
     SRV_PID=$(machinectl show "$SERVER" -p Leader | cut -d= -f2)
     CLI_PID=$(machinectl show "$CLIENT" -p Leader | cut -d= -f2)
-    
     if [ -n "$SRV_PID" ] && [ -n "$WLAN_SRV" ]; then
         SRV_PHY=$(iw dev "$WLAN_SRV" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
         [ -n "$SRV_PHY" ] && inject_phy_and_wait "$SERVER" "$SRV_PHY" "$SRV_PID"
     fi
-    
     if [ -n "$CLI_PID" ] && [ -n "$WLAN_CLI" ]; then
         CLI_PHY=$(iw dev "$WLAN_CLI" info 2>/dev/null | awk '/wiphy/{print "phy"$2}')
         [ -n "$CLI_PHY" ] && inject_phy_and_wait "$CLIENT" "$CLI_PHY" "$CLI_PID"
     fi
-    
     info "Sanitizing Virtual Radios..."
     sanitize_in_machine "$SERVER" "$SRV_PID"
     sanitize_in_machine "$CLIENT" "$CLI_PID"
@@ -77,61 +70,46 @@ if [ "$WIFI_ONLY" = "false" ]; then
     info "--- [PHASE 1] DHCP Convergence (Bundle) ---"
     m_exec "$SERVER" rxnm interface host0 set static 192.168.213.2/24
     m_exec "$SERVER" /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
-    m_exec "$SERVER" networkctl reload && m_exec "$SERVER" networkctl reconfigure host0
-
+    m_exec "$SERVER" rxnm system reload
     m_exec "$CLIENT" rxnm interface host0 set dhcp
-    m_exec "$CLIENT" networkctl reload && m_exec "$CLIENT" networkctl reconfigure host0
+    m_exec "$CLIENT" rxnm system reload
 
     CONVERGED=false
-    for i in $(seq 1 30); do
-        IP=$(m_exec "$CLIENT" ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.213." | head -n1 || true)
-        if [ -n "$IP" ]; then
-            if m_exec "$CLIENT" ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1; then
-                info "✓ DHCP Bidirectional Link Verified (IP: $IP)"
-                CONVERGED=true; break
-            fi
-        fi
-        sleep 2
-    done
+    IP=$(wait_ip_convergence "$CLIENT" "host0" "192.168.213." "inet" 15)
+    if [ -n "$IP" ]; then
+        if m_exec "$CLIENT" ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1; then info "✓ DHCP Bidirectional Link Verified (IP: $IP)"; CONVERGED=true; fi
+    fi
     [ "$CONVERGED" = "false" ] && { err "DHCP Convergence timeout"; exit 1; }
 
     info "--- [PHASE 2] Advanced Attributes (Bundle) ---"
     m_exec "$CLIENT" rxnm interface host0 set static 192.168.213.60/24 --gateway 192.168.213.2 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
-    m_exec "$CLIENT" networkctl reload && m_exec "$CLIENT" networkctl reconfigure host0
+    m_exec "$CLIENT" rxnm system reload
 
     info "Waiting for Attribute Convergence..."
     CONVERGED=false
-    for i in $(seq 1 15); do
-        IP_CHECK=$(m_exec "$CLIENT" ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | grep "192.168.213.60" || true)
+    IP=$(wait_ip_convergence "$CLIENT" "host0" "192.168.213.60" "inet" 10)
+    if [ -n "$IP" ]; then
         MAC_CHECK=$(m_exec "$CLIENT" ip -j link show host0 | jq -r '.[0].address // empty')
         MTU_CHECK=$(m_exec "$CLIENT" ip -j link show host0 | jq -r '.[0].mtu // empty')
-        if [ -n "$IP_CHECK" ] && [ "$MAC_CHECK" == "02:aa:bb:cc:dd:ee" ] && [ "$MTU_CHECK" == "1420" ]; then
-            CONVERGED=true; break
-        fi
-        sleep 2
-    done
+        if [ "$MAC_CHECK" == "02:aa:bb:cc:dd:ee" ] && [ "$MTU_CHECK" == "1420" ]; then CONVERGED=true; fi
+    fi
     [ "$CONVERGED" = "false" ] && { err "Attribute application failed!"; exit 1; }
     info "✓ Attributes applied"
 
     info "--- [PHASE 3] IPv6 (Bundle) ---"
     m_exec "$SERVER" rxnm interface host0 set static 192.168.213.2/24,fd00:cafe::2/64
     m_exec "$SERVER" /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"
-    m_exec "$SERVER" networkctl reload && m_exec "$SERVER" networkctl reconfigure host0
+    m_exec "$SERVER" rxnm system reload
     m_exec "$CLIENT" rxnm interface host0 set static 192.168.213.60/24,fd00:cafe::3/64 --mtu 1420 --mac 02:aa:bb:cc:dd:ee
-    m_exec "$CLIENT" networkctl reload && m_exec "$CLIENT" networkctl reconfigure host0
+    m_exec "$CLIENT" rxnm system reload
 
     info "Waiting for IPv6 Convergence (Bundle)..."
     CONVERGED=false
-    for i in $(seq 1 15); do
-        if m_exec "$CLIENT" ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::3"; then
-            if m_exec "$SERVER" ip -j addr show host0 | jq -r '.[0].addr_info[]? | .local // empty' | grep -q "fd00:cafe::2"; then
-                if m_exec "$CLIENT" ping -6 -c 1 -W 2 fd00:cafe::2 >/dev/null 2>&1; then
-                    CONVERGED=true; break
-                fi
-            fi
-        fi
-        sleep 2
-    done
+    CLI_IP=$(wait_ip_convergence "$CLIENT" "host0" "fd00:cafe::3" "inet6" 8)
+    SRV_IP=$(wait_ip_convergence "$SERVER" "host0" "fd00:cafe::2" "inet6" 8)
+    if [ -n "$CLI_IP" ] && [ -n "$SRV_IP" ]; then
+        if m_exec "$CLIENT" ping -6 -c 1 -W 2 fd00:cafe::2 >/dev/null 2>&1; then CONVERGED=true; fi
+    fi
     [ "$CONVERGED" = "false" ] && { err "IPv6 failed"; exit 1; }
     info "✓ IPv6 Validated"
 
@@ -139,7 +117,6 @@ if [ "$WIFI_ONLY" = "false" ]; then
     m_exec "$CLIENT" rxnm system nullify enable --interface host0
     sleep 1
     m_exec "$CLIENT" ping -c 1 -W 1 192.168.213.2 >/dev/null 2>&1 && { err "Nullify leak!"; exit 1; } || info "✓ Packets dropped"
-
     m_exec "$CLIENT" rxnm system nullify disable --interface host0
     sleep 2
     m_exec "$CLIENT" ping -c 1 -W 2 192.168.213.2 >/dev/null 2>&1 && info "✓ Restored" || { err "Restore failed!"; exit 1; }
@@ -150,13 +127,11 @@ if [ "$WIFI_ONLY" = "false" ]; then
     IPV6_CHECK=$(m_exec "$CLIENT" ip -j addr show host0 | jq -r '.[0].addr_info[]? | select(.family=="inet6") | .local // empty' | head -n1)
     [ -n "$IPV6_CHECK" ] && { err "IPv6 leaked"; exit 1; }
     info "✓ IPv6 disabled"
-
     m_exec "$CLIENT" rxnm system ipv4 disable
     SYSCTL_VAL=$(m_exec "$CLIENT" /usr/sbin/sysctl -n net.ipv4.icmp_echo_ignore_broadcasts 2>/dev/null || echo "0")
     [ "$SYSCTL_VAL" != "1" ] && { err "IPv4 tuning failed"; exit 1; }
     info "✓ IPv4 chatter silenced"
 
-    info "Restoring System Stack for Phase 6..."
     m_exec "$CLIENT" rxnm system ipv6 enable
     m_exec "$CLIENT" rxnm system ipv4 enable
     m_exec "$CLIENT" rxnm system nullify disable >/dev/null 2>&1 || true
@@ -165,64 +140,57 @@ fi
 
 if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability (Bundle) ---"
-    
-    # Restart IWD to ensure it registers the clean, sanitized wlan0 radios
     m_exec "$SERVER" systemctl restart iwd
     m_exec "$CLIENT" systemctl restart iwd
     wait_iwd_ready "$SERVER"
     wait_iwd_ready "$CLIENT"
     
-    # Defensive check: verify IWD stayed alive after detecting the radios
-    if ! m_exec "$SERVER" systemctl is-active iwd >/dev/null 2>&1; then
-        err "IWD crashed on Server! Likely missing Kernel AF_ALG crypto modules or /dev/rfkill permissions."
-        m_exec "$SERVER" journalctl -u iwd --no-pager | tail -n 20
-        exit 1
-    fi
+    SRV_WLAN=$(m_exec "$SERVER" iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
+    CLI_WLAN=$(m_exec "$CLIENT" iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
+
+    m_exec "$SERVER" ethtool -K "$SRV_WLAN" tx off || true
+    m_exec "$CLIENT" ethtool -K "$CLI_WLAN" tx off || true
+
+    info "Starting Virtual AP on $SRV_WLAN..."
+    m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN"
     
-    # Added --share so that AP mode acts as a router and emits a pingable gateway default route
-    m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share
-    sleep 3
+    info "Waiting for Server AP to become routable..."
+    SRV_READY=false
+    for i in $(seq 1 10); do
+        if m_exec "$SERVER" rxnm interface "$SRV_WLAN" show --get state | grep -qE "routable|up"; then SRV_READY=true; break; fi
+        sleep 1
+    done
+    [ "$SRV_READY" = "false" ] && { err "Server AP failed to reach routable state"; exit 1; }
     
-    info "Scanning for Virtual AP..."
-    SCAN_RESULT=$(m_exec "$CLIENT" rxnm wifi scan --format json || echo "{}")
-    if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then
-        info "✓ Simulated AP detected in client scan"
-    else
-        err "Failed to detect simulated AP"
-        echo "Scan Output: $SCAN_RESULT"
-        exit 1
-    fi
+    info "Scanning for Virtual AP from $CLI_WLAN..."
+    SCAN_RESULT=$(m_exec "$CLIENT" rxnm wifi scan --interface "$CLI_WLAN" --format json || echo "{}")
+    if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then info "✓ Simulated AP detected in client scan"; else err "Failed to detect simulated AP"; exit 1; fi
     
-    info "Connecting to Virtual AP..."
-    m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret"
+    info "Connecting $CLI_WLAN to Virtual AP..."
+    m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN"
     
-    info "Waiting for WiFi L2/L3 Convergence..."
+    info "Waiting for WiFi L3 Convergence..."
     CONVERGED=false
     for i in $(seq 1 20); do
-        CLI_WLAN=$(m_exec "$CLIENT" iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
-        STATE="unknown"
-        
-        if [ -n "$CLI_WLAN" ]; then
-            STATE=$(m_exec "$CLIENT" rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
-            
-            if [ "$STATE" == "connected" ]; then
-                IP=$(m_exec "$CLIENT" ip -j addr show "$CLI_WLAN" | jq -r '.[0].addr_info[]? | select(.family=="inet") | .local // empty' | head -n1 || true)
-                GW=$(m_exec "$CLIENT" ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/default/ {print $3; exit}')
-                [ -z "$GW" ] && GW=$(m_exec "$CLIENT" ip -4 route show dev "$CLI_WLAN" 2>/dev/null | awk '/src/ {print $1; exit}' | cut -d/ -f1 | sed 's/\.0\.0$/.1.1/; s/\.0$/.1/')
-
-                if [ -n "$IP" ] && [ -n "$GW" ]; then
-                    if m_exec "$CLIENT" ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
-                        info "✓ Client successfully authenticated and routed over Virtual WiFi (IP: $IP, GW: $GW)"
-                        CONVERGED=true
-                        break
-                    fi
+        STATE=$(m_exec "$CLIENT" rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
+        if [ "$STATE" == "connected" ]; then
+            GW=$(m_exec "$CLIENT" ip -4 route get 1.1.1.1 dev "$CLI_WLAN" 2>/dev/null | awk '/via/ {print $3}')
+            if [ -n "$GW" ]; then
+                if m_exec "$CLIENT" ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
+                    info "✓ Client authenticated and routed via $GW"
+                    CONVERGED=true; break
                 fi
             fi
         fi
         sleep 2
     done
-    
-    [ "$CONVERGED" = "false" ] && { err "Simulated WiFi connection or DHCP failed"; exit 1; }
+    [ "$CONVERGED" = "false" ] && { err "WiFi Convergence Failed"; exit 1; }
+
+    info "--- [PHASE 6b] Client Mode Restoration ---"
+    m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN"
+    sleep 2
+    SRV_STATE=$(m_exec "$SERVER" rxnm interface "$SRV_WLAN" show --get wifi.state 2>/dev/null)
+    if [[ "$SRV_STATE" == "disconnected" || "$SRV_STATE" == "station" ]]; then info "✓ AP state cleaned up successfully"; else err "AP residue detected"; exit 1; fi
 elif [ "$SKIP_WIFI" = "false" ]; then
     info "--- [PHASE 6] SKIPPED (Virtual WiFi module unavailable) ---"
 fi

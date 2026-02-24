@@ -1,3 +1,4 @@
+# 69-wifi-p2p-go.network
 [Match]
 Name=p2p*
 WLANInterfaceType=p2p-go
@@ -7,9 +8,9 @@ Description=Rocknix Wi-Fi P2P Group Owner
 # Standard P2P subnet (Commonly used in Android/Linux P2P)
 Address=192.168.49.1/24
 DHCPServer=yes
-IPMasquerade=ipv4
-IPv4Forwarding=yes
-# Ensure local name resolution works for the group(either on or avahi seperately running)
+# IP Forwarding (v255.8 compliant). NAT is handled externally by rxnm-system.
+IPForward=yes
+# Ensure local name resolution works for the group
 MulticastDNS=no
 LLMNR=yes
 
@@ -17,3 +18,4 @@ LLMNR=yes
 PoolOffset=10
 PoolSize=50
 EmitDNS=yes
+EmitRouter=yes
