@@ -102,7 +102,7 @@ setup_hwsim() {
     WLAN_SRV=""
     WLAN_CLI=""
 
-    if lsmod | grep -q mac80211_hwsim || sudo modprobe mac80211_hwsim radios=2 2>/dev/null; then
+    if lsmod | grep -q mac80211_hwsim; then
         for i in $(seq 1 30); do
             WLAN_IFACES=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2}')
             [ $(echo "$WLAN_IFACES" | wc -w) -ge 2 ] && break
@@ -125,7 +125,7 @@ setup_hwsim() {
             info "✓ Virtual radios allocated: $WLAN_SRV, $WLAN_CLI"
         fi
     else
-        warn "mac80211_hwsim module not available on host. WiFi testing will be skipped."
+        warn "mac80211_hwsim module not loaded on host. WiFi testing will be skipped."
     fi
 }
 
@@ -151,10 +151,16 @@ wait_iwd_ready() {
 wait_ip_convergence() {
     local machine="$1" iface="$2" prefix="$3" family="$4" timeout="$5"
     for i in $(seq 1 "$timeout"); do
-        IP=$(m_exec "$machine" ip -j addr show "$iface" | jq -r '.[0].addr_info[]? | select(.family=="'"$family"'") | .local // empty' | grep "$prefix" | head -n1 || true)
+        # Robust IP extraction masking errors to prevent shell aborts
+        local ip_json
+        ip_json=$(m_exec "$machine" ip -j addr show "$iface" 2>/dev/null || echo "[]")
+        IP=$(echo "$ip_json" | jq -e -r '.[0].addr_info[]? | select(.family=="'"$family"'") | .local // empty' 2>/dev/null | grep "$prefix" | head -n1 || true)
         if [ -n "$IP" ]; then echo "$IP"; return 0; fi
         sleep 2
     done
+    err "IP convergence failed for $machine $iface. Interface state:" >&2
+    m_exec "$machine" ip addr show "$iface" >&2 || true
+    m_exec "$machine" networkctl status "$iface" >&2 || true
     return 1
 }
 

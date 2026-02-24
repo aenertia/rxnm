@@ -91,7 +91,7 @@ jobs:
     - name: Prepare Host Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y systemd-container bridge-utils dbus-user-session jq
+        sudo apt-get install -y systemd-container bridge-utils dbus-user-session jq kmod
         if systemctl is-active --quiet apparmor; then
             sudo systemctl stop apparmor
             sudo systemctl disable apparmor
@@ -129,19 +129,10 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Compile and Load Virtual WiFi (mac80211_hwsim)
+    - name: Compile and Load Dependencies & Virtual WiFi
       run: |
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session
-        
-        # Install the official extra modules for the active kernel which includes mac80211_hwsim
-        sudo apt-get install -y linux-modules-extra-$(uname -r) || echo "Note: linux-modules-extra unavailable."
-        sudo depmod -a
-        
-        # Load prerequisite crypto modules for IWD and mac80211
-        for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
-          sudo modprobe "$mod" || true
-        done
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod git curl
         
         sudo mkdir -p /etc/NetworkManager/conf.d
         echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
@@ -157,13 +148,86 @@ jobs:
         sudo sysctl -w net.ipv4.ip_forward=1
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
-        # Attempt to load the virtual radio module natively
-        if sudo modprobe mac80211_hwsim radios=2; then
-          echo "HWSIM_METHOD=modprobe" >> $GITHUB_ENV
+        echo "Sweeping required modules..."
+        # Ordered topologically (Crypto -> Networking -> Hardware)
+        REQUIRED_MODULES="pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic mac80211_hwsim"
+        MISSING_MODULES=""
+        
+        for mod in $REQUIRED_MODULES; do
+          if ! sudo modprobe "$mod" 2>/dev/null; then
+            MISSING_MODULES="$MISSING_MODULES $mod"
+          fi
+        done
+        
+        if [ -n "$MISSING_MODULES" ]; then
+            echo "Missing modules detected: $MISSING_MODULES"
+            echo "Strictly compiling missing modules from kernel sources..."
+            KVER=$(uname -r | grep -o '^[0-9]\+\.[0-9]\+')
+            mkdir -p /tmp/linux-src
+            cd /tmp/linux-src
+            
+            git init
+            git remote add origin https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+            git sparse-checkout set crypto/ net/wireless/ net/mac80211/ net/rfkill/ drivers/net/wireless/
+            
+            if ! git pull --depth 1 origin "linux-$KVER.y" 2>/dev/null; then
+                echo "Falling back to torvalds/master for kernel source..."
+                git remote set-url origin https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+                git pull --depth 1 origin master
+            fi
+            
+            for mod in $MISSING_MODULES; do
+                echo "Compiling $mod..."
+                DIR=""
+                CONFIG=""
+                case "$mod" in
+                    pkcs8_key_parser) DIR="crypto/asymmetric_keys"; CONFIG="CONFIG_PKCS8_PRIVATE_KEY_PARSER" ;;
+                    arc4) DIR="crypto"; CONFIG="CONFIG_CRYPTO_ARC4" ;;
+                    md4) DIR="crypto"; CONFIG="CONFIG_CRYPTO_MD4" ;;
+                    cmac) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CMAC" ;;
+                    ecb) DIR="crypto"; CONFIG="CONFIG_CRYPTO_ECB" ;;
+                    des3_ede) DIR="crypto"; CONFIG="CONFIG_CRYPTO_DES" ;;
+                    algif_skcipher) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API_SKCIPHER" ;;
+                    algif_hash) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API_HASH" ;;
+                    af_alg) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API" ;;
+                    cfg80211) DIR="net/wireless"; CONFIG="CONFIG_CFG80211" ;;
+                    mac80211) DIR="net/mac80211"; CONFIG="CONFIG_MAC80211" ;;
+                    rfkill) DIR="net/rfkill"; CONFIG="CONFIG_RFKILL" ;;
+                    ccm) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CCM" ;;
+                    cbc) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CBC" ;;
+                    sha256_generic) DIR="crypto"; CONFIG="CONFIG_CRYPTO_SHA256" ;;
+                    sha512_generic) DIR="crypto"; CONFIG="CONFIG_CRYPTO_SHA512" ;;
+                    mac80211_hwsim) DIR="drivers/net/wireless"; CONFIG="CONFIG_MAC80211_HWSIM" ;;
+                esac
+                
+                if [ -n "$DIR" ]; then
+                    # Force compilation of specific subsystem objects via kernel Kbuild
+                    make -C /lib/modules/$(uname -r)/build M=$(pwd)/$DIR $CONFIG=m modules || echo "::warning::Compilation failed for $mod"
+                    
+                    MOD_FILE=$(find $(pwd)/$DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
+                    if [ -n "$MOD_FILE" ]; then
+                        if [ "$mod" = "mac80211_hwsim" ]; then
+                            sudo insmod "$MOD_FILE" radios=2 || echo "::warning::Failed to load $mod"
+                        else
+                            sudo insmod "$MOD_FILE" || echo "::warning::Failed to load $mod"
+                        fi
+                    else
+                        echo "::warning::Module file for $mod not found after compilation!"
+                    fi
+                fi
+            done
         else
-          echo "HWSIM_FAILED=true" >> $GITHUB_ENV
-          echo "::warning::mac80211_hwsim failed to load natively. Will run interop with --skip-wifi fallback."
-          dmesg | tail -n 30
+            echo "All required modules are already available via modprobe/built-in."
+        fi
+        
+        if lsmod | grep -q mac80211_hwsim; then
+           echo "HWSIM_METHOD=compiled" >> $GITHUB_ENV
+           echo "HWSIM_FAILED=false" >> $GITHUB_ENV
+           echo "✓ Successfully loaded mac80211_hwsim"
+        else
+           echo "HWSIM_FAILED=true" >> $GITHUB_ENV
+           echo "::warning::mac80211_hwsim failed to load."
+           dmesg | tail -n 30
         fi
 
     - name: Build RXNM Agent
