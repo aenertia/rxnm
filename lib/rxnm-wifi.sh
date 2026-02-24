@@ -11,10 +11,6 @@
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 get_wifi_iface() {
-    local preferred=""
-    [ "$#" -gt 0 ] && preferred="$1"
-    if [ -n "$preferred" ]; then echo "$preferred"; return; fi
-    
     local now
     now=$(printf '%(%s)T' -1 2>/dev/null) || now=$(date +%s)
     local cache_ttl=30
@@ -290,8 +286,9 @@ _task_p2p_scan() {
 _task_p2p_connect() {
     local peer_name="$1"
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+    local peer_path
     # shellcheck disable=SC2016
-    local peer_path; peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
+    peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
     if busctl --timeout=15s call net.connman.iwd "$peer_path" net.connman.iwd.p2p.Peer Connect >/dev/null 2>&1; then echo "OK"; return 0; else echo "P2P Connection Failed" >&2; return 1; fi
 }
