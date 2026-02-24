@@ -1,286 +1,283 @@
-name: RXNM CI (Native Nspawn)
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
 
-on:
-  push:
-    branches: [ "main", "master", "v1.1.0" ]
-  pull_request:
-    branches: [ "main", "master", "v1.1.0" ]
+# -----------------------------------------------------------------------------
+# FILE: rxnm-config-builder.sh
+# PURPOSE: Configuration Templating Engine (Aligned with systemd 255.8+)
+# ARCHITECTURE: Logic / Templating
+# -----------------------------------------------------------------------------
 
-jobs:
-  unit-and-posix:
-    name: "Unit Tests & POSIX Compat"
-    runs-on: ubuntu-24.04
+_get_system_template_val() {
+    local fname="$1"
+    local key="$2"
+    local f="/usr/lib/systemd/network/$fname"
+    [ -f "$f" ] || return
     
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+    while IFS= read -r line; do
+        case "$line" in
+            "${key}="*)
+                local val="${line#*=}"
+                val="${val%%#*}"
+                val="$(echo "$val" | tr -d '[:space:]')"
+                echo "$val"
+                return
+                ;;
+        esac
+    done < "$f"
+}
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y dash shellcheck valgrind jq
+_ini_safe() {
+    printf '%s' "$1" | tr -d '\000-\037\177'
+}
 
-    - name: Build & Unit Tests
-      run: |
-        echo "=== PHASE 1: Build & Unit Tests ==="
-        make tiny
-        make lint
-        export GITHUB_ACTIONS=true
-        make test-all
+build_network_config() {
+    local match_iface=""
+    local match_ssid=""
+    local ssid_match_only="false"
+    local dhcp="yes"
+    local desc=""
+    local addresses=""
+    local gateway=""
+    local dns_servers=""
+    local bridge=""
+    local vlan=""
+    local domains=""
+    local mac_policy=""
+    local routes=""
+    local mdns="yes"
+    local llmnr="yes"
+    local bond=""
+    local metric=""
+    local vrf=""
+    local mtu=""
+    local mac_addr=""
+    local ipv6_privacy=""
+    local dhcp_client_id=""
+    local ipv6_pd="yes"
 
-    - name: "Path B: POSIX/dash compatibility"
-      run: |
-        echo "=== Step 1: dash -n syntax check on lib/*.sh ==="
-        FAIL=0
-        for f in lib/*.sh; do
-          # rxnm-config-schema.sh uses Bash-only syntax below its POSIX guard.
-          # It cannot pass dash -n. We skip it here and explicitly lint it as bash.
-          case "$f" in lib/rxnm-config-schema.sh) continue ;; esac
-          if ! dash -n "$f"; then
-            echo "POSIX FAIL [dash -n]: $f"
-            FAIL=1
-          fi
-        done
-        for f in bin/rxnm; do
-          [ -f "$f" ] || continue
-          if ! dash -n "$f"; then
-            echo "POSIX FAIL [dash -n]: $f"
-            FAIL=1
-          fi
-        done
-        [ "$FAIL" -eq 0 ] || { echo "dash -n check failed"; exit 1; }
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --match-name) match_iface="$2"; shift 2 ;;
+            --match-ssid) match_ssid="$2"; shift 2 ;;
+            --ssid-match-only) ssid_match_only="true"; shift ;;
+            --dhcp) dhcp="$2"; shift 2 ;;
+            --description) desc="$2"; shift 2 ;;
+            --address) addresses="$2"; shift 2 ;;
+            --gateway) gateway="$2"; shift 2 ;;
+            --dns) dns_servers="$2"; shift 2 ;;
+            --bridge) bridge="$2"; shift 2 ;;
+            --vlan) vlan="$2"; shift 2 ;;
+            --domains) domains="$2"; shift 2 ;;
+            --mac-policy) mac_policy="$2"; shift 2 ;;
+            --routes) routes="$2"; shift 2 ;;
+            --mdns) mdns="$2"; shift 2 ;;
+            --llmnr) llmnr="$2"; shift 2 ;;
+            --bond) bond="$2"; shift 2 ;;
+            --metric) metric="$2"; shift 2 ;;
+            --vrf) vrf="$2"; shift 2 ;;
+            --mtu) mtu="$2"; shift 2 ;;
+            --mac-addr) mac_addr="$2"; shift 2 ;;
+            --ipv6-privacy) ipv6_privacy="$2"; shift 2 ;;
+            --dhcp-client-id) dhcp_client_id="$2"; shift 2 ;;
+            --ipv6-pd) ipv6_pd="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
 
-        echo "=== Step 2: shellcheck strict POSIX on key lib files ==="
-        shellcheck --shell=sh --exclude=SC3043 \
-          lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
-          lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
-          
-        # Explicitly lint the schema file as bash to ensure safety
-        shellcheck --shell=bash lib/rxnm-config-schema.sh || exit 1
+    if [ "$mdns" = "yes" ] && command -v is_avahi_running >/dev/null 2>&1 && is_avahi_running; then
+        mdns="no"
+    fi
 
-        echo "=== Step 3b: Full POSIX library source test ==="
-        RXNM_SHELL_IS_BASH=false RXNM_AGENT_BIN="/nonexistent/rxnm-agent" \
-          dash -c '
-            RXNM_LIB_DIR=./lib
-            for f in ./lib/rxnm-constants.sh ./lib/rxnm-utils.sh \
-                     ./lib/rxnm-system.sh ./lib/rxnm-wifi.sh \
-                     ./lib/rxnm-bluetooth.sh ./lib/rxnm-interfaces.sh \
-                     ./lib/rxnm-routes.sh ./lib/rxnm-profiles.sh \
-                     ./lib/rxnm-templates.sh ./lib/rxnm-nullify.sh \
-                     ./lib/rxnm-roaming.sh ./lib/rxnm-virt.sh \
-                     ./lib/rxnm-vpn.sh ./lib/rxnm-pppoe.sh \
-                     ./lib/rxnm-tunnel.sh ./lib/rxnm-mpls.sh \
-                     ./lib/rxnm-ha.sh ./lib/rxnm-plugins.sh \
-                     ./lib/rxnm-diagnostics.sh ./lib/rxnm-help.sh; do
-              [ -f "$f" ] || continue
-              . "$f" || { echo "FAIL: source $f"; exit 1; }
-            done
-            json_success "{\"test\":\"posix_source_all\"}" | grep -q "success.*true" || exit 1
-            echo "POSIX source all: OK"
-          ' || exit 1
+    local safe_match_iface; safe_match_iface=$(_ini_safe "${match_iface}")
+    local safe_match_ssid; safe_match_ssid=$(_ini_safe "${match_ssid}")
+    local safe_desc; safe_desc=$(_ini_safe "${desc}")
+    local safe_mac_addr; safe_mac_addr=$(_ini_safe "${mac_addr}")
 
-  integration-wired:
-    name: "Integration: Wired & Bridge"
-    runs-on: ubuntu-24.04
-    needs: unit-and-posix
+    printf "[Match]\n"
+    [ -n "$safe_match_iface" ] && printf "Name=%s\n" "${safe_match_iface}"
+    [ -n "$safe_match_ssid" ] && printf "SSID=%s\n" "${safe_match_ssid}"
     
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Prepare Host Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y systemd-container bridge-utils dbus-user-session jq kmod
-        if systemctl is-active --quiet apparmor; then
-            sudo systemctl stop apparmor
-            sudo systemctl disable apparmor
-        fi
-        sudo sysctl -w net.ipv4.ip_forward=1
-        sudo sysctl -w net.ipv6.conf.all.forwarding=1
-
-    - name: Build RXNM Agent
-      run: make tiny
-
-    - name: Run Integration Tests
-      run: |
-        sudo chmod +x tests/integration/run_interop.sh
-        sudo ./tests/integration/run_interop.sh --skip-wifi
-
-    - name: Run ROCKNIX Bundle Integration Tests
-      run: |
-        make rocknix-release
-        sudo chmod +x tests/integration/run_rocknix_interop.sh
-        sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
-
-    - name: Run Full Combined Bundle Integration Tests
-      run: |
-        make combined-full
-        sudo chmod +x tests/integration/run_rocknix_interop.sh
-        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi
-
-  integration-wifi:
-    name: "Integration: Virtual WiFi (hwsim)"
-    runs-on: ubuntu-24.04
-    needs: unit-and-posix
-    continue-on-error: true   
+    case "$safe_match_iface" in
+        wlan*|mlan*|uap*) printf "Type=wlan\n" ;;
+    esac
     
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+    [ "$ssid_match_only" = "true" ] && return
 
-    - name: Compile and Load Dependencies & Virtual WiFi
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl dpkg-dev flex bison libssl-dev libelf-dev bc
-        
-        sudo mkdir -p /etc/NetworkManager/conf.d
-        echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
-        sudo systemctl reload-or-restart NetworkManager || true
-        sudo systemctl stop wpa_supplicant 2>/dev/null || true
-        sudo systemctl mask wpa_supplicant || true
-        
-        if systemctl is-active --quiet apparmor; then
-            sudo systemctl stop apparmor
-            sudo systemctl disable apparmor
-        fi
-        
-        sudo sysctl -w net.ipv4.ip_forward=1
-        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+    if [ -n "$mac_policy" ] || [ -n "$mtu" ] || [ -n "$safe_mac_addr" ]; then
+        printf "\n[Link]\n"
+        [ -n "$mac_policy" ] && printf "MACAddressPolicy=%s\n" "${mac_policy}"
+        [ -n "$safe_mac_addr" ] && printf "MACAddress=%s\n" "${safe_mac_addr}"
+        [ -n "$mtu" ] && printf "MTUBytes=%s\n" "${mtu}"
+    fi
 
-        echo "Sweeping required modules..."
-        # Ordered topologically (Crypto -> Networking -> Hardware)
-        REQUIRED_MODULES="pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic mac80211_hwsim"
-        MISSING_MODULES=""
-        
-        for mod in $REQUIRED_MODULES; do
-          if ! sudo modprobe "$mod" 2>/dev/null; then
-            MISSING_MODULES="$MISSING_MODULES $mod"
-          fi
+    printf "\n[Network]\n"
+    [ -n "$safe_desc" ] && printf "Description=%s\n" "${safe_desc}"
+    [ -n "$dhcp" ] && printf "DHCP=%s\n" "${dhcp}"
+    
+    [ -n "$bridge" ] && printf "Bridge=%s\n" "${bridge}"
+    [ -n "$bond" ] && printf "Bond=%s\n" "${bond}"
+    [ -n "$vrf" ] && printf "VRF=%s\n" "${vrf}"
+    [ -n "$vlan" ] && printf "VLAN=%s\n" "${vlan}"
+    
+    printf "MulticastDNS=%s\nLLMNR=%s\n" "${mdns}" "${llmnr}"
+    printf "LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
+    
+    printf "IPForward=yes\n"
+
+    if [ -n "$ipv6_privacy" ]; then
+        printf "IPv6PrivacyExtensions=%s\n" "${ipv6_privacy}"
+    fi
+
+    if [ -n "$addresses" ]; then
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for addr in $addresses; do
+            addr=$(printf '%s' "$addr" | tr -d ' ')
+            [ -z "$addr" ] && continue
+            printf "Address=%s\n" "$addr"
         done
+        IFS="$_old_ifs"
+        set +f
+    fi
+    
+    if [ -n "$gateway" ]; then
+        printf "Gateway=%s\n" "${gateway}"
+    fi
+    
+    if [ -n "$dns_servers" ]; then
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for d in $dns_servers; do
+            d=$(printf '%s' "$d" | tr -d ' ')
+            [ -z "$d" ] && continue
+            printf "DNS=%s\n" "$d"
+        done
+        IFS="$_old_ifs"
+        set +f
+    fi
+    
+    if [ -n "$domains" ]; then
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for d in $domains; do
+            d=$(printf '%s' "$d" | tr -d ' ')
+            [ -z "$d" ] && continue
+            local safe_d; safe_d=$(_ini_safe "$d")
+            printf "Domains=%s\n" "${safe_d}"
+        done
+        IFS="$_old_ifs"
+        set +f
+    fi
+    
+    if [ "$dhcp" != "no" ] || [ -n "$dhcp_client_id" ]; then
+         printf "\n[DHCPv4]\n"
+         if [ -n "$dhcp_client_id" ]; then
+             local safe_dhcp_id; safe_dhcp_id=$(_ini_safe "${dhcp_client_id}")
+             printf "ClientIdentifier=%s\n" "${safe_dhcp_id}"
+         fi
+         [ "$dhcp" != "no" ] && [ -n "$metric" ] && printf "RouteMetric=%s\n" "${metric}"
+    fi
+    
+    if [ "$ipv6_pd" = "no" ]; then
+        printf "\n[DHCPv6]\nUseDelegatedPrefix=no\n"
+    fi
+
+    if [ -n "$routes" ]; then
+        set -f
+        local _old_ifs="$IFS"
+        IFS=","
+        for r in $routes; do
+            r=$(printf '%s' "$r" | tr -d ' ')
+            [ -z "$r" ] && continue
+            local r_dest="" r_gw="" r_metric=""
+            r_dest=$(echo "$r" | cut -d'@' -f1)
+            r_gw=$(echo "$r" | cut -d'@' -f2 -s)
+            r_metric=$(echo "$r" | cut -d'@' -f3 -s)
+            
+            [ -z "$r_dest" ] && r_dest="$r"
+            
+            printf "\n[Route]\nDestination=%s\n" "${r_dest}"
+            [ -n "$r_gw" ] && printf "Gateway=%s\n" "${r_gw}"
+            if [ -n "$r_metric" ]; then 
+                printf "Metric=%s\n" "${r_metric}"
+            elif [ -n "$metric" ] && [ "$dhcp" = "no" ]; then 
+                printf "Metric=%s\n" "${metric}"
+            fi
+        done
+        IFS="$_old_ifs"
+        set +f
+    fi
+}
+
+build_device_link_config() {
+    local iface="$1" speed="$2" duplex="$3" autoneg="$4" wol="$5" mac_policy="$6" name_policy="$7" mac_addr="$8"
+    
+    local safe_iface; safe_iface=$(_ini_safe "$iface")
+    local safe_mac_addr; safe_mac_addr=$(_ini_safe "$mac_addr")
+    
+    printf "[Match]\nOriginalName=%s\n" "${safe_iface}"
+    printf "\n[Link]\nDescription=RXNM Hardware Config\n"
+    
+    [ -n "$speed" ] && printf "BitsPerSecond=%sM\n" "${speed}"
+    [ -n "$duplex" ] && printf "Duplex=%s\n" "${duplex}"
+    [ -n "$autoneg" ] && printf "AutoNegotiation=%s\n" "${autoneg}"
+    [ -n "$wol" ] && printf "WakeOnLan=%s\n" "${wol}"
+    [ -n "$mac_policy" ] && printf "MACAddressPolicy=%s\n" "${mac_policy}"
+    [ -n "$name_policy" ] && printf "NamePolicy=%s\n" "${name_policy}"
+    [ -n "$safe_mac_addr" ] && printf "MACAddress=%s\n" "${safe_mac_addr}"
+}
+
+build_gateway_config() {
+    local iface="$1" ip="$2" share="$3" desc="$4" mdns="${5:-yes}" llmnr="${6:-yes}" ipv6_pd="${7:-yes}"
+    
+    if [ "$mdns" = "yes" ] && command -v is_avahi_running >/dev/null 2>&1 && is_avahi_running; then mdns="no"; fi
+    
+    if [ -z "$ip" ]; then
+        local detected_ip=""
+        case "$iface" in
+            usb*|rndis*) detected_ip=$(_get_system_template_val "70-usb-gadget.network" "Address") ;;
+            wlan*) [ "$share" = "true" ] && detected_ip=$(_get_system_template_val "70-wifi-ap-share.network" "Address") ;;
+        esac
         
-        if [ -n "$MISSING_MODULES" ]; then
-            echo "Missing modules detected: $MISSING_MODULES"
-            echo "Strictly compiling missing modules from exact Ubuntu kernel sources to guarantee ABI match..."
-            
-            # Enable deb-src repositories in Ubuntu 24.04
-            sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
-            sudo apt-get update
-            
-            mkdir -p /tmp/linux-src
-            cd /tmp/linux-src
-            
-            # Identify the exact package for the running kernel (e.g., linux-image-6.11.0-1018-azure)
-            PKG=$(dpkg -S /boot/vmlinuz-$(uname -r) 2>/dev/null | awk -F: '{print $1}' | head -n1)
-            if [ -n "$PKG" ]; then
-                apt-get source "$PKG" || apt-get source linux-azure || apt-get source linux
+        if [ -n "$detected_ip" ]; then ip="$detected_ip"
+        else
+            if [ "$share" = "true" ]; then ip="${DEFAULT_GW_V4:-192.168.212.1/24}"
             else
-                apt-get source linux-azure || apt-get source linux
+                 case "$iface" in
+                    usb*|rndis*) ip="192.168.213.1/24" ;;
+                    *) ip="169.254.1.1/16" ;;
+                 esac
             fi
-            
-            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | head -n1)
-            if [ -z "$SRC_DIR" ]; then
-                echo "::error::Failed to download exact Ubuntu kernel source."
-                exit 1
-            fi
-            cd "$SRC_DIR"
-            
-            echo "Preparing kernel build environment for $(uname -r)..."
-            cp /boot/config-$(uname -r) .config
-            cp /usr/src/linux-headers-$(uname -r)/Module.symvers . || true
-            
-            # Ensure necessary configs are set to module (m)
-            cat <<EOF >> .config
-        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
-        CONFIG_CRYPTO_ARC4=m
-        CONFIG_CRYPTO_MD4=m
-        CONFIG_CRYPTO_CMAC=m
-        CONFIG_CRYPTO_ECB=m
-        CONFIG_CRYPTO_DES=m
-        CONFIG_CRYPTO_USER_API_SKCIPHER=m
-        CONFIG_CRYPTO_USER_API_HASH=m
-        CONFIG_CRYPTO_USER_API=m
-        CONFIG_CFG80211=m
-        CONFIG_MAC80211=m
-        CONFIG_RFKILL=m
-        CONFIG_CRYPTO_CCM=m
-        CONFIG_CRYPTO_CBC=m
-        CONFIG_CRYPTO_SHA256=m
-        CONFIG_CRYPTO_SHA512=m
-        CONFIG_MAC80211_HWSIM=m
-        EOF
-            
-            make olddefconfig
-            make modules_prepare
-            
-            for mod in $MISSING_MODULES; do
-                KO_PATH=""
-                case "$mod" in
-                    pkcs8_key_parser) KO_PATH="crypto/asymmetric_keys/pkcs8_key_parser.ko" ;;
-                    arc4) KO_PATH="crypto/arc4.ko" ;;
-                    md4) KO_PATH="crypto/md4.ko" ;;
-                    cmac) KO_PATH="crypto/cmac.ko" ;;
-                    ecb) KO_PATH="crypto/ecb.ko" ;;
-                    des3_ede) KO_PATH="crypto/des_generic.ko" ;;
-                    algif_skcipher) KO_PATH="crypto/algif_skcipher.ko" ;;
-                    algif_hash) KO_PATH="crypto/algif_hash.ko" ;;
-                    af_alg) KO_PATH="crypto/af_alg.ko" ;;
-                    cfg80211) KO_PATH="net/wireless/cfg80211.ko" ;;
-                    mac80211) KO_PATH="net/mac80211/mac80211.ko" ;;
-                    rfkill) KO_PATH="net/rfkill/rfkill.ko" ;;
-                    ccm) KO_PATH="crypto/ccm.ko" ;;
-                    cbc) KO_PATH="crypto/cbc.ko" ;;
-                    sha256_generic) KO_PATH="crypto/sha256_generic.ko" ;;
-                    sha512_generic) KO_PATH="crypto/sha512_generic.ko" ;;
-                    mac80211_hwsim) KO_PATH="drivers/net/wireless/mac80211_hwsim.ko" ;;
-                esac
-                
-                if [ -n "$KO_PATH" ]; then
-                    echo "Compiling $KO_PATH..."
-                    # In-tree direct build avoids out-of-tree macro/ABI mismatches
-                    make $KO_PATH || echo "::warning::Compilation failed for $mod"
-                    
-                    if [ -f "$KO_PATH" ]; then
-                        if [ "$mod" = "mac80211_hwsim" ]; then
-                            sudo insmod "$KO_PATH" radios=2 || echo "::warning::Failed to load $mod"
-                        else
-                            sudo insmod "$KO_PATH" || echo "::warning::Failed to load $mod"
-                        fi
-                    else
-                        echo "::warning::$KO_PATH not found after make!"
-                    fi
-                fi
-            done
-        else
-            echo "All required modules are already available via modprobe/built-in."
         fi
+    fi
+    
+    local safe_iface; safe_iface=$(_ini_safe "$iface")
+    local safe_desc; safe_desc=$(_ini_safe "$desc")
+    
+    printf "[Match]\nName=%s\n" "${safe_iface}"
+    case "$safe_iface" in
+        wlan*) printf "Type=wlan\n" ;;
+    esac
+
+    printf "\n[Network]\nDescription=%s\n" "${safe_desc}"
+    printf "MulticastDNS=%s\nLLMNR=%s\n" "${mdns}" "${llmnr}"
+    [ -n "$ip" ] && printf "Address=%s\n" "${ip}"
+    printf "LinkLocalAddressing=yes\nConfigureWithoutCarrier=yes\n"
+    
+    if [ "$share" = "true" ]; then
+        # v255.8 Compliant Forwarding (NAT is handled externally by rxnm-system)
+        printf "IPForward=yes\nIPv6SendRA=yes\n"
+        if [ "$ipv6_pd" != "no" ]; then printf "DHCPPrefixDelegation=yes\n"; fi
         
-        if lsmod | grep -q mac80211_hwsim; then
-           echo "HWSIM_METHOD=compiled" >> $GITHUB_ENV
-           echo "HWSIM_FAILED=false" >> $GITHUB_ENV
-           echo "✓ Successfully loaded mac80211_hwsim"
-        else
-           echo "HWSIM_FAILED=true" >> $GITHUB_ENV
-           echo "::warning::mac80211_hwsim failed to load."
-           dmesg | tail -n 30
-        fi
-
-    - name: Build RXNM Agent
-      run: make tiny
-
-    - name: Run Integration Tests
-      run: |
-        sudo chmod +x tests/integration/run_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo ./tests/integration/run_interop.sh --skip-wifi; else sudo ./tests/integration/run_interop.sh --wifi-only; fi
-
-    - name: Run ROCKNIX Bundle Integration Tests
-      run: |
-        make rocknix-release
-        sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi; else sudo ./tests/integration/run_rocknix_interop.sh --wifi-only; fi
-
-    - name: Run Full Combined Bundle Integration Tests
-      run: |
-        make combined-full
-        sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi; else sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only; fi
+        printf "Address=fd00:cafe:feed::a7ca:de/64\n"
+        
+        printf "DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\nEmitRouter=yes\n"
+        printf "[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
+    else
+        printf "Address=fd00:cafe:feed::a7ca:de/64\n"
+        printf "IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
+    fi
+}

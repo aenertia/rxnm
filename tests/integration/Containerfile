@@ -1,5 +1,5 @@
-# Use Fedora Latest Stable
-FROM registry.fedoraproject.org/fedora:43
+# Use Fedora Latest Stable (Avoid Rawhide/Unstable like 43 to prevent CI breaks)
+FROM registry.fedoraproject.org/fedora:42
 
 # --- Systemd Container Standards ---
 ENV container=docker
