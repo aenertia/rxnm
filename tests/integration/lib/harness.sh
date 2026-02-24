@@ -42,13 +42,47 @@ cleanup() {
     
     if [ "$EXIT_CODE" -ne 0 ]; then
         err "TEST FAILED - DUMPING LOGS"
-        journalctl -M "$SERVER" -u iwd -n 50 --no-pager || true
-        journalctl -M "$CLIENT" -u iwd -n 50 --no-pager || true
+        journalctl -M "$SERVER" -u iwd -n 50 --no-pager 2>/dev/null || true
+        journalctl -M "$CLIENT" -u iwd -n 50 --no-pager 2>/dev/null || true
     fi
 
     machinectl terminate "$SERVER" 2>/dev/null || true
     machinectl terminate "$CLIENT" 2>/dev/null || true
     ip link delete "$BRIDGE" 2>/dev/null || true
+}
+
+setup_bridge() {
+    info "Setting up network bridge ($BRIDGE)..."
+    sudo ip link add name "$BRIDGE" type bridge 2>/dev/null || true
+    sudo ip link set "$BRIDGE" up
+}
+
+build_rootfs() {
+    info "Building Container RootFS at $ROOTFS..."
+    if [ ! -d "$ROOTFS/etc" ]; then
+        sudo mkdir -p "$ROOTFS"
+        local engine="docker"
+        if command -v podman >/dev/null 2>&1; then engine="podman"; fi
+
+        info "Using $engine to build base image..."
+        sudo $engine build -t rxnm-base -f tests/integration/Containerfile tests/integration/
+        local ctr
+        ctr=$(sudo $engine create rxnm-base)
+        sudo $engine export "$ctr" | sudo tar -x -C "$ROOTFS"
+        sudo $engine rm "$ctr"
+    else
+        info "RootFS already exists, reusing."
+    fi
+
+    # Inject sanitize_wifi.sh as documented in UPSTREAM.md to prevent ghost P2P interfaces
+    sudo mkdir -p "$ROOTFS/usr/local/bin"
+    cat << 'EOF' | sudo tee "$ROOTFS/usr/local/bin/sanitize_wifi.sh" > /dev/null
+#!/bin/bash
+for wdev in $(iw dev | awk '/Interface/ {iface=$2} /type P2P-device/ {print iface}'); do
+    iw dev "$wdev" del 2>/dev/null || true
+done
+EOF
+    sudo chmod +x "$ROOTFS/usr/local/bin/sanitize_wifi.sh"
 }
 
 setup_hwsim() {
