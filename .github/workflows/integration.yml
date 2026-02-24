@@ -181,24 +181,47 @@ jobs:
             sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
             sudo apt-get update
             
-            # Extract the actual base source package, stripping out the "signed" and "meta" wrappers
-            PKG_NAME=$(dpkg -S /boot/vmlinuz-$(uname -r) 2>/dev/null | awk -F: '{print $1}' | head -n1)
-            SRC_PKG=$(apt-cache show $PKG_NAME | awk '/^Source:/ {print $2}' | head -n1)
-            [ -z "$SRC_PKG" ] && SRC_PKG=$PKG_NAME
-            SRC_PKG=$(echo "$SRC_PKG" | sed 's/signed-//g; s/-signed//g; s/-meta//g')
-            
             mkdir -p /tmp/linux-src
             cd /tmp/linux-src
             
-            echo "Fetching source for $SRC_PKG..."
-            # Run WITHOUT sudo so 'runner' owns the directory to prevent _apt permission drops failing
-            apt-get source "$SRC_PKG" || apt-get source linux-azure || apt-get source linux
+            KVER=$(uname -r | cut -d- -f1) # e.g., 6.11.0
+            SRC_DIR=""
             
-            # Robust check to ensure we descend into the actual kernel tree (must contain a Makefile)
-            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
+            echo "Strategy 1: Attempting apt-get source on specific kernel packages..."
+            for pkg in "linux-image-unsigned-$(uname -r)" "linux-modules-$(uname -r)" "linux-azure"; do
+                echo "Trying: apt-get source $pkg"
+                apt-get source "$pkg" || true
+                SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
+                if [ -n "$SRC_DIR" ]; then
+                    echo "✓ Found valid source tree in $SRC_DIR"
+                    break
+                fi
+                echo "✗ No valid source tree found, cleaning up..."
+                rm -rf ./*
+            done
             
             if [ -z "$SRC_DIR" ]; then
-                echo "::error::Failed to download valid kernel source tree."
+                echo "Strategy 2: Attempting to install and extract linux-source package..."
+                sudo apt-get install -y "linux-source-$KVER" || sudo apt-get install -y linux-source || true
+                TARBALL=$(ls /usr/src/linux-source-$KVER*.tar.* 2>/dev/null | head -n1 || ls /usr/src/linux-source-*.tar.* 2>/dev/null | head -n1)
+                if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
+                    echo "Extracting $TARBALL..."
+                    tar -xf "$TARBALL"
+                    SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-source-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
+                    if [ -n "$SRC_DIR" ]; then
+                        echo "✓ Successfully extracted source tree from $TARBALL"
+                    fi
+                fi
+            fi
+            
+            if [ -z "$SRC_DIR" ]; then
+                echo "Strategy 3: Fallback to generic linux source..."
+                apt-get source linux || true
+                SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
+            fi
+            
+            if [ -z "$SRC_DIR" ]; then
+                echo "::error::Failed to download or extract a valid kernel source tree."
                 exit 1
             fi
             cd "$SRC_DIR"
