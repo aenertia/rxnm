@@ -134,30 +134,15 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session
         
+        # Install the official extra modules for the active kernel which includes mac80211_hwsim
+        sudo apt-get install -y linux-modules-extra-$(uname -r) || echo "Note: linux-modules-extra unavailable."
+        sudo depmod -a
+        
         # Load prerequisite crypto modules for IWD and mac80211
         for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
           sudo modprobe "$mod" || true
         done
         
-        if ! modinfo mac80211_hwsim >/dev/null 2>&1; then
-          echo "Compiling mac80211_hwsim from kernel source..."
-          mkdir -p /tmp/hwsim_src && cd /tmp/hwsim_src
-          BASE_VER=$(uname -r | grep -o '^[0-9]\+\.[0-9]\+')
-          
-          wget "https://raw.githubusercontent.com/torvalds/linux/v${BASE_VER}/drivers/net/wireless/mac80211_hwsim.c" || \
-          wget "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mac80211_hwsim.c"
-          
-          wget "https://raw.githubusercontent.com/torvalds/linux/v${BASE_VER}/drivers/net/wireless/mac80211_hwsim.h" || \
-          wget "https://raw.githubusercontent.com/torvalds/linux/master/drivers/net/wireless/mac80211_hwsim.h" || true
-
-          echo "obj-m += mac80211_hwsim.o" > Makefile
-          make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
-          sudo insmod mac80211_hwsim.ko radios=2 || true
-          cd -
-        else
-          sudo modprobe mac80211_hwsim radios=2 || true
-        fi
-
         sudo mkdir -p /etc/NetworkManager/conf.d
         echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
         sudo systemctl reload-or-restart NetworkManager || true
@@ -172,11 +157,13 @@ jobs:
         sudo sysctl -w net.ipv4.ip_forward=1
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
-        if lsmod | grep -q mac80211_hwsim; then
-          echo "HWSIM_METHOD=insmod" >> $GITHUB_ENV
+        # Attempt to load the virtual radio module natively
+        if sudo modprobe mac80211_hwsim radios=2; then
+          echo "HWSIM_METHOD=modprobe" >> $GITHUB_ENV
         else
           echo "HWSIM_FAILED=true" >> $GITHUB_ENV
           echo "::warning::mac80211_hwsim failed to load natively. Will run interop with --skip-wifi fallback."
+          dmesg | tail -n 30
         fi
 
     - name: Build RXNM Agent

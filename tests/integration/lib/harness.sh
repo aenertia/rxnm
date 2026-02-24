@@ -25,9 +25,11 @@ warn() { echo -e "\033[0;33m[WARN]\033[0m $1"; }
 m_exec() {
     local machine="$1"
     shift
+    # Note: RXNM_FORCE_NETWORKCTL bypasses dbus-broker policy rejections in CI containers
     timeout 40s systemd-run -M "$machine" \
         --quiet --wait --pipe \
         --setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --setenv=RXNM_FORCE_NETWORKCTL=true \
         --property=After=dbus.service \
         --property=CollectMode=inactive \
         -- "$@"
@@ -42,8 +44,17 @@ cleanup() {
     
     if [ "$EXIT_CODE" -ne 0 ]; then
         err "TEST FAILED - DUMPING LOGS"
-        journalctl -M "$SERVER" -u iwd -n 50 --no-pager 2>/dev/null || true
-        journalctl -M "$CLIENT" -u iwd -n 50 --no-pager 2>/dev/null || true
+        info "=== systemd-networkd logs (Server) ==="
+        journalctl -M "$SERVER" -u systemd-networkd -n 50 --no-pager 2>/dev/null || true
+        info "=== systemd-networkd logs (Client) ==="
+        journalctl -M "$CLIENT" -u systemd-networkd -n 50 --no-pager 2>/dev/null || true
+        
+        if [ "$SKIP_WIFI" = "false" ]; then
+            info "=== iwd logs (Server) ==="
+            journalctl -M "$SERVER" -u iwd -n 50 --no-pager 2>/dev/null || true
+            info "=== iwd logs (Client) ==="
+            journalctl -M "$CLIENT" -u iwd -n 50 --no-pager 2>/dev/null || true
+        fi
     fi
 
     machinectl terminate "$SERVER" 2>/dev/null || true
@@ -114,7 +125,7 @@ setup_hwsim() {
             info "✓ Virtual radios allocated: $WLAN_SRV, $WLAN_CLI"
         fi
     else
-        warn "mac80211_hwsim module not available."
+        warn "mac80211_hwsim module not available on host. WiFi testing will be skipped."
     fi
 }
 
@@ -178,6 +189,12 @@ boot_machines() {
     info "Waiting for systemd initialization..."
     check_ready "$SERVER" || { err "$SERVER failed"; exit 1; }
     check_ready "$CLIENT" || { err "$CLIENT failed"; exit 1; }
+    
+    if [ "$SKIP_WIFI" = "true" ]; then
+        info "Masking IWD to prevent noise during wired-only tests..."
+        m_exec "$SERVER" systemctl stop iwd 2>/dev/null || true
+        m_exec "$CLIENT" systemctl stop iwd 2>/dev/null || true
+    fi
 }
 
 inject_phy_and_wait() {
