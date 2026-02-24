@@ -11,7 +11,8 @@
 : "${WIFI_IFACE_CACHE_TIME:=0}"
 
 get_wifi_iface() {
-    local preferred="${1:-}"
+    local preferred=""
+    [ "$#" -gt 0 ] && preferred="$1"
     if [ -n "$preferred" ]; then echo "$preferred"; return; fi
     
     local now
@@ -289,6 +290,7 @@ _task_p2p_scan() {
 _task_p2p_connect() {
     local peer_name="$1"
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+    # shellcheck disable=SC2016
     local peer_path; peer_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg name "$peer_name" '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"].Name.data == $name) | .key')
     [ -z "$peer_path" ] && { echo "Peer '$peer_name' not found" >&2; return 1; }
     if busctl --timeout=15s call net.connman.iwd "$peer_path" net.connman.iwd.p2p.Peer Connect >/dev/null 2>&1; then echo "OK"; return 0; else echo "P2P Connection Failed" >&2; return 1; fi
@@ -305,6 +307,7 @@ _task_p2p_status() {
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local net_json="[]"
     if command -v networkctl >/dev/null; then net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]"); fi
+    # shellcheck disable=SC2016
     "$JQ_BIN" -n --argjson net "$net_json" --argjson iwd "$objects_json" '
         ($iwd.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) | select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) | {name: .value["net.connman.iwd.p2p.Peer"].Name.data, mac: .value["net.connman.iwd.p2p.Peer"].DeviceAddress.data}) as $peers |
         ($net | map(select(.Type == "wlan" or .Name | startswith("p2p"))) | map({name: .Name, type: .Type, state: .OperationalState})) as $ifaces |
@@ -353,6 +356,7 @@ action_scan() {
     if [ -z "$objects_json" ]; then json_error "IWD returned empty data"; return 0; fi
 
     local device_path
+    # shellcheck disable=SC2016
     device_path=$(echo "$objects_json" | "$JQ_BIN" -r --arg iface "$iface" '.data[0] | to_entries[] | select(.value["net.connman.iwd.Device"].Name.data == $iface) | .key')
     [ -z "$device_path" ] && { json_error "Interface not managed by IWD"; return 0; }
     
@@ -374,6 +378,7 @@ action_scan() {
     
     # strength_pct formula maps signal [-90, -30] dBm to 0-100% percentage
     local result
+    # shellcheck disable=SC2016
     result=$(echo "$objects_json" | "$JQ_BIN" -r --arg dev "$device_path" '
         ([ .data[0] | to_entries[] | select(.value["net.connman.iwd.AccessPoint"] != null) | select(.value["net.connman.iwd.AccessPoint"].Device.data == $dev) | { network: .value["net.connman.iwd.AccessPoint"].Network.data, bssid: .value["net.connman.iwd.AccessPoint"].HardwareAddress.data, signal: (.value["net.connman.iwd.AccessPoint"].SignalStrength.data // -100), freq: .value["net.connman.iwd.AccessPoint"].Frequency.data } ] | group_by(.network) | map({key: .[0].network, value: .}) | from_entries ) as $ap_map |
         [ .data[0] | to_entries[] | select(.value["net.connman.iwd.Network"] != null) | select(.value["net.connman.iwd.Network"].Device.data == $dev) | { ssid: .value["net.connman.iwd.Network"].Name.data, security: .value["net.connman.iwd.Network"].Type.data, connected: (.value["net.connman.iwd.Network"].Connected.data == true), known: (if .value["net.connman.iwd.Network"].KnownNetwork.data then true else false end), signal: (.value["net.connman.iwd.Network"].SignalStrength.data // -100), bssids: ($ap_map[.key] // []) } ] |
