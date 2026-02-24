@@ -67,6 +67,28 @@ m_exec "$SERVER" rxnm system setup
 m_exec "$CLIENT" rxnm system setup
 
 if [ "$WIFI_ONLY" = "false" ]; then
+    info "--- [PHASE 0] Primitive L3 Connectivity (Bundle) ---"
+    m_exec "$SERVER" rxnm interface host0 set static 10.99.0.1/24
+    m_exec "$CLIENT" rxnm interface host0 set static 10.99.0.2/24
+
+    info "Waiting for L3 Static IP Convergence..."
+    SRV_IP=$(wait_ip_convergence "$SERVER" "host0" "10.99.0.1" "inet" 10)
+    CLI_IP=$(wait_ip_convergence "$CLIENT" "host0" "10.99.0.2" "inet" 10)
+
+    if [ -n "$SRV_IP" ] && [ -n "$CLI_IP" ]; then
+        if m_exec "$CLIENT" ping -c 1 -W 2 10.99.0.1 >/dev/null 2>&1; then 
+            info "✓ Basic L3 Static Ping Successful"
+        else 
+            err "Basic L3 Static Ping Failed! Plumbing issue."
+            m_exec "$CLIENT" ip addr show dev host0 || true
+            m_exec "$SERVER" ip addr show dev host0 || true
+            exit 1
+        fi
+    else
+        err "IP addresses failed to configure!"
+        exit 1
+    fi
+
     info "--- [PHASE 1] DHCP Convergence (Bundle) ---"
     m_exec "$SERVER" rxnm interface host0 set static 192.168.213.2/24
     m_exec "$SERVER" /bin/bash -c "printf '\nDHCPServer=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\n' >> /run/systemd/network/75-static-host0.network"

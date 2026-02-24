@@ -48,8 +48,15 @@ RUN cd /lib/systemd/system/sysinit.target.wants/ && \
 RUN systemctl enable systemd-networkd systemd-resolved iwd
 
 # --- Rocknix Directory Mimicry ---
+# We wipe the default Fedora /etc/systemd/network directory and symlink 
+# it directly to the ephemeral /run dir to match ROCKNIX's RAM-first behavior.
+# We also delete default container network rules to prevent host0 overrides.
 RUN mkdir -p /storage/.config/network && \
     mkdir -p /var/lib/iwd && \
-    mkdir -p /run/rocknix
+    mkdir -p /run/rocknix && \
+    mkdir -p /run/systemd/network && \
+    rm -rf /etc/systemd/network && \
+    ln -s /run/systemd/network /etc/systemd/network && \
+    rm -f /usr/lib/systemd/network/80-container*
 
 CMD ["/sbin/init"]
