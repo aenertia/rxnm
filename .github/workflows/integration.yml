@@ -161,7 +161,7 @@ jobs:
         # Fast path: Try installing prebuilt extra modules if missing
         if [ -n "$MISSING_MODULES" ]; then
             echo "Attempting to install precompiled linux-modules-extra..."
-            sudo apt-get install -y linux-modules-extra-$(uname -r) || true
+            sudo apt-get install -y linux-modules-extra-$(uname -r) linux-modules-extra-azure || true
             
             # Re-sweep
             MISSING_MODULES=""
@@ -177,25 +177,28 @@ jobs:
             echo "Missing modules still detected: $MISSING_MODULES"
             echo "Strictly compiling missing modules from exact Ubuntu kernel source..."
             
-            # Enable source repos
+            # Enable source repos for DEB822 format (Ubuntu 24.04+)
             sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
             sudo apt-get update
             
-            # Extract the actual base source package, stripping out the "signed" wrapper
+            # Extract the actual base source package, stripping out the "signed" and "meta" wrappers
             PKG_NAME=$(dpkg -S /boot/vmlinuz-$(uname -r) 2>/dev/null | awk -F: '{print $1}' | head -n1)
             SRC_PKG=$(apt-cache show $PKG_NAME | awk '/^Source:/ {print $2}' | head -n1)
             [ -z "$SRC_PKG" ] && SRC_PKG=$PKG_NAME
-            SRC_PKG=$(echo "$SRC_PKG" | sed 's/signed-//g; s/-signed//g')
+            SRC_PKG=$(echo "$SRC_PKG" | sed 's/signed-//g; s/-signed//g; s/-meta//g')
             
             mkdir -p /tmp/linux-src
             cd /tmp/linux-src
             
             echo "Fetching source for $SRC_PKG..."
-            sudo apt-get source $SRC_PKG
+            # Run WITHOUT sudo so 'runner' owns the directory to prevent _apt permission drops failing
+            apt-get source "$SRC_PKG" || apt-get source linux-azure || apt-get source linux
             
-            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | head -n1)
+            # Robust check to ensure we descend into the actual kernel tree (must contain a Makefile)
+            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
+            
             if [ -z "$SRC_DIR" ]; then
-                echo "::error::Failed to download kernel source."
+                echo "::error::Failed to download valid kernel source tree."
                 exit 1
             fi
             cd "$SRC_DIR"
@@ -225,8 +228,9 @@ jobs:
         CONFIG_MAC80211_HWSIM=m
         EOF
             
-            sudo make olddefconfig
-            sudo make modules_prepare
+            # No sudo needed for compilation, keeping files owned by runner
+            make olddefconfig
+            make modules_prepare
             
             for mod in $MISSING_MODULES; do
                 DIR=""
@@ -242,7 +246,7 @@ jobs:
                 if [ -n "$DIR" ]; then
                     echo "Compiling modules in $DIR for $mod..."
                     # Building the directory targets links the objects correctly (e.g. into mac80211.ko)
-                    sudo make M=$DIR || echo "::warning::Compilation failed for $DIR"
+                    make M=$DIR || echo "::warning::Compilation failed for $DIR"
                     
                     MOD_FILE=$(find $DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
                     if [ -n "$MOD_FILE" ]; then
