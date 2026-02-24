@@ -71,6 +71,10 @@ if [ "$WIFI_ONLY" = "false" ]; then
     m_exec "$SERVER" rxnm interface host0 set static 10.99.0.1/24
     m_exec "$CLIENT" rxnm interface host0 set static 10.99.0.2/24
 
+    # Explicitly reload networkd to apply static config before asserting ping
+    m_exec "$SERVER" rxnm system reload
+    m_exec "$CLIENT" rxnm system reload
+
     info "Waiting for L3 Static IP Convergence..."
     SRV_IP=$(wait_ip_convergence "$SERVER" "host0" "10.99.0.1" "inet" 10)
     CLI_IP=$(wait_ip_convergence "$CLIENT" "host0" "10.99.0.2" "inet" 10)
