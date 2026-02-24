@@ -257,19 +257,31 @@ jobs:
             
             for mod in $MISSING_MODULES; do
                 DIR=""
+                CONFIG_VAR=""
                 case "$mod" in
-                    pkcs8_key_parser) DIR="crypto/asymmetric_keys" ;;
-                    arc4|md4|cmac|ecb|des3_ede|algif_skcipher|algif_hash|af_alg|ccm|cbc|sha256_generic|sha512_generic) DIR="crypto" ;;
-                    cfg80211) DIR="net/wireless" ;;
-                    mac80211) DIR="net/mac80211" ;;
-                    rfkill) DIR="net/rfkill" ;;
-                    mac80211_hwsim) DIR="drivers/net/wireless" ;;
+                    pkcs8_key_parser) DIR="crypto/asymmetric_keys"; CONFIG_VAR="CONFIG_PKCS8_PRIVATE_KEY_PARSER" ;;
+                    arc4) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_ARC4" ;;
+                    md4) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_MD4" ;;
+                    cmac) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CMAC" ;;
+                    ecb) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_ECB" ;;
+                    des3_ede) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_DES" ;;
+                    algif_skcipher) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API_SKCIPHER" ;;
+                    algif_hash) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API_HASH" ;;
+                    af_alg) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API" ;;
+                    cfg80211) DIR="net/wireless"; CONFIG_VAR="CONFIG_CFG80211" ;;
+                    mac80211) DIR="net/mac80211"; CONFIG_VAR="CONFIG_MAC80211" ;;
+                    rfkill) DIR="net/rfkill"; CONFIG_VAR="CONFIG_RFKILL" ;;
+                    ccm) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CCM" ;;
+                    cbc) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CBC" ;;
+                    sha256_generic) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_SHA256" ;;
+                    sha512_generic) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_SHA512" ;;
+                    mac80211_hwsim) DIR="drivers/net/wireless"; CONFIG_VAR="CONFIG_MAC80211_HWSIM" ;;
                 esac
                 
                 if [ -n "$DIR" ]; then
-                    echo "Compiling modules in $DIR for $mod..."
-                    # Building the directory targets links the objects correctly (e.g. into mac80211.ko)
-                    make M=$DIR || echo "::warning::Compilation failed for $DIR"
+                    echo "Compiling modules in $DIR for $mod ($CONFIG_VAR=m)..."
+                    # Force the config variable directly into make to bypass kconfig dependency drops
+                    make -j$(nproc) M=$DIR $CONFIG_VAR=m || echo "::warning::Compilation failed for $DIR"
                     
                     MOD_FILE=$(find $DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
                     if [ -n "$MOD_FILE" ]; then
@@ -294,7 +306,7 @@ jobs:
         else
            echo "HWSIM_FAILED=true" >> $GITHUB_ENV
            echo "::warning::mac80211_hwsim failed to load."
-           dmesg | tail -n 30
+           sudo dmesg | tail -n 30
         fi
 
     - name: Build RXNM Agent
