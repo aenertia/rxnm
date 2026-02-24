@@ -175,63 +175,27 @@ jobs:
         # Strict Compilation Path
         if [ -n "$MISSING_MODULES" ]; then
             echo "Missing modules still detected: $MISSING_MODULES"
-            echo "Strictly compiling missing modules from exact Ubuntu kernel source..."
-            
-            # Enable source repos for DEB822 format (Ubuntu 24.04+)
-            sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
-            sudo apt-get update
+            echo "Fetching pristine mainline kernel source to bypass vendor meta-package issues..."
             
             mkdir -p /tmp/linux-src
             cd /tmp/linux-src
             
-            KVER=$(uname -r | cut -d- -f1) # e.g., 6.11.0
-            SRC_DIR=""
+            KVER=$(uname -r | cut -d- -f1)
+            # kernel.org drops the .0 for major releases (e.g., 6.11.0 -> 6.11)
+            KVER_MAJ_MIN=$(echo $KVER | sed 's/\.0$//')
+            MAJOR=$(echo $KVER | cut -d. -f1)
+            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER_MAJ_MIN}.tar.xz"
             
-            echo "Strategy 1: Attempting apt-get source on specific kernel packages..."
-            for pkg in "linux-image-unsigned-$(uname -r)" "linux-modules-$(uname -r)" "linux-azure"; do
-                echo "Trying: apt-get source $pkg"
-                apt-get source "$pkg" || true
-                SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
-                if [ -n "$SRC_DIR" ]; then
-                    echo "✓ Found valid source tree in $SRC_DIR"
-                    break
-                fi
-                echo "✗ No valid source tree found, cleaning up..."
-                rm -rf ./*
-            done
-            
-            if [ -z "$SRC_DIR" ]; then
-                echo "Strategy 2: Attempting to install and extract linux-source package..."
-                sudo apt-get install -y "linux-source-$KVER" || sudo apt-get install -y linux-source || true
-                TARBALL=$(ls /usr/src/linux-source-$KVER*.tar.* 2>/dev/null | head -n1 || ls /usr/src/linux-source-*.tar.* 2>/dev/null | head -n1)
-                if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
-                    echo "Extracting $TARBALL..."
-                    tar -xf "$TARBALL"
-                    SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-source-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
-                    if [ -n "$SRC_DIR" ]; then
-                        echo "✓ Successfully extracted source tree from $TARBALL"
-                    fi
-                fi
-            fi
-            
-            if [ -z "$SRC_DIR" ]; then
-                echo "Strategy 3: Fallback to generic linux source..."
-                apt-get source linux || true
-                SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | while read dir; do [ -f "$dir/Makefile" ] && echo "$dir"; done | head -n1)
-            fi
-            
-            if [ -z "$SRC_DIR" ]; then
-                echo "::error::Failed to download or extract a valid kernel source tree."
-                exit 1
-            fi
-            cd "$SRC_DIR"
+            echo "Downloading $URL..."
+            curl -fSsl -O "$URL"
+            tar -xf linux-${KVER_MAJ_MIN}.tar.xz
+            cd linux-${KVER_MAJ_MIN}
             
             echo "Preparing kernel build environment for $(uname -r)..."
             
             # Fix Vermagic: Ensure compiled modules match the running kernel exactly
             FULL_VER=$(uname -r)
-            BASE_VER=$(echo $FULL_VER | cut -d- -f1)
-            EXTRA_VER=${FULL_VER#$BASE_VER}
+            EXTRA_VER=${FULL_VER#$KVER}
             sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = $EXTRA_VER/" Makefile
             echo "Set EXTRAVERSION to $EXTRA_VER"
             
@@ -243,46 +207,47 @@ jobs:
         CONFIG_WLAN=y
         CONFIG_WIRELESS=y
         CONFIG_NETDEVICES=y
+        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
+        CONFIG_CRYPTO_ARC4=m
+        CONFIG_CRYPTO_MD4=m
+        CONFIG_CRYPTO_CMAC=m
+        CONFIG_CRYPTO_ECB=m
+        CONFIG_CRYPTO_DES=m
+        CONFIG_CRYPTO_USER_API_SKCIPHER=m
+        CONFIG_CRYPTO_USER_API_HASH=m
+        CONFIG_CRYPTO_USER_API=m
+        CONFIG_CFG80211=m
+        CONFIG_MAC80211=m
+        CONFIG_RFKILL=m
+        CONFIG_CRYPTO_CCM=m
+        CONFIG_CRYPTO_CBC=m
+        CONFIG_CRYPTO_SHA256=m
+        CONFIG_CRYPTO_SHA512=m
+        CONFIG_MAC80211_HWSIM=m
         EOF
             
             # No sudo needed for compilation, keeping files owned by runner
             make olddefconfig
             make modules_prepare
             
-            EXTRA_SYMS=""
+            # Dynamically locate hwsim source (moved to virtual/ in 6.x kernels)
+            HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
+            HWSIM_KO="${HWSIM_SRC%.c}.ko"
             
-            echo "Building crypto..."
-            make -j$(nproc) M=crypto CONFIG_CRYPTO_ARC4=m CONFIG_CRYPTO_MD4=m CONFIG_CRYPTO_CMAC=m CONFIG_CRYPTO_ECB=m CONFIG_CRYPTO_DES=m CONFIG_CRYPTO_USER_API_SKCIPHER=m CONFIG_CRYPTO_USER_API_HASH=m CONFIG_CRYPTO_USER_API=m CONFIG_CRYPTO_CCM=m CONFIG_CRYPTO_CBC=m CONFIG_CRYPTO_SHA256=m CONFIG_CRYPTO_SHA512=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
-            [ -f "crypto/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/crypto/Module.symvers"
-
-            echo "Building asymmetric_keys..."
-            make -j$(nproc) M=crypto/asymmetric_keys CONFIG_PKCS8_PRIVATE_KEY_PARSER=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
-            [ -f "crypto/asymmetric_keys/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/crypto/asymmetric_keys/Module.symvers"
-
-            echo "Building rfkill..."
-            make -j$(nproc) M=net/rfkill CONFIG_RFKILL=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
-            [ -f "net/rfkill/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/rfkill/Module.symvers"
-
-            echo "Building cfg80211..."
-            make -j$(nproc) M=net/wireless CONFIG_CFG80211=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
-            [ -f "net/wireless/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/wireless/Module.symvers"
-
-            echo "Building mac80211..."
-            make -j$(nproc) M=net/mac80211 CONFIG_MAC80211=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
-            [ -f "net/mac80211/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/mac80211/Module.symvers"
-
-            echo "Building mac80211_hwsim..."
-            HWSIM_DIR=$(dirname $(find . -name "mac80211_hwsim.c" | head -n1))
-            [ -z "$HWSIM_DIR" ] && HWSIM_DIR="drivers/net/wireless"
-            make -j$(nproc) M=$HWSIM_DIR CONFIG_MAC80211_HWSIM=m CONFIG_WLAN=y KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            # Build specific targets directly in-tree to prevent Modpost duplicate export errors
+            TARGETS="crypto/arc4.ko crypto/md4.ko crypto/cmac.ko crypto/ecb.ko crypto/des_generic.ko crypto/algif_skcipher.ko crypto/algif_hash.ko crypto/af_alg.ko crypto/ccm.ko crypto/cbc.ko crypto/sha256_generic.ko crypto/sha512_generic.ko crypto/asymmetric_keys/pkcs8_key_parser.ko net/rfkill/rfkill.ko net/wireless/cfg80211.ko net/mac80211/mac80211.ko $HWSIM_KO"
+            
+            echo "Building modules natively in-tree: $TARGETS"
+            make -j$(nproc) $TARGETS || echo "::warning::Some targets failed to build, but continuing..."
             
             echo "Installing compiled modules to /lib/modules/$(uname -r)/updates"
             sudo mkdir -p /lib/modules/$(uname -r)/updates
+            
             find . -name "*.ko" -exec sudo cp {} /lib/modules/$(uname -r)/updates/ \;
             sudo depmod -a
             
-            # Load the newly installed modules
-            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
+            # Load the newly installed modules (des_generic provides des3_ede)
+            for mod in pkcs8_key_parser arc4 md4 cmac ecb des_generic algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
                 sudo modprobe $mod || true
             done
             sudo modprobe mac80211_hwsim radios=2 || true
