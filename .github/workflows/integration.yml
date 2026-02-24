@@ -243,23 +243,6 @@ jobs:
         CONFIG_WLAN=y
         CONFIG_WIRELESS=y
         CONFIG_NETDEVICES=y
-        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
-        CONFIG_CRYPTO_ARC4=m
-        CONFIG_CRYPTO_MD4=m
-        CONFIG_CRYPTO_CMAC=m
-        CONFIG_CRYPTO_ECB=m
-        CONFIG_CRYPTO_DES=m
-        CONFIG_CRYPTO_USER_API_SKCIPHER=m
-        CONFIG_CRYPTO_USER_API_HASH=m
-        CONFIG_CRYPTO_USER_API=m
-        CONFIG_CFG80211=m
-        CONFIG_MAC80211=m
-        CONFIG_RFKILL=m
-        CONFIG_CRYPTO_CCM=m
-        CONFIG_CRYPTO_CBC=m
-        CONFIG_CRYPTO_SHA256=m
-        CONFIG_CRYPTO_SHA512=m
-        CONFIG_MAC80211_HWSIM=m
         EOF
             
             # No sudo needed for compilation, keeping files owned by runner
@@ -268,58 +251,42 @@ jobs:
             
             EXTRA_SYMS=""
             
-            for mod in $MISSING_MODULES; do
-                DIR=""
-                CONFIG_VAR=""
-                case "$mod" in
-                    pkcs8_key_parser) DIR="crypto/asymmetric_keys"; CONFIG_VAR="CONFIG_PKCS8_PRIVATE_KEY_PARSER" ;;
-                    arc4) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_ARC4" ;;
-                    md4) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_MD4" ;;
-                    cmac) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CMAC" ;;
-                    ecb) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_ECB" ;;
-                    des3_ede) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_DES" ;;
-                    algif_skcipher) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API_SKCIPHER" ;;
-                    algif_hash) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API_HASH" ;;
-                    af_alg) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_USER_API" ;;
-                    cfg80211) DIR="net/wireless"; CONFIG_VAR="CONFIG_CFG80211" ;;
-                    mac80211) DIR="net/mac80211"; CONFIG_VAR="CONFIG_MAC80211" ;;
-                    rfkill) DIR="net/rfkill"; CONFIG_VAR="CONFIG_RFKILL" ;;
-                    ccm) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CCM" ;;
-                    cbc) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_CBC" ;;
-                    sha256_generic) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_SHA256" ;;
-                    sha512_generic) DIR="crypto"; CONFIG_VAR="CONFIG_CRYPTO_SHA512" ;;
-                    mac80211_hwsim) 
-                        # Dynamically locate hwsim (moved to virtual/ in newer kernels)
-                        DIR=$(dirname $(find . -name "mac80211_hwsim.c" | head -n1))
-                        CONFIG_VAR="CONFIG_MAC80211_HWSIM" 
-                        ;;
-                esac
-                
-                if [ -n "$DIR" ] && [ -d "$DIR" ]; then
-                    echo "Compiling modules in $DIR for $mod ($CONFIG_VAR=m)..."
-                    # Force the config variable directly into make to bypass kconfig dependency drops
-                    # Pass KBUILD_EXTRA_SYMBOLS so modules like mac80211 can link against cfg80211
-                    make -j$(nproc) M=$DIR $CONFIG_VAR=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || echo "::warning::Compilation failed for $DIR"
-                    
-                    if [ -f "$DIR/Module.symvers" ]; then
-                        EXTRA_SYMS="$EXTRA_SYMS $(pwd)/$DIR/Module.symvers"
-                    fi
-                    
-                    MOD_FILE=$(find $DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
-                    if [ -n "$MOD_FILE" ]; then
-                        # Insert immediately so subsequent out-of-tree builds resolve symbols directly from the running kernel if needed
-                        if [ "$mod" = "mac80211_hwsim" ]; then
-                            sudo insmod "$MOD_FILE" radios=2 || echo "::warning::Failed to load $mod"
-                        else
-                            sudo insmod "$MOD_FILE" || echo "::warning::Failed to load $mod"
-                        fi
-                    else
-                        echo "::warning::Module file for $mod not found after make M=$DIR!"
-                    fi
-                else
-                    echo "::warning::Could not resolve valid directory for $mod"
-                fi
+            echo "Building crypto..."
+            make -j$(nproc) M=crypto CONFIG_CRYPTO_ARC4=m CONFIG_CRYPTO_MD4=m CONFIG_CRYPTO_CMAC=m CONFIG_CRYPTO_ECB=m CONFIG_CRYPTO_DES=m CONFIG_CRYPTO_USER_API_SKCIPHER=m CONFIG_CRYPTO_USER_API_HASH=m CONFIG_CRYPTO_USER_API=m CONFIG_CRYPTO_CCM=m CONFIG_CRYPTO_CBC=m CONFIG_CRYPTO_SHA256=m CONFIG_CRYPTO_SHA512=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            [ -f "crypto/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/crypto/Module.symvers"
+
+            echo "Building asymmetric_keys..."
+            make -j$(nproc) M=crypto/asymmetric_keys CONFIG_PKCS8_PRIVATE_KEY_PARSER=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            [ -f "crypto/asymmetric_keys/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/crypto/asymmetric_keys/Module.symvers"
+
+            echo "Building rfkill..."
+            make -j$(nproc) M=net/rfkill CONFIG_RFKILL=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            [ -f "net/rfkill/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/rfkill/Module.symvers"
+
+            echo "Building cfg80211..."
+            make -j$(nproc) M=net/wireless CONFIG_CFG80211=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            [ -f "net/wireless/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/wireless/Module.symvers"
+
+            echo "Building mac80211..."
+            make -j$(nproc) M=net/mac80211 CONFIG_MAC80211=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            [ -f "net/mac80211/Module.symvers" ] && EXTRA_SYMS="$EXTRA_SYMS $(pwd)/net/mac80211/Module.symvers"
+
+            echo "Building mac80211_hwsim..."
+            HWSIM_DIR=$(dirname $(find . -name "mac80211_hwsim.c" | head -n1))
+            [ -z "$HWSIM_DIR" ] && HWSIM_DIR="drivers/net/wireless"
+            make -j$(nproc) M=$HWSIM_DIR CONFIG_MAC80211_HWSIM=m CONFIG_WLAN=y KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" || true
+            
+            echo "Installing compiled modules to /lib/modules/$(uname -r)/updates"
+            sudo mkdir -p /lib/modules/$(uname -r)/updates
+            find . -name "*.ko" -exec sudo cp {} /lib/modules/$(uname -r)/updates/ \;
+            sudo depmod -a
+            
+            # Load the newly installed modules
+            for mod in pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
+                sudo modprobe $mod || true
             done
+            sudo modprobe mac80211_hwsim radios=2 || true
+            
         else
             echo "All required modules are already available via modprobe/built-in."
         fi
