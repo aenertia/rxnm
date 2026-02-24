@@ -132,7 +132,7 @@ jobs:
     - name: Compile and Load Dependencies & Virtual WiFi
       run: |
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod git curl
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl dpkg-dev flex bison libssl-dev libelf-dev bc
         
         sudo mkdir -p /etc/NetworkManager/conf.d
         echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
@@ -161,58 +161,93 @@ jobs:
         
         if [ -n "$MISSING_MODULES" ]; then
             echo "Missing modules detected: $MISSING_MODULES"
-            echo "Strictly compiling missing modules from kernel sources..."
-            KVER=$(uname -r | grep -o '^[0-9]\+\.[0-9]\+')
+            echo "Strictly compiling missing modules from exact Ubuntu kernel sources to guarantee ABI match..."
+            
+            # Enable deb-src repositories in Ubuntu 24.04
+            sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
+            sudo apt-get update
+            
             mkdir -p /tmp/linux-src
             cd /tmp/linux-src
             
-            git init
-            git remote add origin https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
-            git sparse-checkout set crypto/ net/wireless/ net/mac80211/ net/rfkill/ drivers/net/wireless/
-            
-            if ! git pull --depth 1 origin "linux-$KVER.y" 2>/dev/null; then
-                echo "Falling back to torvalds/master for kernel source..."
-                git remote set-url origin https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
-                git pull --depth 1 origin master
+            # Identify the exact package for the running kernel (e.g., linux-image-6.11.0-1018-azure)
+            PKG=$(dpkg -S /boot/vmlinuz-$(uname -r) 2>/dev/null | awk -F: '{print $1}' | head -n1)
+            if [ -n "$PKG" ]; then
+                apt-get source "$PKG" || apt-get source linux-azure || apt-get source linux
+            else
+                apt-get source linux-azure || apt-get source linux
             fi
             
+            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | head -n1)
+            if [ -z "$SRC_DIR" ]; then
+                echo "::error::Failed to download exact Ubuntu kernel source."
+                exit 1
+            fi
+            cd "$SRC_DIR"
+            
+            echo "Preparing kernel build environment for $(uname -r)..."
+            cp /boot/config-$(uname -r) .config
+            cp /usr/src/linux-headers-$(uname -r)/Module.symvers . || true
+            
+            # Ensure necessary configs are set to module (m)
+            cat <<EOF >> .config
+        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
+        CONFIG_CRYPTO_ARC4=m
+        CONFIG_CRYPTO_MD4=m
+        CONFIG_CRYPTO_CMAC=m
+        CONFIG_CRYPTO_ECB=m
+        CONFIG_CRYPTO_DES=m
+        CONFIG_CRYPTO_USER_API_SKCIPHER=m
+        CONFIG_CRYPTO_USER_API_HASH=m
+        CONFIG_CRYPTO_USER_API=m
+        CONFIG_CFG80211=m
+        CONFIG_MAC80211=m
+        CONFIG_RFKILL=m
+        CONFIG_CRYPTO_CCM=m
+        CONFIG_CRYPTO_CBC=m
+        CONFIG_CRYPTO_SHA256=m
+        CONFIG_CRYPTO_SHA512=m
+        CONFIG_MAC80211_HWSIM=m
+        EOF
+            
+            make olddefconfig
+            make modules_prepare
+            
             for mod in $MISSING_MODULES; do
-                echo "Compiling $mod..."
-                DIR=""
-                CONFIG=""
+                KO_PATH=""
                 case "$mod" in
-                    pkcs8_key_parser) DIR="crypto/asymmetric_keys"; CONFIG="CONFIG_PKCS8_PRIVATE_KEY_PARSER" ;;
-                    arc4) DIR="crypto"; CONFIG="CONFIG_CRYPTO_ARC4" ;;
-                    md4) DIR="crypto"; CONFIG="CONFIG_CRYPTO_MD4" ;;
-                    cmac) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CMAC" ;;
-                    ecb) DIR="crypto"; CONFIG="CONFIG_CRYPTO_ECB" ;;
-                    des3_ede) DIR="crypto"; CONFIG="CONFIG_CRYPTO_DES" ;;
-                    algif_skcipher) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API_SKCIPHER" ;;
-                    algif_hash) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API_HASH" ;;
-                    af_alg) DIR="crypto"; CONFIG="CONFIG_CRYPTO_USER_API" ;;
-                    cfg80211) DIR="net/wireless"; CONFIG="CONFIG_CFG80211" ;;
-                    mac80211) DIR="net/mac80211"; CONFIG="CONFIG_MAC80211" ;;
-                    rfkill) DIR="net/rfkill"; CONFIG="CONFIG_RFKILL" ;;
-                    ccm) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CCM" ;;
-                    cbc) DIR="crypto"; CONFIG="CONFIG_CRYPTO_CBC" ;;
-                    sha256_generic) DIR="crypto"; CONFIG="CONFIG_CRYPTO_SHA256" ;;
-                    sha512_generic) DIR="crypto"; CONFIG="CONFIG_CRYPTO_SHA512" ;;
-                    mac80211_hwsim) DIR="drivers/net/wireless"; CONFIG="CONFIG_MAC80211_HWSIM" ;;
+                    pkcs8_key_parser) KO_PATH="crypto/asymmetric_keys/pkcs8_key_parser.ko" ;;
+                    arc4) KO_PATH="crypto/arc4.ko" ;;
+                    md4) KO_PATH="crypto/md4.ko" ;;
+                    cmac) KO_PATH="crypto/cmac.ko" ;;
+                    ecb) KO_PATH="crypto/ecb.ko" ;;
+                    des3_ede) KO_PATH="crypto/des_generic.ko" ;;
+                    algif_skcipher) KO_PATH="crypto/algif_skcipher.ko" ;;
+                    algif_hash) KO_PATH="crypto/algif_hash.ko" ;;
+                    af_alg) KO_PATH="crypto/af_alg.ko" ;;
+                    cfg80211) KO_PATH="net/wireless/cfg80211.ko" ;;
+                    mac80211) KO_PATH="net/mac80211/mac80211.ko" ;;
+                    rfkill) KO_PATH="net/rfkill/rfkill.ko" ;;
+                    ccm) KO_PATH="crypto/ccm.ko" ;;
+                    cbc) KO_PATH="crypto/cbc.ko" ;;
+                    sha256_generic) KO_PATH="crypto/sha256_generic.ko" ;;
+                    sha512_generic) KO_PATH="crypto/sha512_generic.ko" ;;
+                    mac80211_hwsim) KO_PATH="drivers/net/wireless/mac80211_hwsim.ko" ;;
                 esac
                 
-                if [ -n "$DIR" ]; then
-                    # Force compilation of specific subsystem objects via kernel Kbuild
-                    make -C /lib/modules/$(uname -r)/build M=$(pwd)/$DIR $CONFIG=m modules || echo "::warning::Compilation failed for $mod"
+                if [ -n "$KO_PATH" ]; then
+                    echo "Compiling $KO_PATH..."
+                    # In-tree direct build avoids out-of-tree macro/ABI mismatches
+                    make $KO_PATH || echo "::warning::Compilation failed for $mod"
                     
-                    MOD_FILE=$(find $(pwd)/$DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
-                    if [ -n "$MOD_FILE" ]; then
+                    if [ -f "$KO_PATH" ]; then
                         if [ "$mod" = "mac80211_hwsim" ]; then
-                            sudo insmod "$MOD_FILE" radios=2 || echo "::warning::Failed to load $mod"
+                            sudo insmod "$KO_PATH" radios=2 || echo "::warning::Failed to load $mod"
                         else
-                            sudo insmod "$MOD_FILE" || echo "::warning::Failed to load $mod"
+                            sudo insmod "$KO_PATH" || echo "::warning::Failed to load $mod"
                         fi
                     else
-                        echo "::warning::Module file for $mod not found after compilation!"
+                        echo "::warning::$KO_PATH not found after make!"
                     fi
                 fi
             done
