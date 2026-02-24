@@ -132,8 +132,7 @@ jobs:
     - name: Compile and Load Dependencies & Virtual WiFi
       run: |
         sudo apt-get update
-        # Explicitly install linux-source to guarantee we have the pure kernel tree matching the release
-        sudo apt-get install -y linux-headers-$(uname -r) linux-source build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl bc libssl-dev libelf-dev flex bison
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl bc libssl-dev libelf-dev flex bison dpkg-dev
         
         sudo mkdir -p /etc/NetworkManager/conf.d
         echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
@@ -150,7 +149,6 @@ jobs:
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
         echo "Sweeping required modules..."
-        # Ordered topologically (Crypto -> Networking -> Hardware)
         REQUIRED_MODULES="pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic mac80211_hwsim"
         MISSING_MODULES=""
         
@@ -160,58 +158,93 @@ jobs:
           fi
         done
         
+        # Fast path: Try installing prebuilt extra modules if missing
         if [ -n "$MISSING_MODULES" ]; then
-            echo "Missing modules detected: $MISSING_MODULES"
-            echo "Strictly compiling missing modules from exact Ubuntu linux-source package..."
+            echo "Attempting to install precompiled linux-modules-extra..."
+            sudo apt-get install -y linux-modules-extra-$(uname -r) || true
+            
+            # Re-sweep
+            MISSING_MODULES=""
+            for mod in $REQUIRED_MODULES; do
+              if ! sudo modprobe "$mod" 2>/dev/null; then
+                MISSING_MODULES="$MISSING_MODULES $mod"
+              fi
+            done
+        fi
+        
+        # Strict Compilation Path
+        if [ -n "$MISSING_MODULES" ]; then
+            echo "Missing modules still detected: $MISSING_MODULES"
+            echo "Strictly compiling missing modules from exact Ubuntu kernel source..."
+            
+            # Enable source repos
+            sudo sed -i 's/Types: deb/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources || true
+            sudo apt-get update
+            
+            # Extract the actual base source package, stripping out the "signed" wrapper
+            PKG_NAME=$(dpkg -S /boot/vmlinuz-$(uname -r) 2>/dev/null | awk -F: '{print $1}' | head -n1)
+            SRC_PKG=$(apt-cache show $PKG_NAME | awk '/^Source:/ {print $2}' | head -n1)
+            [ -z "$SRC_PKG" ] && SRC_PKG=$PKG_NAME
+            SRC_PKG=$(echo "$SRC_PKG" | sed 's/signed-//g; s/-signed//g')
             
             mkdir -p /tmp/linux-src
-            SRC_TAR=$(find /usr/src -name "linux-source-*.tar.*" | head -n1)
-            if [ -z "$SRC_TAR" ]; then
-                echo "::error::linux-source tarball not found!"
+            cd /tmp/linux-src
+            
+            echo "Fetching source for $SRC_PKG..."
+            sudo apt-get source $SRC_PKG
+            
+            SRC_DIR=$(find . -maxdepth 1 -type d -name "linux-*" | head -n1)
+            if [ -z "$SRC_DIR" ]; then
+                echo "::error::Failed to download kernel source."
                 exit 1
             fi
+            cd "$SRC_DIR"
             
-            echo "Extracting $SRC_TAR..."
-            sudo tar -xf "$SRC_TAR" -C /tmp/linux-src --strip-components=1
+            echo "Preparing kernel build environment for $(uname -r)..."
+            cp /boot/config-$(uname -r) .config
+            cp /usr/src/linux-headers-$(uname -r)/Module.symvers . || true
             
-            # String of Module.symvers generated during the build to pass to dependents
-            EXTRA_SYMS=""
+            # Force module configs to guarantee compilation
+            cat <<EOF >> .config
+        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
+        CONFIG_CRYPTO_ARC4=m
+        CONFIG_CRYPTO_MD4=m
+        CONFIG_CRYPTO_CMAC=m
+        CONFIG_CRYPTO_ECB=m
+        CONFIG_CRYPTO_DES=m
+        CONFIG_CRYPTO_USER_API_SKCIPHER=m
+        CONFIG_CRYPTO_USER_API_HASH=m
+        CONFIG_CRYPTO_USER_API=m
+        CONFIG_CFG80211=m
+        CONFIG_MAC80211=m
+        CONFIG_RFKILL=m
+        CONFIG_CRYPTO_CCM=m
+        CONFIG_CRYPTO_CBC=m
+        CONFIG_CRYPTO_SHA256=m
+        CONFIG_CRYPTO_SHA512=m
+        CONFIG_MAC80211_HWSIM=m
+        EOF
+            
+            sudo make olddefconfig
+            sudo make modules_prepare
             
             for mod in $MISSING_MODULES; do
                 DIR=""
-                CONF_VAR=""
                 case "$mod" in
-                    pkcs8_key_parser) DIR="crypto/asymmetric_keys"; CONF_VAR="CONFIG_PKCS8_PRIVATE_KEY_PARSER" ;;
-                    arc4) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_ARC4" ;;
-                    md4) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_MD4" ;;
-                    cmac) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_CMAC" ;;
-                    ecb) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_ECB" ;;
-                    des3_ede) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_DES" ;;
-                    algif_skcipher) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_USER_API_SKCIPHER" ;;
-                    algif_hash) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_USER_API_HASH" ;;
-                    af_alg) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_USER_API" ;;
-                    cfg80211) DIR="net/wireless"; CONF_VAR="CONFIG_CFG80211" ;;
-                    mac80211) DIR="net/mac80211"; CONF_VAR="CONFIG_MAC80211" ;;
-                    rfkill) DIR="net/rfkill"; CONF_VAR="CONFIG_RFKILL" ;;
-                    ccm) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_CCM" ;;
-                    cbc) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_CBC" ;;
-                    sha256_generic) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_SHA256" ;;
-                    sha512_generic) DIR="crypto"; CONF_VAR="CONFIG_CRYPTO_SHA512" ;;
-                    mac80211_hwsim) DIR="drivers/net/wireless"; CONF_VAR="CONFIG_MAC80211_HWSIM" ;;
+                    pkcs8_key_parser) DIR="crypto/asymmetric_keys" ;;
+                    arc4|md4|cmac|ecb|des3_ede|algif_skcipher|algif_hash|af_alg|ccm|cbc|sha256_generic|sha512_generic) DIR="crypto" ;;
+                    cfg80211) DIR="net/wireless" ;;
+                    mac80211) DIR="net/mac80211" ;;
+                    rfkill) DIR="net/rfkill" ;;
+                    mac80211_hwsim) DIR="drivers/net/wireless" ;;
                 esac
                 
                 if [ -n "$DIR" ]; then
-                    echo "Compiling $mod in $DIR..."
-                    # We inject the config variable and extra symbols directly into the Kbuild invocation
-                    sudo make -C /lib/modules/$(uname -r)/build M=/tmp/linux-src/$DIR $CONF_VAR=m KBUILD_EXTRA_SYMBOLS="$EXTRA_SYMS" modules || echo "::warning::Compilation failed for $mod"
+                    echo "Compiling modules in $DIR for $mod..."
+                    # Building the directory targets links the objects correctly (e.g. into mac80211.ko)
+                    sudo make M=$DIR || echo "::warning::Compilation failed for $DIR"
                     
-                    # Accumulate symbols for dependencies (e.g. mac80211 needs cfg80211)
-                    if [ -f "/tmp/linux-src/$DIR/Module.symvers" ]; then
-                        EXTRA_SYMS="$EXTRA_SYMS /tmp/linux-src/$DIR/Module.symvers"
-                    fi
-                    
-                    # Locate and load the compiled module
-                    MOD_FILE=$(find /tmp/linux-src/$DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
+                    MOD_FILE=$(find $DIR -name "${mod}.ko" -o -name "${mod//_/-}.ko" | head -n1)
                     if [ -n "$MOD_FILE" ]; then
                         if [ "$mod" = "mac80211_hwsim" ]; then
                             sudo insmod "$MOD_FILE" radios=2 || echo "::warning::Failed to load $mod"
@@ -219,7 +252,7 @@ jobs:
                             sudo insmod "$MOD_FILE" || echo "::warning::Failed to load $mod"
                         fi
                     else
-                        echo "::warning::Module file for $mod not found after make!"
+                        echo "::warning::Module file for $mod not found after make M=$DIR!"
                     fi
                 fi
             done
