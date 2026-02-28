@@ -239,11 +239,13 @@ NETEOF"
 
     info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
-    # Ensure client has DHCP config and networkd applies it
-    sleep 2
+    # rxnm connect writes a DHCP config via _ensure_wifi_netconfig.
+    # Force networkd to re-apply it so the DHCP client sends a fresh DISCOVER.
+    sleep 3
     m_exec "$CLIENT" networkctl reload 2>/dev/null || true
     m_exec "$CLIENT" networkctl reconfigure "$CLI_WLAN" 2>/dev/null || true
-    sleep 1
+    # Give DHCP exchange time to complete (DISCOVER → OFFER → REQUEST → ACK)
+    sleep 5
 
     info "Phase 6.8: Waiting for WiFi L3 Convergence..."
     CONVERGED=false
