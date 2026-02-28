@@ -110,7 +110,6 @@ jobs:
     - name: Cleanup before bundle tests
       if: always()
       run: |
-        # Ensure all containers from the standard interop test are fully terminated
         for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
             sudo machinectl terminate "$m" 2>/dev/null || true
         done
@@ -122,6 +121,15 @@ jobs:
         make rocknix-release
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
+
+    - name: Cleanup between bundle test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
     - name: Run Full Combined Bundle Integration Tests
       run: |
@@ -240,7 +248,7 @@ jobs:
             # 2b: Compile ONLY missing modules from kernel.org source
             if [ "$HWSIM_LOADED" = "false" ]; then
                 echo "Cache MISS: Compiling missing modules from kernel.org source..."
-                echo "Still missing after package install: $MISSING_MODULES"
+                echo "Still missing: $MISSING_MODULES"
                 mkdir -p /tmp/linux-src
                 cd /tmp/linux-src
 
@@ -271,47 +279,27 @@ jobs:
                     echo "::warning::No /boot/config found, using defconfig"
                     make defconfig
                 fi
-                # Module.symvers is CRITICAL for symbol resolution during modpost.
-                # Without it, all symbols are unresolved and .ko files won't load.
+
+                # Module.symvers is CRITICAL - without it all symbols are unresolved
+                echo "=== Searching for Module.symvers ==="
                 SYMVERS_FOUND=false
-                for sympath in \
-                    "/usr/src/linux-headers-$(uname -r)/Module.symvers" \
-                    "/usr/src/linux-headers-$(uname -r | sed 's/-generic//')/Module.symvers" \
-                    "/lib/modules/$(uname -r)/build/Module.symvers"; do
+                for sympath in "/usr/src/linux-headers-$(uname -r)/Module.symvers" "/lib/modules/$(uname -r)/build/Module.symvers" "/usr/src/linux-headers-$(uname -r | sed 's/-azure//')/Module.symvers"; do
+                    echo "  Checking: $sympath"
                     if [ -f "$sympath" ]; then
                         cp "$sympath" .
-                        echo "Module.symvers sourced from: $sympath"
+                        echo "  FOUND: Module.symvers from $sympath ($(wc -l < Module.symvers) symbols)"
                         SYMVERS_FOUND=true
                         break
                     fi
                 done
                 if [ "$SYMVERS_FOUND" = "false" ]; then
-                    echo "::warning::Module.symvers not found. Compiled modules may fail to load."
+                    echo "::warning::Module.symvers not found - listing available header dirs:"
+                    ls -la /usr/src/ 2>/dev/null || true
+                    ls -la /lib/modules/$(uname -r)/ 2>/dev/null || true
                 fi
 
-                # Force-enable only the modules we need
-                printf '%s\n' \
-                    "CONFIG_WLAN=y" \
-                    "CONFIG_WIRELESS=y" \
-                    "CONFIG_NETDEVICES=y" \
-                    "CONFIG_PKCS8_PRIVATE_KEY_PARSER=m" \
-                    "CONFIG_CRYPTO_ARC4=m" \
-                    "CONFIG_CRYPTO_MD4=m" \
-                    "CONFIG_CRYPTO_CMAC=m" \
-                    "CONFIG_CRYPTO_ECB=m" \
-                    "CONFIG_CRYPTO_DES=m" \
-                    "CONFIG_CRYPTO_USER_API_SKCIPHER=m" \
-                    "CONFIG_CRYPTO_USER_API_HASH=m" \
-                    "CONFIG_CRYPTO_USER_API=m" \
-                    "CONFIG_CFG80211=m" \
-                    "CONFIG_MAC80211=m" \
-                    "CONFIG_RFKILL=m" \
-                    "CONFIG_CRYPTO_CCM=m" \
-                    "CONFIG_CRYPTO_CBC=m" \
-                    "CONFIG_CRYPTO_SHA256=m" \
-                    "CONFIG_CRYPTO_SHA512=m" \
-                    "CONFIG_MAC80211_HWSIM=m" \
-                    >> .config
+                # Append required module configs
+                printf '%s\n' "CONFIG_WLAN=y" "CONFIG_WIRELESS=y" "CONFIG_NETDEVICES=y" "CONFIG_PKCS8_PRIVATE_KEY_PARSER=m" "CONFIG_CRYPTO_ARC4=m" "CONFIG_CRYPTO_MD4=m" "CONFIG_CRYPTO_CMAC=m" "CONFIG_CRYPTO_ECB=m" "CONFIG_CRYPTO_DES=m" "CONFIG_CRYPTO_USER_API_SKCIPHER=m" "CONFIG_CRYPTO_USER_API_HASH=m" "CONFIG_CRYPTO_USER_API=m" "CONFIG_CFG80211=m" "CONFIG_MAC80211=m" "CONFIG_RFKILL=m" "CONFIG_CRYPTO_CCM=m" "CONFIG_CRYPTO_CBC=m" "CONFIG_CRYPTO_SHA256=m" "CONFIG_CRYPTO_SHA512=m" "CONFIG_MAC80211_HWSIM=m" >> .config
 
                 make olddefconfig
                 make modules_prepare || make scripts || true
@@ -320,7 +308,7 @@ jobs:
                 HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
                 HWSIM_KO="${HWSIM_SRC%.c}.ko"
 
-                # Build the dependency chain: only modules that are actually missing
+                # Build only the specific modules that are missing
                 TARGETS=""
                 for mod in $MISSING_MODULES; do
                     case "$mod" in
@@ -352,8 +340,7 @@ jobs:
                 mkdir -p "$CACHE_DIR"
 
                 find . -name "*.ko" | while IFS= read -r ko; do
-                    modname=$(basename "$ko")
-                    echo "  Installing: $modname (vermagic: $(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A'))"
+                    echo "  Installing: $(basename "$ko") vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo N/A)"
                     sudo cp "$ko" "/lib/modules/$(uname -r)/updates/"
                     cp "$ko" "$CACHE_DIR/"
                 done
@@ -384,9 +371,11 @@ jobs:
             echo "--- dmesg (last 40 lines) ---"
             sudo dmesg | tail -n 40
             echo "--- modinfo for cached .ko files ---"
-            for ko in /tmp/hwsim-cache/*.ko 2>/dev/null; do
-                [ -f "$ko" ] && echo "  $(basename "$ko"): vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A')"
-            done
+            if ls /tmp/hwsim-cache/*.ko >/dev/null 2>&1; then
+                for ko in /tmp/hwsim-cache/*.ko; do
+                    [ -f "$ko" ] && echo "  $(basename "$ko"): vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A')"
+                done
+            fi
             echo "Running kernel: $(uname -r)"
         fi
 
@@ -403,6 +392,15 @@ jobs:
             sudo ./tests/integration/run_interop.sh --wifi-only
         fi
 
+    - name: Cleanup between test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
         make rocknix-release
@@ -412,6 +410,15 @@ jobs:
         else
             sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
         fi
+
+    - name: Cleanup between test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
     - name: Run Full Combined Bundle Integration Tests
       run: |

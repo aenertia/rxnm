@@ -202,17 +202,10 @@ check_ready() {
 ensure_machined() {
     # Ensure systemd-machined is running and responsive before launching containers.
     # Flaky CI runners sometimes have machined in a degraded state.
-    # Also cleans up ANY lingering rxnm containers from previous test runs.
     info "Ensuring systemd-machined is ready..."
     sudo systemctl start systemd-machined 2>/dev/null || true
-    for i in $(seq 1 15); do
+    for i in $(seq 1 10); do
         if machinectl list --no-pager >/dev/null 2>&1; then
-            # Kill any lingering rxnm containers from previous runs
-            for stale in $(machinectl list --no-legend --no-pager 2>/dev/null | awk '/rxnm/{print $1}'); do
-                warn "Cleaning up stale container: $stale"
-                machinectl terminate "$stale" 2>/dev/null || true
-            done
-            sleep 1
             return 0
         fi
         sleep 1
