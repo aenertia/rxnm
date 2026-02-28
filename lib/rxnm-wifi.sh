@@ -254,6 +254,11 @@ _task_forget() {
 }
 
 _task_p2p_scan() {
+    # P2P operations require busctl + jq (Bash path). POSIX path delegates to agent.
+    if [ "$RXNM_HAS_JQ" != "true" ] || ! command -v busctl >/dev/null 2>&1; then
+        echo "P2P scan requires jq and busctl" >&2; return 1
+    fi
+
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         if ! is_service_active "iwd"; then echo "IWD not running" >&2; return 1; fi
@@ -349,7 +354,20 @@ action_scan() {
     if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
     if ! is_service_active "iwd"; then json_error "IWD service not running"; return 0; fi
     ensure_interface_active "$iface"
-    
+
+    # POSIX guard: busctl + jq required for scan. On BusyBox/ash, fall back to agent --dump.
+    if [ "$RXNM_HAS_JQ" != "true" ] || ! command -v busctl >/dev/null 2>&1; then
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            local agent_out
+            if agent_out=$("$RXNM_AGENT_BIN" --dump 2>/dev/null); then
+                json_success "$agent_out"
+                return 0
+            fi
+        fi
+        json_error "WiFi scan requires jq and busctl, or rxnm-agent"
+        return 0
+    fi
+
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then json_error "Failed to query IWD via DBus"; return 0; fi
     if [ -z "$objects_json" ]; then json_error "IWD returned empty data"; return 0; fi

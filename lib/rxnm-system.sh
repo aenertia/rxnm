@@ -406,10 +406,11 @@ disable_nat_masquerade() {
     
     if [ "$fw_tool" = "iptables" ]; then
         for table in nat filter mangle; do
-            local rules; rules=$(iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' || true)
-            if [ -n "$rules" ]; then
-                printf '%s\n' "$rules" | sed "s/^-A /timeout 2s iptables -t $table -D /" | sh
-            fi
+            iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' | while IFS= read -r rule; do
+                # Transform -A (append) to -D (delete) and execute directly
+                local del_rule="${rule#-A }"
+                timeout 2s iptables -t "$table" -D $del_rule 2>/dev/null || true
+            done
         done
     elif [ "$fw_tool" = "nft" ]; then
         timeout 2s nft delete table ip rocknix_nat 2>/dev/null
