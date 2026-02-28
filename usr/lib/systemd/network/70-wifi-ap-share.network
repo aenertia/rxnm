@@ -13,8 +13,9 @@ LinkLocalAddressing=yes
 # ULA for local IPv6
 Address=fd00:a7c:ade:50::1/64
 IPv6SendRA=yes
-# IP Forwarding (v255.8 compliant). NAT is handled externally by rxnm-system.
-IPForward=yes
+# IP Forwarding. NAT is handled externally by rxnm-system.
+IPv4Forwarding=yes
+IPv6Forwarding=yes
 # Multicast handled by Avahi
 MulticastDNS=no
 LLMNR=yes
@@ -27,4 +28,4 @@ EmitRouter=yes
 
 [IPv6SendRA]
 Managed=no
-OtherConfig=no
+OtherInformation=no

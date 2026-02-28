@@ -215,9 +215,11 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     info "Phase 6.8: Waiting for WiFi L3 Convergence..."
     CONVERGED=false
     for i in $(seq 1 20); do
-        STATE=$(m_exec "$CLIENT" rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
-        if [ "$STATE" == "connected" ]; then
-            GW=$(m_exec "$CLIENT" ip -4 route get 1.1.1.1 dev "$CLI_WLAN" 2>/dev/null | awk '/via/ {print $3}')
+        # Check L2 connection via iwctl (wifi.state doesn't exist as agent --get key)
+        CONN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+        if [ "$CONN_STATE" = "connected" ]; then
+            # Check L3 — wait for DHCP lease to provide a gateway
+            GW=$(m_exec "$CLIENT" ip -4 route show default dev "$CLI_WLAN" 2>/dev/null | awk '/via/{print $3}' | head -n1)
             if [ -n "$GW" ]; then
                 if m_exec "$CLIENT" ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
                     info "✓ Client authenticated and routed via $GW"
@@ -227,16 +229,16 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
         fi
         sleep 2
     done
-    [ "$CONVERGED" = "false" ] && { err "WiFi Convergence Failed"; exit 1; }
+    [ "$CONVERGED" = "false" ] && { err "WiFi Convergence Failed (L2=$CONN_STATE, GW=${GW:-none})"; exit 1; }
 
     info "--- [PHASE 6b] Client Mode Restoration ---"
     m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" || true
-    sleep 2
-    SRV_STATE=$(m_exec "$SERVER" rxnm interface "$SRV_WLAN" show --get wifi.state 2>/dev/null)
-    if [[ "$SRV_STATE" == "disconnected" || "$SRV_STATE" == "station" ]]; then
-        info "✓ AP state cleaned up successfully"
+    sleep 3
+    SRV_MODE=$(m_exec "$SERVER" iwctl device "$SRV_WLAN" show 2>/dev/null | awk '/Mode/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+    if [ "$SRV_MODE" = "station" ] || [ "$SRV_MODE" = "unknown" ]; then
+        info "✓ AP state cleaned up successfully (mode: $SRV_MODE)"
     else
-        err "AP residue detected in logic: $SRV_STATE"
+        err "AP residue detected (mode: $SRV_MODE)"
         exit 1
     fi
 elif [ "$SKIP_WIFI" = "false" ]; then

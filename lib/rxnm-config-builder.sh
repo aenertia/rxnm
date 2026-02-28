@@ -121,7 +121,7 @@ build_network_config() {
     
     printf "MulticastDNS=%s\nLLMNR=%s\n" "${mdns}" "${llmnr}"
     printf "LinkLocalAddressing=yes\nIPv6AcceptRA=yes\nConfigureWithoutCarrier=yes\n"
-    printf "IPForward=yes\n"
+    printf "IPv4Forwarding=yes\nIPv6Forwarding=yes\n"
 
     if [ -n "$ipv6_privacy" ]; then
         printf "IPv6PrivacyExtensions=%s\n" "${ipv6_privacy}"
@@ -268,13 +268,13 @@ build_gateway_config() {
     
     if [ "$share" = "true" ]; then
         # v255.8 Compliant Forwarding (NAT is handled externally by rxnm-system)
-        printf "IPForward=yes\nIPv6SendRA=yes\n"
+        printf "IPv4Forwarding=yes\nIPv6Forwarding=yes\nIPv6SendRA=yes\n"
         if [ "$ipv6_pd" != "no" ]; then printf "DHCPPrefixDelegation=yes\n"; fi
         
         printf "Address=fd00:cafe:feed::a7ca:de/64\n"
         
         printf "DHCPServer=yes\n\n[DHCPServer]\nPoolOffset=100\nEmitDNS=yes\nEmitRouter=yes\n"
-        printf "[IPv6SendRA]\nManaged=no\nOtherConfig=no\n"
+        printf "[IPv6SendRA]\nManaged=no\nOtherInformation=no\n"
     else
         printf "Address=fd00:cafe:feed::a7ca:de/64\n"
         printf "IPv6AcceptRA=no\nDHCPServer=yes\n\n[DHCPServer]\nEmitDNS=yes\nEmitRouter=no\n"
