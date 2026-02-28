@@ -197,14 +197,32 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN" || true
     sleep 2
 
-    # Ensure server AP interface has a DHCP server config applied.
-    # rxnm generates the config but networkd may not pick it up in nspawn.
-    # Write an explicit high-priority config to guarantee DHCP server runs.
-    m_exec "$SERVER" /bin/bash -c "printf '[Match]\nName=$SRV_WLAN\n\n[Network]\nAddress=192.168.212.1/24\nDHCPServer=yes\nLinkLocalAddressing=yes\nIPv4Forwarding=yes\nIPv6Forwarding=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\nEmitRouter=yes\n' > /run/systemd/network/50-wifi-ap-test.network"
-    m_exec "$SERVER" networkctl reload 2>/dev/null || true
+    # Ensure server AP interface has address + DHCP server.
+    # Write directly and use networkctl to force application.
+    m_exec "$SERVER" /bin/bash -c "cat > /run/systemd/network/50-wifi-ap-test.network << 'NETEOF'
+[Match]
+Name=$SRV_WLAN
+
+[Network]
+Description=CI WiFi AP Test
+Address=192.168.212.1/24
+DHCPServer=yes
+LinkLocalAddressing=yes
+ConfigureWithoutCarrier=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=50
+EmitDNS=yes
+EmitRouter=yes
+NETEOF"
+    m_exec "$SERVER" networkctl reload
     sleep 1
-    m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
-    sleep 2
+    m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN"
+    sleep 3
+    info "Phase 6.4a: Server AP state after config:"
+    m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true
+    m_exec "$SERVER" ip addr show dev "$SRV_WLAN" 2>/dev/null || true
 
     info "Phase 6.5: Waiting for Server AP to become routable..."
     SRV_READY=false
