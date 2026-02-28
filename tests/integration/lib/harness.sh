@@ -43,17 +43,28 @@ cleanup() {
     [ -n "$WIFI_TCPDUMP_PID" ] && { kill "$WIFI_TCPDUMP_PID" 2>/dev/null || true; wait "$WIFI_TCPDUMP_PID" 2>/dev/null || true; }
     
     if [ "$EXIT_CODE" -ne 0 ]; then
-        err "TEST FAILED - DUMPING LOGS"
+        err "TEST FAILED - DUMPING DIAGNOSTICS"
         info "=== systemd-networkd logs (Server) ==="
         journalctl -M "$SERVER" -u systemd-networkd -n 50 --no-pager 2>/dev/null || true
         info "=== systemd-networkd logs (Client) ==="
         journalctl -M "$CLIENT" -u systemd-networkd -n 50 --no-pager 2>/dev/null || true
-        
+
+        info "=== Failed units (Server) ==="
+        m_exec "$SERVER" systemctl --failed --no-pager 2>/dev/null || true
+        info "=== Failed units (Client) ==="
+        m_exec "$CLIENT" systemctl --failed --no-pager 2>/dev/null || true
+
         if [ "$SKIP_WIFI" = "false" ]; then
             info "=== iwd logs (Server) ==="
-            journalctl -M "$SERVER" -u iwd -n 50 --no-pager 2>/dev/null || true
+            journalctl -M "$SERVER" -u iwd -n 80 --no-pager 2>/dev/null || true
             info "=== iwd logs (Client) ==="
-            journalctl -M "$CLIENT" -u iwd -n 50 --no-pager 2>/dev/null || true
+            journalctl -M "$CLIENT" -u iwd -n 80 --no-pager 2>/dev/null || true
+
+            info "=== Host WiFi state ==="
+            iw dev 2>/dev/null || true
+            lsmod | grep -E "mac80211|cfg80211|hwsim" 2>/dev/null || true
+            info "=== Host dmesg (hwsim) ==="
+            dmesg | grep -i -E "hwsim|mac80211|cfg80211" | tail -n 20 2>/dev/null || true
         fi
     fi
 
@@ -131,7 +142,7 @@ setup_hwsim() {
 
 wait_iwd_ready() {
     local machine="$1"
-    local retries=30
+    local retries=45
     for i in $(seq 1 "$retries"); do
         if m_exec "$machine" busctl list 2>/dev/null | grep -q 'net.connman.iwd'; then
             for j in $(seq 1 15); do

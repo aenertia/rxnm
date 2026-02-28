@@ -2,7 +2,7 @@ name: RXNM CI (Native Nspawn)
 
 on:
   push:
-    branches: [ "main", "master", "v1.1.0" ]
+    branches: [ "main", "master", "v1.1.0", "1.1.x-CI", "agentic-review" ]
   pull_request:
     branches: [ "main", "master", "v1.1.0" ]
 
@@ -10,7 +10,7 @@ jobs:
   unit-and-posix:
     name: "Unit Tests & POSIX Compat"
     runs-on: ubuntu-24.04
-    
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
@@ -54,7 +54,7 @@ jobs:
         shellcheck --shell=sh --exclude=SC3043 \
           lib/rxnm-utils.sh lib/rxnm-nullify.sh lib/rxnm-routes.sh \
           lib/rxnm-wifi.sh lib/rxnm-system.sh lib/rxnm-roaming.sh || exit 1
-          
+
         # Explicitly lint the schema file as bash to ensure safety
         shellcheck --shell=bash lib/rxnm-config-schema.sh || exit 1
 
@@ -83,7 +83,7 @@ jobs:
     name: "Integration: Wired & Bridge"
     runs-on: ubuntu-24.04
     needs: unit-and-posix
-    
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
@@ -123,47 +123,64 @@ jobs:
     name: "Integration: Virtual WiFi (hwsim)"
     runs-on: ubuntu-24.04
     needs: unit-and-posix
-    continue-on-error: true   
-    
+    continue-on-error: true
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Compile and Load Dependencies & Virtual WiFi
+    - name: Restore cached hwsim modules
+      id: hwsim-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/hwsim-cache
+        key: hwsim-modules-${{ runner.os }}-${{ hashFiles('/proc/version') }}
+        restore-keys: |
+          hwsim-modules-${{ runner.os }}-
+
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl bc libssl-dev libelf-dev flex bison dpkg-dev
-        
+
         sudo mkdir -p /etc/NetworkManager/conf.d
-        echo -e "[keyfile]\nunmanaged-devices=driver:mac80211_hwsim" | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
+        printf '[keyfile]\nunmanaged-devices=driver:mac80211_hwsim\n' | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
         sudo systemctl reload-or-restart NetworkManager || true
         sudo systemctl stop wpa_supplicant 2>/dev/null || true
         sudo systemctl mask wpa_supplicant || true
-        
+
         if systemctl is-active --quiet apparmor; then
             sudo systemctl stop apparmor
             sudo systemctl disable apparmor
         fi
-        
+
         sudo sysctl -w net.ipv4.ip_forward=1
         sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
-        echo "Sweeping required modules..."
+    - name: "Load mac80211_hwsim (Stage 1: prebuilt, Stage 2: cache/compile)"
+      run: |
+        HWSIM_LOADED=false
+
+        #---------------------------------------------------------------
+        # Stage 1: Try prebuilt modules from the running kernel
+        #---------------------------------------------------------------
+        echo "=== Stage 1: Attempting prebuilt modprobe ==="
         REQUIRED_MODULES="pkcs8_key_parser arc4 md4 cmac ecb des3_ede algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic mac80211_hwsim"
         MISSING_MODULES=""
-        
+
         for mod in $REQUIRED_MODULES; do
           if ! sudo modprobe "$mod" 2>/dev/null; then
             MISSING_MODULES="$MISSING_MODULES $mod"
           fi
         done
-        
-        # Fast path: Try installing prebuilt extra modules if missing
+
         if [ -n "$MISSING_MODULES" ]; then
-            echo "Attempting to install precompiled linux-modules-extra..."
-            sudo apt-get install -y linux-modules-extra-$(uname -r) linux-modules-extra-azure || true
-            
-            # Re-sweep
+            echo "Missing: $MISSING_MODULES"
+            echo "Installing linux-modules-extra packages..."
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" 2>/dev/null || true
+            # Try azure-specific package as fallback
+            sudo apt-get install -y linux-modules-extra-azure 2>/dev/null || true
+
             MISSING_MODULES=""
             for mod in $REQUIRED_MODULES; do
               if ! sudo modprobe "$mod" 2>/dev/null; then
@@ -171,39 +188,81 @@ jobs:
               fi
             done
         fi
-        
-        # Strict Compilation Path
-        if [ -n "$MISSING_MODULES" ]; then
-            echo "Missing modules still detected: $MISSING_MODULES"
-            echo "Fetching pristine mainline kernel source to bypass vendor meta-package issues..."
-            
-            mkdir -p /tmp/linux-src
-            cd /tmp/linux-src
-            
-            KVER=$(uname -r | cut -d- -f1)
-            # kernel.org drops the .0 for major releases (e.g., 6.11.0 -> 6.11)
-            KVER_MAJ_MIN=$(echo $KVER | sed 's/\.0$//')
-            MAJOR=$(echo $KVER | cut -d. -f1)
-            URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER_MAJ_MIN}.tar.xz"
-            
-            echo "Downloading $URL..."
-            curl -fSsl -O "$URL"
-            tar -xf linux-${KVER_MAJ_MIN}.tar.xz
-            cd linux-${KVER_MAJ_MIN}
-            
-            echo "Preparing kernel build environment for $(uname -r)..."
-            
-            # Fix Vermagic: Ensure compiled modules match the running kernel exactly
-            FULL_VER=$(uname -r)
-            EXTRA_VER=${FULL_VER#$KVER}
-            sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = $EXTRA_VER/" Makefile
-            echo "Set EXTRAVERSION to $EXTRA_VER"
-            
-            cp /boot/config-$(uname -r) .config
-            cp /usr/src/linux-headers-$(uname -r)/Module.symvers . || true
-            
-            # Force module configs and dependencies to guarantee compilation
-            cat <<EOF >> .config
+
+        if lsmod | grep -q mac80211_hwsim; then
+            echo "Stage 1 SUCCESS: mac80211_hwsim loaded from prebuilt modules"
+            HWSIM_LOADED=true
+        fi
+
+        #---------------------------------------------------------------
+        # Stage 2: Restore from cache or compile from kernel.org source
+        #---------------------------------------------------------------
+        if [ "$HWSIM_LOADED" = "false" ]; then
+            echo "=== Stage 2: Cache/Compile path ==="
+            CACHE_DIR="/tmp/hwsim-cache"
+
+            # 2a: Try restoring from actions/cache
+            if [ -d "$CACHE_DIR" ] && [ -n "$(ls -A "$CACHE_DIR"/*.ko 2>/dev/null)" ]; then
+                echo "Cache HIT: Restoring compiled modules from cache..."
+                sudo mkdir -p "/lib/modules/$(uname -r)/updates"
+                sudo cp "$CACHE_DIR"/*.ko "/lib/modules/$(uname -r)/updates/"
+                sudo depmod -a
+
+                # Verify vermagic before loading
+                for ko in "$CACHE_DIR"/*.ko; do
+                    echo "  $(basename "$ko"): $(modinfo -F vermagic "$ko" 2>/dev/null || echo 'unknown')"
+                done
+
+                for mod in pkcs8_key_parser arc4 md4 cmac ecb des_generic algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
+                    sudo modprobe "$mod" 2>/dev/null || true
+                done
+                sudo modprobe mac80211_hwsim radios=2 2>/dev/null || true
+
+                if lsmod | grep -q mac80211_hwsim; then
+                    echo "Stage 2a SUCCESS: mac80211_hwsim loaded from cached modules"
+                    HWSIM_LOADED=true
+                else
+                    echo "Cache STALE: vermagic mismatch, clearing cache and recompiling..."
+                    rm -rf "$CACHE_DIR"
+                fi
+            fi
+
+            # 2b: Compile from kernel.org source
+            if [ "$HWSIM_LOADED" = "false" ]; then
+                echo "Cache MISS: Compiling from kernel.org mainline source..."
+                mkdir -p /tmp/linux-src
+                cd /tmp/linux-src
+
+                KVER=$(uname -r | cut -d- -f1)
+                KVER_MAJ_MIN=$(echo "$KVER" | sed 's/\.0$//')
+                MAJOR=$(echo "$KVER" | cut -d. -f1)
+                URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${KVER_MAJ_MIN}.tar.xz"
+
+                echo "Downloading $URL..."
+                if ! curl -fSsl -O "$URL"; then
+                    echo "::warning::Failed to download kernel source from $URL"
+                    echo "HWSIM_FAILED=true" >> "$GITHUB_ENV"
+                    exit 0
+                fi
+                tar -xf "linux-${KVER_MAJ_MIN}.tar.xz"
+                cd "linux-${KVER_MAJ_MIN}"
+
+                echo "Preparing kernel build environment for $(uname -r)..."
+
+                FULL_VER=$(uname -r)
+                EXTRA_VER=${FULL_VER#"$KVER"}
+                sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = $EXTRA_VER/" Makefile
+                echo "Set EXTRAVERSION to '$EXTRA_VER'"
+
+                if [ -f "/boot/config-$(uname -r)" ]; then
+                    cp "/boot/config-$(uname -r)" .config
+                else
+                    echo "::warning::No /boot/config found, using defconfig"
+                    make defconfig
+                fi
+                cp "/usr/src/linux-headers-$(uname -r)/Module.symvers" . 2>/dev/null || true
+
+                cat >> .config <<'KCONFIG'
         CONFIG_WLAN=y
         CONFIG_WIRELESS=y
         CONFIG_NETDEVICES=y
@@ -224,46 +283,58 @@ jobs:
         CONFIG_CRYPTO_SHA256=m
         CONFIG_CRYPTO_SHA512=m
         CONFIG_MAC80211_HWSIM=m
-        EOF
-            
-            # No sudo needed for compilation, keeping files owned by runner
-            make olddefconfig
-            make modules_prepare
-            
-            # Dynamically locate hwsim source (moved to virtual/ in 6.x kernels)
-            HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
-            HWSIM_KO="${HWSIM_SRC%.c}.ko"
-            
-            # Build specific targets directly in-tree to prevent Modpost duplicate export errors
-            TARGETS="crypto/arc4.ko crypto/md4.ko crypto/cmac.ko crypto/ecb.ko crypto/des_generic.ko crypto/algif_skcipher.ko crypto/algif_hash.ko crypto/af_alg.ko crypto/ccm.ko crypto/cbc.ko crypto/sha256_generic.ko crypto/sha512_generic.ko crypto/asymmetric_keys/pkcs8_key_parser.ko net/rfkill/rfkill.ko net/wireless/cfg80211.ko net/mac80211/mac80211.ko $HWSIM_KO"
-            
-            echo "Building modules natively in-tree: $TARGETS"
-            make -j$(nproc) $TARGETS || echo "::warning::Some targets failed to build, but continuing..."
-            
-            echo "Installing compiled modules to /lib/modules/$(uname -r)/updates"
-            sudo mkdir -p /lib/modules/$(uname -r)/updates
-            
-            find . -name "*.ko" -exec sudo cp {} /lib/modules/$(uname -r)/updates/ \;
-            sudo depmod -a
-            
-            # Load the newly installed modules (des_generic provides des3_ede)
-            for mod in pkcs8_key_parser arc4 md4 cmac ecb des_generic algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
-                sudo modprobe $mod || true
-            done
-            sudo modprobe mac80211_hwsim radios=2 || true
-            
-        else
-            echo "All required modules are already available via modprobe/built-in."
+        KCONFIG
+
+                make olddefconfig
+                make modules_prepare
+
+                HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
+                HWSIM_KO="${HWSIM_SRC%.c}.ko"
+
+                TARGETS="crypto/arc4.ko crypto/md4.ko crypto/cmac.ko crypto/ecb.ko crypto/des_generic.ko crypto/algif_skcipher.ko crypto/algif_hash.ko crypto/af_alg.ko crypto/ccm.ko crypto/cbc.ko crypto/sha256_generic.ko crypto/sha512_generic.ko crypto/asymmetric_keys/pkcs8_key_parser.ko net/rfkill/rfkill.ko net/wireless/cfg80211.ko net/mac80211/mac80211.ko $HWSIM_KO"
+
+                echo "Building modules: $TARGETS"
+                make -j"$(nproc)" $TARGETS || echo "::warning::Some module targets failed to build"
+
+                # Install and cache
+                sudo mkdir -p "/lib/modules/$(uname -r)/updates"
+                mkdir -p "$CACHE_DIR"
+
+                find . -name "*.ko" | while IFS= read -r ko; do
+                    sudo cp "$ko" "/lib/modules/$(uname -r)/updates/"
+                    cp "$ko" "$CACHE_DIR/"
+                done
+                sudo depmod -a
+
+                for mod in pkcs8_key_parser arc4 md4 cmac ecb des_generic algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
+                    sudo modprobe "$mod" 2>/dev/null || true
+                done
+                sudo modprobe mac80211_hwsim radios=2 2>/dev/null || true
+
+                if lsmod | grep -q mac80211_hwsim; then
+                    echo "Stage 2b SUCCESS: mac80211_hwsim loaded from compiled modules"
+                    HWSIM_LOADED=true
+                fi
+            fi
         fi
-        
-        if lsmod | grep -q mac80211_hwsim; then
-           echo "HWSIM_METHOD=compiled" >> $GITHUB_ENV
-           echo "HWSIM_FAILED=false" >> $GITHUB_ENV
-           echo "✓ Successfully loaded mac80211_hwsim"
+
+        #---------------------------------------------------------------
+        # Final status
+        #---------------------------------------------------------------
+        if [ "$HWSIM_LOADED" = "true" ]; then
+            echo "HWSIM_FAILED=false" >> "$GITHUB_ENV"
+            echo "::notice::mac80211_hwsim loaded successfully"
+            lsmod | grep -E "mac80211|cfg80211|hwsim"
         else
-           echo "HWSIM_FAILED=true" >> $GITHUB_ENV
-           echo "::warning::mac80211_hwsim failed to load."
-           sudo dmesg | tail -n 30
+            echo "HWSIM_FAILED=true" >> "$GITHUB_ENV"
+            echo "::warning::mac80211_hwsim failed to load on this runner"
+            echo "--- dmesg (last 40 lines) ---"
+            sudo dmesg | tail -n 40
+            echo "--- modinfo for cached .ko files ---"
+            for ko in /tmp/hwsim-cache/*.ko 2>/dev/null; do
+                [ -f "$ko" ] && echo "  $(basename "$ko"): vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A')"
+            done
+            echo "Running kernel: $(uname -r)"
         fi
 
     - name: Build RXNM Agent
@@ -272,16 +343,29 @@ jobs:
     - name: Run Integration Tests
       run: |
         sudo chmod +x tests/integration/run_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo ./tests/integration/run_interop.sh --skip-wifi; else sudo ./tests/integration/run_interop.sh --wifi-only; fi
+        if [ "${HWSIM_FAILED}" = "true" ]; then
+            echo "::warning::Skipping WiFi tests (hwsim unavailable)"
+            sudo ./tests/integration/run_interop.sh --skip-wifi
+        else
+            sudo ./tests/integration/run_interop.sh --wifi-only
+        fi
 
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
         make rocknix-release
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi; else sudo ./tests/integration/run_rocknix_interop.sh --wifi-only; fi
+        if [ "${HWSIM_FAILED}" = "true" ]; then
+            sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
+        else
+            sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
+        fi
 
     - name: Run Full Combined Bundle Integration Tests
       run: |
         make combined-full
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi; else sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only; fi
+        if [ "${HWSIM_FAILED}" = "true" ]; then
+            sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi
+        else
+            sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only
+        fi
