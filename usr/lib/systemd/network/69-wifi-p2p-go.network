@@ -9,8 +9,8 @@ Description=Rocknix Wi-Fi P2P Group Owner
 Address=192.168.49.1/24
 DHCPServer=yes
 # IP Forwarding. NAT is handled externally by rxnm-system.
-IPv4Forwarding=yes
-IPv6Forwarding=yes
+# Uses IPForward= for systemd 255 (ROCKNIX) compatibility.
+IPForward=yes
 # Ensure local name resolution works for the group
 MulticastDNS=no
 LLMNR=yes
