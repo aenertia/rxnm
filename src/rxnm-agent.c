@@ -97,6 +97,10 @@ char g_conn_targets_v6[4096] = RXNM_PROBE_TARGETS_V6;
 /* Configurable DBus Timeout (Default 5s) */
 long g_dbus_timeout_us = 5000000;
 
+/* Global DBus serial counter — shared across all DBus send functions to prevent
+ * duplicate serial numbers within a single connection. */
+static uint32_t g_dbus_serial = 0;
+
 /* Routing Table Filter (Default: Main) */
 uint32_t g_target_table = RT_TABLE_MAIN;
 bool g_filter_table = true; /* If false, dump all tables */
@@ -351,16 +355,9 @@ bool dyn_buf_append_string(dyn_buf_t *b, const char *str) {
     /* Ensure 4-byte alignment before appending string length (D-Bus Spec) */
     if (!dyn_buf_align4(b)) return false;
     
-    /* Explicitly encode length in Little Endian (DBUS_ENDIAN_LITTLE) */
+    /* Encode length in native byte order to match DBUS_NATIVE_ENDIAN */
     uint32_t len = strlen(str);
-    uint8_t len_bytes[4] = {
-        (uint8_t)(len & 0xFF),
-        (uint8_t)((len >> 8) & 0xFF),
-        (uint8_t)((len >> 16) & 0xFF),
-        (uint8_t)((len >> 24) & 0xFF)
-    };
-    
-    if (!dyn_buf_append(b, len_bytes, 4)) return false;
+    if (!dyn_buf_append(b, &len, sizeof(len))) return false;
     if (!dyn_buf_append(b, str, len + 1)) return false;
     return true;
 }
@@ -678,14 +675,12 @@ int dbus_send_method_call(int sock, const char *dest, const char *path, const ch
     
     dbus_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.endian = DBUS_NATIVE_ENDIAN;
     hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
     hdr.flags = expect_reply ? 0 : DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED;
     hdr.version = DBUS_PROTOCOL_VERSION;
     
-    /* Ensure DBus Serial Number compliance (Unique per connection) */
-    static uint32_t _serial_counter = 0;
-    hdr.serial = ++_serial_counter;
+    hdr.serial = ++g_dbus_serial;
     
     if (!dyn_buf_append(&b, &hdr, sizeof(hdr))) { dyn_buf_free(&b); return -1; }
     
@@ -789,7 +784,7 @@ int find_iwd_network_path(int sock, const char *ssid, const char *prefix, char *
     dyn_buf_t req = {0};
     dbus_header_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.endian = DBUS_ENDIAN_LITTLE;
+    hdr.endian = DBUS_NATIVE_ENDIAN;
     hdr.type = DBUS_MESSAGE_TYPE_METHOD_CALL;
     hdr.flags = 0; /* Expect Reply */
     hdr.version = DBUS_PROTOCOL_VERSION;
@@ -1212,7 +1207,10 @@ int open_netlink_genl() {
     struct sockaddr_nl addr = { .nl_family = AF_NETLINK };
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(sock);
+        return -1;
+    }
     return sock;
 }
 
@@ -1439,6 +1437,7 @@ bool tcp_probe(const char *ip_str, int port, int family) {
 }
 
 void parse_target(char *token, char *ip, size_t ip_size, int *port) {
+    ip[0] = '\0';
     char *colon = strrchr(token, ':');
     if (colon) {
         *colon = '\0';
@@ -1540,15 +1539,21 @@ void print_json_status() {
         FILE *f = fopen("/etc/hostname", "r");
         if (f) { if (fgets(hostname, sizeof(hostname), f)) hostname[strcspn(hostname, "\n")] = 0; fclose(f); }
     }
-    printf("  \"hostname\": \"%s\",\n", hostname);
+    printf("  "); json_print_string("hostname", hostname, true);
     
     char p_http[256] = "", p_https[256] = "", p_no[256] = "";
     get_proxy_config(p_http, p_https, p_no);
-    bool first_proxy = true; printf("  \"global_proxy\": {\n");
-    if (strlen(p_http) > 0)  { json_print_string("http", p_http, false); printf(","); first_proxy = false; }
-    if (strlen(p_https) > 0) { if(!first_proxy) printf("\n"); json_print_string("https", p_https, false); printf(","); first_proxy = false; }
-    if (strlen(p_no) > 0)    { if(!first_proxy) printf("\n"); json_print_string("noproxy", p_no, false); printf(","); first_proxy = false; }
-    if (first_proxy) printf("    \"status\": \"none\"\n"); else printf("    \"status\": \"active\"\n");
+    bool has_proxy = (strlen(p_http) > 0 || strlen(p_https) > 0 || strlen(p_no) > 0);
+    printf("  \"global_proxy\": {\n");
+    if (has_proxy) {
+        bool need_comma = false;
+        if (strlen(p_http) > 0)  { printf("  "); json_print_string("http", p_http, false); need_comma = true; }
+        if (strlen(p_https) > 0) { if (need_comma) printf(",\n"); printf("  "); json_print_string("https", p_https, false); need_comma = true; }
+        if (strlen(p_no) > 0)    { if (need_comma) printf(",\n"); printf("  "); json_print_string("noproxy", p_no, false); need_comma = true; }
+        printf(",\n    \"status\": \"active\"\n");
+    } else {
+        printf("    \"status\": \"none\"\n");
+    }
     printf("  },\n  \"interfaces\": {\n");
     
     bool first_iface = true;
@@ -2501,7 +2506,13 @@ end_args:
     if (g_ns_create) { return cmd_ns_create(g_ns_create); }
     if (g_ns_delete) { return cmd_ns_delete(g_ns_delete); }
     if (g_route_table) {
-        g_target_table = atoi(g_route_table);
+        char *endp;
+        long tbl = strtol(g_route_table, &endp, 10);
+        if (*endp != '\0' || tbl < 0 || tbl > UINT32_MAX) {
+            fprintf(stderr, "Invalid route table ID: %s\n", g_route_table);
+            return 1;
+        }
+        g_target_table = (uint32_t)tbl;
         g_filter_table = true;
         collect_network_state();
         print_json_routes();

@@ -32,9 +32,9 @@
 
 /* Detect Endianness at Compile Time */
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define DBUS_ENDIAN_LITTLE 'l'
+#define DBUS_NATIVE_ENDIAN 'l'
 #else
-#define DBUS_ENDIAN_LITTLE 'B'
+#define DBUS_NATIVE_ENDIAN 'B'
 #endif
 
 #define DBUS_PROTOCOL_VERSION 1
