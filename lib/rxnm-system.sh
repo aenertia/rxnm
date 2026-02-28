@@ -408,7 +408,9 @@ disable_nat_masquerade() {
         for table in nat filter mangle; do
             iptables-save -t "$table" 2>/dev/null | grep -- '--comment "rocknix"' | while IFS= read -r rule; do
                 # Transform -A (append) to -D (delete) and execute directly
+                # Word splitting is intentional here — iptables args are space-separated
                 local del_rule="${rule#-A }"
+                # shellcheck disable=SC2086
                 timeout 2s iptables -t "$table" -D $del_rule 2>/dev/null || true
             done
         done
