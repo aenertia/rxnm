@@ -245,13 +245,38 @@ jobs:
                 fi
             fi
 
-            # 2b: Compile ONLY missing modules from kernel.org source
+            # 2b: Out-of-tree build using kernel.org source + installed headers
+            #
+            # Strategy: Download mainline source for the .c files, but build
+            # against the INSTALLED kernel headers (which have Module.symvers
+            # matching the running Azure kernel). This is the standard
+            # out-of-tree module build approach:
+            #   make -C /lib/modules/$(uname -r)/build M=/path/to/source modules
+            #
             if [ "$HWSIM_LOADED" = "false" ]; then
-                echo "Cache MISS: Compiling missing modules from kernel.org source..."
+                echo "Cache MISS: Out-of-tree build from kernel.org source..."
                 echo "Still missing: $MISSING_MODULES"
-                mkdir -p /tmp/linux-src
-                cd /tmp/linux-src
 
+                KBUILD_DIR="/lib/modules/$(uname -r)/build"
+                if [ ! -d "$KBUILD_DIR" ]; then
+                    echo "::warning::Kernel build dir not found at $KBUILD_DIR"
+                    echo "Available in /lib/modules/$(uname -r)/:"
+                    ls -la "/lib/modules/$(uname -r)/" 2>/dev/null || true
+                    echo "Available in /usr/src/:"
+                    ls -la /usr/src/ 2>/dev/null || true
+                    echo "HWSIM_FAILED=true" >> "$GITHUB_ENV"
+                    exit 0
+                fi
+
+                echo "Kernel build tree: $KBUILD_DIR"
+                if [ -f "$KBUILD_DIR/Module.symvers" ]; then
+                    echo "Module.symvers: $(wc -l < "$KBUILD_DIR/Module.symvers") symbols"
+                else
+                    echo "::warning::Module.symvers missing from build tree!"
+                fi
+
+                # Download mainline source for the module .c files
+                mkdir -p /tmp/linux-src && cd /tmp/linux-src
                 KVER=$(uname -r | cut -d- -f1)
                 KVER_MAJ_MIN=$(echo "$KVER" | sed 's/\.0$//')
                 MAJOR=$(echo "$KVER" | cut -d. -f1)
@@ -259,101 +284,73 @@ jobs:
 
                 echo "Downloading $URL..."
                 if ! curl -fSsl -O "$URL"; then
-                    echo "::warning::Failed to download kernel source from $URL"
+                    echo "::warning::Failed to download kernel source"
                     echo "HWSIM_FAILED=true" >> "$GITHUB_ENV"
                     exit 0
                 fi
                 tar -xf "linux-${KVER_MAJ_MIN}.tar.xz"
-                cd "linux-${KVER_MAJ_MIN}"
+                SRC_DIR="/tmp/linux-src/linux-${KVER_MAJ_MIN}"
 
-                echo "Preparing build environment for $(uname -r)..."
+                # Locate hwsim source (moved to virtual/ in kernel 6.x)
+                HWSIM_SRC=$(find "$SRC_DIR/drivers/net/wireless" -name "mac80211_hwsim.c" | head -n1)
+                echo "hwsim source: $HWSIM_SRC"
 
-                FULL_VER=$(uname -r)
-                EXTRA_VER=${FULL_VER#"$KVER"}
-                sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = $EXTRA_VER/" Makefile
-                echo "Set EXTRAVERSION to '$EXTRA_VER'"
+                # Out-of-tree builds need explicit obj-m in a standalone Kbuild.
+                # The upstream Makefiles use obj-$(CONFIG_*) which isn't set in M= context.
 
-                if [ -f "/boot/config-$(uname -r)" ]; then
-                    cp "/boot/config-$(uname -r)" .config
-                else
-                    echo "::warning::No /boot/config found, using defconfig"
-                    make defconfig
-                fi
+                # Build mac80211_hwsim (copy all files — .c needs .h from same dir)
+                echo "=== Building mac80211_hwsim ==="
+                HWSIM_BUILD=/tmp/build-hwsim
+                mkdir -p "$HWSIM_BUILD"
+                cp "$(dirname "$HWSIM_SRC")"/* "$HWSIM_BUILD/"
+                echo "obj-m := mac80211_hwsim.o" > "$HWSIM_BUILD/Makefile"
+                make -C "$KBUILD_DIR" M="$HWSIM_BUILD" modules \
+                    && echo "hwsim build SUCCESS" \
+                    || echo "::warning::hwsim build failed"
 
-                # Module.symvers is CRITICAL - without it all symbols are unresolved
-                echo "=== Searching for Module.symvers ==="
-                SYMVERS_FOUND=false
-                for sympath in "/usr/src/linux-headers-$(uname -r)/Module.symvers" "/lib/modules/$(uname -r)/build/Module.symvers" "/usr/src/linux-headers-$(uname -r | sed 's/-azure//')/Module.symvers"; do
-                    echo "  Checking: $sympath"
-                    if [ -f "$sympath" ]; then
-                        cp "$sympath" .
-                        echo "  FOUND: Module.symvers from $sympath ($(wc -l < Module.symvers) symbols)"
-                        SYMVERS_FOUND=true
-                        break
-                    fi
-                done
-                if [ "$SYMVERS_FOUND" = "false" ]; then
-                    echo "::warning::Module.symvers not found - listing available header dirs:"
-                    ls -la /usr/src/ 2>/dev/null || true
-                    ls -la /lib/modules/$(uname -r)/ 2>/dev/null || true
-                fi
+                # Build arc4 (IWD WPA dependency)
+                echo "=== Building arc4 ==="
+                ARC4_BUILD=/tmp/build-arc4
+                mkdir -p "$ARC4_BUILD"
+                cp "$SRC_DIR/crypto/arc4.c" "$ARC4_BUILD/"
+                echo "obj-m := arc4.o" > "$ARC4_BUILD/Makefile"
+                make -C "$KBUILD_DIR" M="$ARC4_BUILD" modules \
+                    && echo "arc4 build SUCCESS" \
+                    || echo "::warning::arc4 build failed"
 
-                # Append required module configs
-                printf '%s\n' "CONFIG_WLAN=y" "CONFIG_WIRELESS=y" "CONFIG_NETDEVICES=y" "CONFIG_PKCS8_PRIVATE_KEY_PARSER=m" "CONFIG_CRYPTO_ARC4=m" "CONFIG_CRYPTO_MD4=m" "CONFIG_CRYPTO_CMAC=m" "CONFIG_CRYPTO_ECB=m" "CONFIG_CRYPTO_DES=m" "CONFIG_CRYPTO_USER_API_SKCIPHER=m" "CONFIG_CRYPTO_USER_API_HASH=m" "CONFIG_CRYPTO_USER_API=m" "CONFIG_CFG80211=m" "CONFIG_MAC80211=m" "CONFIG_RFKILL=m" "CONFIG_CRYPTO_CCM=m" "CONFIG_CRYPTO_CBC=m" "CONFIG_CRYPTO_SHA256=m" "CONFIG_CRYPTO_SHA512=m" "CONFIG_MAC80211_HWSIM=m" >> .config
-
-                make olddefconfig
-                make modules_prepare || make scripts || true
-
-                # Dynamically locate hwsim source (moved to virtual/ in 6.x kernels)
-                HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
-                HWSIM_KO="${HWSIM_SRC%.c}.ko"
-
-                # Build only the specific modules that are missing
-                TARGETS=""
-                for mod in $MISSING_MODULES; do
-                    case "$mod" in
-                        arc4) TARGETS="$TARGETS crypto/arc4.ko" ;;
-                        md4) TARGETS="$TARGETS crypto/md4.ko" ;;
-                        cmac) TARGETS="$TARGETS crypto/cmac.ko" ;;
-                        ecb) TARGETS="$TARGETS crypto/ecb.ko" ;;
-                        des3_ede|des_generic) TARGETS="$TARGETS crypto/des_generic.ko" ;;
-                        algif_skcipher) TARGETS="$TARGETS crypto/algif_skcipher.ko" ;;
-                        algif_hash) TARGETS="$TARGETS crypto/algif_hash.ko" ;;
-                        af_alg) TARGETS="$TARGETS crypto/af_alg.ko" ;;
-                        ccm) TARGETS="$TARGETS crypto/ccm.ko" ;;
-                        cbc) TARGETS="$TARGETS crypto/cbc.ko" ;;
-                        sha256_generic) TARGETS="$TARGETS crypto/sha256_generic.ko" ;;
-                        sha512_generic) TARGETS="$TARGETS crypto/sha512_generic.ko" ;;
-                        pkcs8_key_parser) TARGETS="$TARGETS crypto/asymmetric_keys/pkcs8_key_parser.ko" ;;
-                        rfkill) TARGETS="$TARGETS net/rfkill/rfkill.ko" ;;
-                        cfg80211) TARGETS="$TARGETS net/wireless/cfg80211.ko" ;;
-                        mac80211) TARGETS="$TARGETS net/mac80211/mac80211.ko" ;;
-                        mac80211_hwsim) TARGETS="$TARGETS $HWSIM_KO" ;;
-                    esac
-                done
-
-                echo "Building ONLY missing modules: $TARGETS"
-                make KBUILD_MODPOST_WARN=1 -j"$(nproc)" $TARGETS || echo "::warning::Some module targets failed to build"
-
-                # Install compiled modules and cache for next run
+                # Install any successfully compiled .ko files
                 sudo mkdir -p "/lib/modules/$(uname -r)/updates"
                 mkdir -p "$CACHE_DIR"
+                BUILT_COUNT=0
 
-                find . -name "*.ko" | while IFS= read -r ko; do
-                    echo "  Installing: $(basename "$ko") vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo N/A)"
+                for ko in $(find /tmp/build-* -name "*.ko" -type f 2>/dev/null); do
+                    echo "  Built: $(basename "$ko") vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo N/A)"
                     sudo cp "$ko" "/lib/modules/$(uname -r)/updates/"
                     cp "$ko" "$CACHE_DIR/"
+                    BUILT_COUNT=$((BUILT_COUNT + 1))
                 done
+
+                if [ "$BUILT_COUNT" -eq 0 ]; then
+                    echo "::warning::No .ko files were produced"
+                    echo "HWSIM_FAILED=true" >> "$GITHUB_ENV"
+                    exit 0
+                fi
+
                 sudo depmod -a
 
+                # Load modules in dependency order
                 for mod in pkcs8_key_parser arc4 md4 cmac ecb des_generic algif_skcipher algif_hash af_alg cfg80211 mac80211 rfkill ccm cbc sha256_generic sha512_generic; do
                     sudo modprobe "$mod" 2>/dev/null || true
                 done
                 sudo modprobe mac80211_hwsim radios=2 2>/dev/null || true
 
                 if lsmod | grep -q mac80211_hwsim; then
-                    echo "Stage 2b SUCCESS: mac80211_hwsim loaded from compiled modules"
+                    echo "Stage 2b SUCCESS: mac80211_hwsim loaded"
                     HWSIM_LOADED=true
+                else
+                    echo "::warning::Modules built but mac80211_hwsim failed to load"
+                    echo "dmesg tail:"
+                    sudo dmesg | tail -n 10
                 fi
             fi
         fi
@@ -382,18 +379,14 @@ jobs:
     - name: Build RXNM Agent
       run: make tiny
 
-    - name: Run Integration Tests
+    - name: Run WiFi Integration Tests
+      if: env.HWSIM_FAILED != 'true'
       run: |
         sudo chmod +x tests/integration/run_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then
-            echo "::warning::Skipping WiFi tests (hwsim unavailable)"
-            sudo ./tests/integration/run_interop.sh --skip-wifi
-        else
-            sudo ./tests/integration/run_interop.sh --wifi-only
-        fi
+        sudo ./tests/integration/run_interop.sh --wifi-only
 
     - name: Cleanup between test suites
-      if: always()
+      if: always() && env.HWSIM_FAILED != 'true'
       run: |
         for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
             sudo machinectl terminate "$m" 2>/dev/null || true
@@ -401,18 +394,15 @@ jobs:
         sleep 3
         sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
-    - name: Run ROCKNIX Bundle Integration Tests
+    - name: Run ROCKNIX Bundle WiFi Tests
+      if: env.HWSIM_FAILED != 'true'
       run: |
         make rocknix-release
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then
-            sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
-        else
-            sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
-        fi
+        sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
 
     - name: Cleanup between test suites
-      if: always()
+      if: always() && env.HWSIM_FAILED != 'true'
       run: |
         for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
             sudo machinectl terminate "$m" 2>/dev/null || true
@@ -420,12 +410,15 @@ jobs:
         sleep 3
         sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
-    - name: Run Full Combined Bundle Integration Tests
+    - name: Run Full Combined Bundle WiFi Tests
+      if: env.HWSIM_FAILED != 'true'
       run: |
         make combined-full
         sudo chmod +x tests/integration/run_rocknix_interop.sh
-        if [ "${HWSIM_FAILED}" = "true" ]; then
-            sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --skip-wifi
-        else
-            sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only
-        fi
+        sudo BUNDLE_BIN=build/rxnm-full ./tests/integration/run_rocknix_interop.sh --wifi-only
+
+    - name: WiFi tests skipped (hwsim unavailable)
+      if: env.HWSIM_FAILED == 'true'
+      run: |
+        echo "::error::mac80211_hwsim could not be loaded. WiFi integration tests cannot run."
+        exit 1
