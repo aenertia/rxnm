@@ -195,10 +195,23 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
 
     info "Phase 6.4: Starting Virtual AP on $SRV_WLAN..."
     m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN" || true
-    # Force networkd to pick up the generated AP config
     sleep 2
+
+    # Diagnostics: verify AP config was generated and applied
+    info "Phase 6.4a: AP config diagnostics..."
+    m_exec "$SERVER" ls -la /run/systemd/network/ 2>/dev/null || true
+    m_exec "$SERVER" cat /run/systemd/network/65-wifi-host-"$SRV_WLAN".network 2>/dev/null || echo "WARNING: AP config file not found!"
+    m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true
+    m_exec "$SERVER" ip addr show "$SRV_WLAN" 2>/dev/null || true
+
+    # Force networkd to pick up the generated AP config
     m_exec "$SERVER" networkctl reload 2>/dev/null || true
+    sleep 1
     m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
+    sleep 2
+    info "Phase 6.4b: Post-reconfigure state..."
+    m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true
+    m_exec "$SERVER" ip addr show "$SRV_WLAN" 2>/dev/null || true
 
     info "Phase 6.5: Waiting for Server AP to become routable..."
     SRV_READY=false
