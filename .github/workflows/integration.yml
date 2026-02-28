@@ -141,7 +141,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl bc libssl-dev libelf-dev flex bison dpkg-dev
+        sudo apt-get install -y linux-headers-$(uname -r) build-essential iw rfkill jq systemd-container bridge-utils dbus-user-session kmod curl bc libssl-dev libelf-dev libdw-dev flex bison dpkg-dev
 
         sudo mkdir -p /etc/NetworkManager/conf.d
         printf '[keyfile]\nunmanaged-devices=driver:mac80211_hwsim\n' | sudo tee /etc/NetworkManager/conf.d/99-hwsim-ignore.conf >/dev/null
