@@ -179,36 +179,40 @@ fi
 
 if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     info "--- [PHASE 6] IWD Virtual WiFi Interoperability ---"
+    info "Phase 6.1: Restarting IWD..."
     m_exec "$SERVER" systemctl restart iwd
     m_exec "$CLIENT" systemctl restart iwd
+    info "Phase 6.2: Waiting for IWD ready..."
     wait_iwd_ready "$SERVER"
     wait_iwd_ready "$CLIENT"
-    
+
     SRV_WLAN=$(m_exec "$SERVER" iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
     CLI_WLAN=$(m_exec "$CLIENT" iw dev | awk '$1=="Interface"{print $2; exit}' | tr -d '\r\n')
+    info "Phase 6.3: WiFi interfaces -> Server: $SRV_WLAN, Client: $CLI_WLAN"
 
     m_exec "$SERVER" ethtool -K "$SRV_WLAN" tx off || true
     m_exec "$CLIENT" ethtool -K "$CLI_WLAN" tx off || true
 
-    info "Starting Virtual AP on $SRV_WLAN..."
+    info "Phase 6.4: Starting Virtual AP on $SRV_WLAN..."
     m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN" || true
-    
-    info "Waiting for Server AP to become routable..."
+
+    info "Phase 6.5: Waiting for Server AP to become routable..."
     SRV_READY=false
-    for i in $(seq 1 10); do
-        if m_exec "$SERVER" rxnm interface "$SRV_WLAN" show --get state | grep -qE "routable|up"; then SRV_READY=true; break; fi
-        sleep 1
+    for i in $(seq 1 15); do
+        SRV_STATE=$(m_exec "$SERVER" rxnm interface "$SRV_WLAN" show --get state 2>/dev/null || echo "unknown")
+        if echo "$SRV_STATE" | grep -qE "routable|up"; then SRV_READY=true; break; fi
+        sleep 2
     done
-    [ "$SRV_READY" = "false" ] && { err "Server AP failed to reach routable state"; exit 1; }
+    [ "$SRV_READY" = "false" ] && { err "Server AP failed to reach routable state (last: $SRV_STATE)"; m_exec "$SERVER" iw dev 2>/dev/null || true; m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true; exit 1; }
     
-    info "Scanning for Virtual AP from $CLI_WLAN..."
+    info "Phase 6.6: Scanning for Virtual AP from $CLI_WLAN..."
     SCAN_RESULT=$(m_exec "$CLIENT" rxnm wifi scan --interface "$CLI_WLAN" --format json || echo "{}")
     if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then info "✓ Simulated AP detected in client scan"; else err "Failed to detect simulated AP"; echo "Scan Output: $SCAN_RESULT"; exit 1; fi
-    
-    info "Connecting $CLI_WLAN to Virtual AP..."
+
+    info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
-    
-    info "Waiting for WiFi L3 Convergence..."
+
+    info "Phase 6.8: Waiting for WiFi L3 Convergence..."
     CONVERGED=false
     for i in $(seq 1 20); do
         STATE=$(m_exec "$CLIENT" rxnm interface "$CLI_WLAN" show --get wifi.state 2>/dev/null || echo "unknown")
