@@ -237,12 +237,25 @@ NETEOF"
     SCAN_RESULT=$(m_exec "$CLIENT" rxnm wifi scan --interface "$CLI_WLAN" --format json || echo "{}")
     if echo "$SCAN_RESULT" | grep -q "RXNM_Test_Net"; then info "✓ Simulated AP detected in client scan"; else err "Failed to detect simulated AP"; echo "Scan Output: $SCAN_RESULT"; exit 1; fi
 
+    # Write explicit DHCP client config BEFORE connect — the system template
+    # 80-wifi-station.network uses Type=wlan + WLANInterfaceType=station which
+    # don't match inside nspawn containers with injected hwsim PHYs.
+    m_exec "$CLIENT" /bin/bash -c "cat > /run/systemd/network/50-wifi-client-test.network << 'NETEOF'
+[Match]
+Name=$CLI_WLAN
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=yes
+
+[DHCPv4]
+RouteMetric=20
+NETEOF"
+    m_exec "$CLIENT" networkctl reload 2>/dev/null || true
+
     info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
-    # rxnm connect writes a DHCP config via _ensure_wifi_netconfig.
-    # Force networkd to re-apply it so the DHCP client sends a fresh DISCOVER.
     sleep 3
-    m_exec "$CLIENT" networkctl reload 2>/dev/null || true
     m_exec "$CLIENT" networkctl reconfigure "$CLI_WLAN" 2>/dev/null || true
     # Give DHCP exchange time to complete (DISCOVER → OFFER → REQUEST → ACK)
     sleep 5
