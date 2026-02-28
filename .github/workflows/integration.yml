@@ -362,9 +362,11 @@ jobs:
             echo "--- dmesg (last 40 lines) ---"
             sudo dmesg | tail -n 40
             echo "--- modinfo for cached .ko files ---"
-            for ko in /tmp/hwsim-cache/*.ko 2>/dev/null; do
-                [ -f "$ko" ] && echo "  $(basename "$ko"): vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A')"
-            done
+            if ls /tmp/hwsim-cache/*.ko >/dev/null 2>&1; then
+                for ko in /tmp/hwsim-cache/*.ko; do
+                    [ -f "$ko" ] && echo "  $(basename "$ko"): vermagic=$(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A')"
+                done
+            fi
             echo "Running kernel: $(uname -r)"
         fi
 
