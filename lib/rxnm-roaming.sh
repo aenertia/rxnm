@@ -61,8 +61,7 @@ log_roam() {
     fi
 }
 
-# Helper to prevent shell aborts on non-numeric RSSI strings from upstream tools
-is_integer() { case "$1" in ''|*[!0-9-]*) return 1;; esac; return 0; }
+# is_integer() moved to rxnm-utils.sh (shared foundation)
 
 # Load user configuration overrides
 load_roaming_config() {
