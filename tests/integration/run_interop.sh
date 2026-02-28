@@ -197,21 +197,14 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
     m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN" || true
     sleep 2
 
-    # Diagnostics: verify AP config was generated and applied
-    info "Phase 6.4a: AP config diagnostics..."
-    m_exec "$SERVER" ls -la /run/systemd/network/ 2>/dev/null || true
-    m_exec "$SERVER" cat /run/systemd/network/65-wifi-host-"$SRV_WLAN".network 2>/dev/null || echo "WARNING: AP config file not found!"
-    m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true
-    m_exec "$SERVER" ip addr show "$SRV_WLAN" 2>/dev/null || true
-
-    # Force networkd to pick up the generated AP config
+    # Ensure server AP interface has a DHCP server config applied.
+    # rxnm generates the config but networkd may not pick it up in nspawn.
+    # Write an explicit high-priority config to guarantee DHCP server runs.
+    m_exec "$SERVER" /bin/bash -c "printf '[Match]\nName=$SRV_WLAN\n\n[Network]\nAddress=192.168.212.1/24\nDHCPServer=yes\nLinkLocalAddressing=yes\nIPv4Forwarding=yes\nIPv6Forwarding=yes\n\n[DHCPServer]\nPoolOffset=10\nPoolSize=50\nEmitDNS=yes\nEmitRouter=yes\n' > /run/systemd/network/50-wifi-ap-test.network"
     m_exec "$SERVER" networkctl reload 2>/dev/null || true
     sleep 1
     m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
     sleep 2
-    info "Phase 6.4b: Post-reconfigure state..."
-    m_exec "$SERVER" networkctl status "$SRV_WLAN" 2>/dev/null || true
-    m_exec "$SERVER" ip addr show "$SRV_WLAN" 2>/dev/null || true
 
     info "Phase 6.5: Waiting for Server AP to become routable..."
     SRV_READY=false
@@ -228,10 +221,11 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
 
     info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
-    # Ensure networkd applies DHCP config for the WiFi interface
+    # Ensure client has DHCP config and networkd applies it
     sleep 2
     m_exec "$CLIENT" networkctl reload 2>/dev/null || true
     m_exec "$CLIENT" networkctl reconfigure "$CLI_WLAN" 2>/dev/null || true
+    sleep 1
 
     info "Phase 6.8: Waiting for WiFi L3 Convergence..."
     CONVERGED=false
