@@ -122,6 +122,15 @@ jobs:
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo ./tests/integration/run_rocknix_interop.sh --skip-wifi
 
+    - name: Cleanup between bundle test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+
     - name: Run Full Combined Bundle Integration Tests
       run: |
         make combined-full
@@ -383,6 +392,15 @@ jobs:
             sudo ./tests/integration/run_interop.sh --wifi-only
         fi
 
+    - name: Cleanup between test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
         make rocknix-release
@@ -392,6 +410,15 @@ jobs:
         else
             sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
         fi
+
+    - name: Cleanup between test suites
+      if: always()
+      run: |
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
     - name: Run Full Combined Bundle Integration Tests
       run: |
