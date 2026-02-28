@@ -195,6 +195,10 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
 
     info "Phase 6.4: Starting Virtual AP on $SRV_WLAN..."
     m_exec "$SERVER" rxnm wifi ap start "RXNM_Test_Net" --password "supersecret" --share --interface "$SRV_WLAN" || true
+    # Force networkd to pick up the generated AP config
+    sleep 2
+    m_exec "$SERVER" networkctl reload 2>/dev/null || true
+    m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
 
     info "Phase 6.5: Waiting for Server AP to become routable..."
     SRV_READY=false
@@ -211,6 +215,10 @@ if [ "$SKIP_WIFI" = "false" ] && [ "$HWSIM_LOADED" = "true" ]; then
 
     info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
+    # Ensure networkd applies DHCP config for the WiFi interface
+    sleep 2
+    m_exec "$CLIENT" networkctl reload 2>/dev/null || true
+    m_exec "$CLIENT" networkctl reconfigure "$CLI_WLAN" 2>/dev/null || true
 
     info "Phase 6.8: Waiting for WiFi L3 Convergence..."
     CONVERGED=false
