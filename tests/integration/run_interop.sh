@@ -134,11 +134,13 @@ if [ "$WIFI_ONLY" = "false" ]; then
     m_exec "$SERVER" rxnm system reload
     m_exec "$CLIENT" rxnm interface "$CLI_IFACE" set static 192.168.213.50/24,fd00:cafe::2/64 --mtu 1420 --mac 02:aa:bb:cc:dd:ee || true
     m_exec "$CLIENT" rxnm system reload
+    # Allow networkd to apply config and DAD to start before polling
+    sleep 3
 
     info "Waiting for IPv6 Convergence (DAD/NDP)..."
     CONVERGED=false
-    CLI_IP=$(wait_ip_convergence "$CLIENT" "$CLI_IFACE" "fd00:cafe::2" "inet6" 8)
-    SRV_IP=$(wait_ip_convergence "$SERVER" "$SRV_IFACE" "fd00:cafe::1" "inet6" 8)
+    CLI_IP=$(wait_ip_convergence "$CLIENT" "$CLI_IFACE" "fd00:cafe::2" "inet6" 15)
+    SRV_IP=$(wait_ip_convergence "$SERVER" "$SRV_IFACE" "fd00:cafe::1" "inet6" 15)
     if [ -n "$CLI_IP" ] && [ -n "$SRV_IP" ]; then
         if m_exec "$CLIENT" ping -6 -c 1 -W 2 fd00:cafe::1 >/dev/null 2>&1; then CONVERGED=true; fi
     fi
