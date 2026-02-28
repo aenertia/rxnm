@@ -23,19 +23,25 @@ source "$HARNESS_DIR/harness.sh"
 trap cleanup EXIT
 
 ensure_machined
+info "Step 1/6: Bridge"
 setup_bridge
+info "Step 2/6: HWSim"
 [ "$SKIP_WIFI" = "false" ] && setup_hwsim
+info "Step 3/6: RootFS"
 build_rootfs
 
-info "Installing RXNM into RootFS..."
+info "Step 4/6: Installing RXNM into RootFS..."
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin" "$ROOTFS/usr/lib/rocknix-network-manager/lib" "$ROOTFS/usr/lib/systemd/network"
 cp -f bin/rxnm-agent "$ROOTFS/usr/lib/rocknix-network-manager/bin/"
 cp -f lib/*.sh "$ROOTFS/usr/lib/rocknix-network-manager/lib/"
 cp -f bin/rxnm "$ROOTFS/usr/bin/rxnm"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/"
+info "Step 4/6: Install complete"
 
+info "Step 5/6: Booting containers"
 boot_machines
+info "Step 6/6: Containers ready"
 
 # Reverted flawed dynamic interface detection. 
 # systemd-nspawn deterministically binds the container end of --network-bridge to host0.

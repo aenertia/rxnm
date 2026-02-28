@@ -29,18 +29,24 @@ if [ ! -f "$BUNDLE_BIN" ] || [ -z "$AGENT_BIN" ]; then
 fi
 
 ensure_machined
+info "Step 1/6: Bridge"
 setup_bridge
+info "Step 2/6: HWSim"
 [ "$SKIP_WIFI" = "false" ] && setup_hwsim
+info "Step 3/6: RootFS"
 build_rootfs
 
-info "Installing Bundle into RootFS..."
+info "Step 4/6: Installing Bundle into RootFS..."
 mkdir -p "$ROOTFS/usr/lib/rocknix-network-manager/bin" "$ROOTFS/usr/lib/rocknix-network-manager/lib"
 cp -f "$BUNDLE_BIN" "$ROOTFS/usr/bin/rxnm"
 cp -f "$AGENT_BIN" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 chmod +x "$ROOTFS/usr/bin/rxnm" "$ROOTFS/usr/lib/rocknix-network-manager/bin/rxnm-agent"
 cp -f usr/lib/systemd/network/* "$ROOTFS/usr/lib/systemd/network/" 2>/dev/null || true
+info "Step 4/6: Install complete"
 
+info "Step 5/6: Booting containers"
 boot_machines
+info "Step 6/6: Containers ready"
 
 # Reverted flawed dynamic interface detection. 
 # systemd-nspawn deterministically binds the container end of --network-bridge to host0.
