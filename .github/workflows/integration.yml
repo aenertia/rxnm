@@ -263,29 +263,29 @@ jobs:
                 fi
                 cp "/usr/src/linux-headers-$(uname -r)/Module.symvers" . 2>/dev/null || true
 
-                # Force-enable only the modules we need (no leading whitespace)
-                cat >> .config <<'KCONFIG'
-CONFIG_WLAN=y
-CONFIG_WIRELESS=y
-CONFIG_NETDEVICES=y
-CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
-CONFIG_CRYPTO_ARC4=m
-CONFIG_CRYPTO_MD4=m
-CONFIG_CRYPTO_CMAC=m
-CONFIG_CRYPTO_ECB=m
-CONFIG_CRYPTO_DES=m
-CONFIG_CRYPTO_USER_API_SKCIPHER=m
-CONFIG_CRYPTO_USER_API_HASH=m
-CONFIG_CRYPTO_USER_API=m
-CONFIG_CFG80211=m
-CONFIG_MAC80211=m
-CONFIG_RFKILL=m
-CONFIG_CRYPTO_CCM=m
-CONFIG_CRYPTO_CBC=m
-CONFIG_CRYPTO_SHA256=m
-CONFIG_CRYPTO_SHA512=m
-CONFIG_MAC80211_HWSIM=m
-KCONFIG
+                # Force-enable only the modules we need
+                printf '%s\n' \
+                    "CONFIG_WLAN=y" \
+                    "CONFIG_WIRELESS=y" \
+                    "CONFIG_NETDEVICES=y" \
+                    "CONFIG_PKCS8_PRIVATE_KEY_PARSER=m" \
+                    "CONFIG_CRYPTO_ARC4=m" \
+                    "CONFIG_CRYPTO_MD4=m" \
+                    "CONFIG_CRYPTO_CMAC=m" \
+                    "CONFIG_CRYPTO_ECB=m" \
+                    "CONFIG_CRYPTO_DES=m" \
+                    "CONFIG_CRYPTO_USER_API_SKCIPHER=m" \
+                    "CONFIG_CRYPTO_USER_API_HASH=m" \
+                    "CONFIG_CRYPTO_USER_API=m" \
+                    "CONFIG_CFG80211=m" \
+                    "CONFIG_MAC80211=m" \
+                    "CONFIG_RFKILL=m" \
+                    "CONFIG_CRYPTO_CCM=m" \
+                    "CONFIG_CRYPTO_CBC=m" \
+                    "CONFIG_CRYPTO_SHA256=m" \
+                    "CONFIG_CRYPTO_SHA512=m" \
+                    "CONFIG_MAC80211_HWSIM=m" \
+                    >> .config
 
                 make olddefconfig
                 # Use M= out-of-tree style where possible to avoid gendwarfksyms dep
