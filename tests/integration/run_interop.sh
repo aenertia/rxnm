@@ -255,9 +255,8 @@ NETEOF"
 
     info "Phase 6.7: Connecting $CLI_WLAN to Virtual AP..."
     m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
-    sleep 3
-    m_exec "$CLIENT" networkctl reconfigure "$CLI_WLAN" 2>/dev/null || true
-    # Give DHCP exchange time to complete (DISCOVER → OFFER → REQUEST → ACK)
+    # Don't reconfigure after connect — the DHCP lease is acquired automatically
+    # when carrier comes up. Extra reconfigure bounces the lease (lost/re-acquired).
     sleep 5
 
     info "Phase 6.8: Waiting for WiFi L3 Convergence..."
