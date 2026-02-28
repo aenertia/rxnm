@@ -145,7 +145,9 @@ _task_set_link() {
     local ll="yes" ra="yes" dhcp="yes"
     [ "$ipv4" = "off" ] && { dhcp="ipv6"; ll="ipv6"; }
     [ "$ipv6" = "off" ] && { [ "$ipv4" = "off" ] && dhcp="no" || dhcp="ipv4"; ra="no"; [ "$ipv4" = "off" ] && ll="no" || ll="ipv4"; }
-    local content="[Match]\nName=${iface}\n\n[Network]\nDescription=Link Toggles\nDHCP=${dhcp}\nLinkLocalAddressing=${ll}\nIPv6AcceptRA=${ra}\n"
+    local content
+    content=$(printf '[Match]\nName=%s\n\n[Network]\nDescription=Link Toggles\nDHCP=%s\nLinkLocalAddressing=%s\nIPv6AcceptRA=%s\n' \
+        "$iface" "$dhcp" "$ll" "$ra")
     secure_write "$cfg_file" "$content" "644"
     reconfigure_iface "$iface"
 }
@@ -168,10 +170,12 @@ _task_set_proxy() {
     local target_file="${iface:+${STORAGE_NET_DIR}/proxy-${iface}.conf}"
     target_file="${target_file:-$STORAGE_PROXY_GLOBAL}"
     if [ -z "$http" ] && [ -z "$https" ] && [ -z "$noproxy" ]; then [ -f "$target_file" ] && rm -f "$target_file"; else
-        local content="# Proxy Configuration\n"
-        [ -n "$http" ] && content="${content}http_proxy=\"$http\"\nHTTP_PROXY=\"$http\"\n"
-        [ -n "$https" ] && content="${content}https_proxy=\"$https\"\nHTTPS_PROXY=\"$https\"\n"
-        [ -n "$noproxy" ] && content="${content}no_proxy=\"$noproxy\"\nNO_PROXY=\"$noproxy\"\n"
+        local content
+        content=$(printf '# Proxy Configuration\n')
+        [ -n "$http" ] && content=$(printf '%s\nhttp_proxy="%s"\nHTTP_PROXY="%s"' "$content" "$http" "$http")
+        [ -n "$https" ] && content=$(printf '%s\nhttps_proxy="%s"\nHTTPS_PROXY="%s"' "$content" "$https" "$https")
+        [ -n "$noproxy" ] && content=$(printf '%s\nno_proxy="%s"\nNO_PROXY="%s"' "$content" "$noproxy" "$noproxy")
+        content=$(printf '%s\n' "$content")
         secure_write "$target_file" "$content" "600"
     fi
 }
@@ -220,7 +224,9 @@ action_create_bridge() {
     local name="$1"
     ! validate_interface_name "$name" && { json_error "Invalid bridge name"; return 1; }
     ensure_dirs
-    secure_write "${STORAGE_NET_DIR}/60-bridge-${name}.netdev" "[NetDev]\nName=${name}\nKind=bridge\n[Bridge]\nSTP=no\nMulticastSnooping=yes\n" "644"
+    local content
+    content=$(printf '[NetDev]\nName=%s\nKind=bridge\n\n[Bridge]\nSTP=no\nMulticastSnooping=yes\n' "$name")
+    secure_write "${STORAGE_NET_DIR}/60-bridge-${name}.netdev" "$content" "644"
     reload_networkd
     json_success '{"type": "bridge", "iface": "'"$name"'"}'
 }
@@ -263,7 +269,7 @@ action_set_dhcp() {
 
 action_set_static() {
     local iface="$1" ip="$2" gw="$3" dns="$4" ssid="$5" domains="$6" routes="$7" mdns="${8:-yes}" llmnr="${9:-yes}" metric="${10}" mtu="${11}" mac="${12}" ipv6_priv="${13}" dhcp_id="${14}"
-    [ -z "$iface" ] || [ -z "$ip" ] && return 1
+    { [ -z "$iface" ] || [ -z "$ip" ]; } && return 1
     
     local final_ips=""
     set -f

@@ -158,8 +158,9 @@ _task_host_mode() {
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
     
-    local ap_data="[General]\nChannel=${channel:-1}\n"
-    if [ -n "$pass" ]; then ap_data="${ap_data}[Security]\nPassphrase=${pass}\n"; fi
+    local ap_data
+    ap_data=$(printf '[General]\nChannel=%s\n' "${channel:-1}")
+    if [ -n "$pass" ]; then ap_data=$(printf '%s\n[Security]\nPassphrase=%s\n' "$ap_data" "$pass"); fi
     
     if [ "$mode" != "adhoc" ]; then
          local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
@@ -217,7 +218,8 @@ _task_save_wifi_creds() {
     ensure_dirs
     local safe_ssid; safe_ssid=$(iwd_encode_ssid "$ssid")
     local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
-    local psk_data="[Security]\nPassphrase=${pass}\n"
+    local psk_data
+    psk_data=$(printf '[Security]\nPassphrase=%s\n' "$pass")
     secure_write "${STATE_DIR}/iwd/${safe_ssid}.psk" "$psk_data" "600"
     if [ "$was_x" -eq 1 ]; then set -x; fi
 }
