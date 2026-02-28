@@ -227,9 +227,10 @@ jobs:
                 fi
             fi
 
-            # 2b: Compile from kernel.org source
+            # 2b: Compile ONLY missing modules from kernel.org source
             if [ "$HWSIM_LOADED" = "false" ]; then
-                echo "Cache MISS: Compiling from kernel.org mainline source..."
+                echo "Cache MISS: Compiling missing modules from kernel.org source..."
+                echo "Still missing after package install: $MISSING_MODULES"
                 mkdir -p /tmp/linux-src
                 cd /tmp/linux-src
 
@@ -247,7 +248,7 @@ jobs:
                 tar -xf "linux-${KVER_MAJ_MIN}.tar.xz"
                 cd "linux-${KVER_MAJ_MIN}"
 
-                echo "Preparing kernel build environment for $(uname -r)..."
+                echo "Preparing build environment for $(uname -r)..."
 
                 FULL_VER=$(uname -r)
                 EXTRA_VER=${FULL_VER#"$KVER"}
@@ -262,45 +263,76 @@ jobs:
                 fi
                 cp "/usr/src/linux-headers-$(uname -r)/Module.symvers" . 2>/dev/null || true
 
+                # Force-enable only the modules we need (no leading whitespace)
                 cat >> .config <<'KCONFIG'
-        CONFIG_WLAN=y
-        CONFIG_WIRELESS=y
-        CONFIG_NETDEVICES=y
-        CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
-        CONFIG_CRYPTO_ARC4=m
-        CONFIG_CRYPTO_MD4=m
-        CONFIG_CRYPTO_CMAC=m
-        CONFIG_CRYPTO_ECB=m
-        CONFIG_CRYPTO_DES=m
-        CONFIG_CRYPTO_USER_API_SKCIPHER=m
-        CONFIG_CRYPTO_USER_API_HASH=m
-        CONFIG_CRYPTO_USER_API=m
-        CONFIG_CFG80211=m
-        CONFIG_MAC80211=m
-        CONFIG_RFKILL=m
-        CONFIG_CRYPTO_CCM=m
-        CONFIG_CRYPTO_CBC=m
-        CONFIG_CRYPTO_SHA256=m
-        CONFIG_CRYPTO_SHA512=m
-        CONFIG_MAC80211_HWSIM=m
-        KCONFIG
+CONFIG_WLAN=y
+CONFIG_WIRELESS=y
+CONFIG_NETDEVICES=y
+CONFIG_PKCS8_PRIVATE_KEY_PARSER=m
+CONFIG_CRYPTO_ARC4=m
+CONFIG_CRYPTO_MD4=m
+CONFIG_CRYPTO_CMAC=m
+CONFIG_CRYPTO_ECB=m
+CONFIG_CRYPTO_DES=m
+CONFIG_CRYPTO_USER_API_SKCIPHER=m
+CONFIG_CRYPTO_USER_API_HASH=m
+CONFIG_CRYPTO_USER_API=m
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_RFKILL=m
+CONFIG_CRYPTO_CCM=m
+CONFIG_CRYPTO_CBC=m
+CONFIG_CRYPTO_SHA256=m
+CONFIG_CRYPTO_SHA512=m
+CONFIG_MAC80211_HWSIM=m
+KCONFIG
 
                 make olddefconfig
-                make modules_prepare
+                # Use M= out-of-tree style where possible to avoid gendwarfksyms dep
+                make modules_prepare 2>/dev/null || {
+                    echo "::warning::modules_prepare failed, attempting direct module build..."
+                    make scripts 2>/dev/null || true
+                }
 
+                # Build only the specific modules that are missing
+                # Dynamically locate hwsim source (moved to virtual/ in 6.x kernels)
                 HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
                 HWSIM_KO="${HWSIM_SRC%.c}.ko"
 
-                TARGETS="crypto/arc4.ko crypto/md4.ko crypto/cmac.ko crypto/ecb.ko crypto/des_generic.ko crypto/algif_skcipher.ko crypto/algif_hash.ko crypto/af_alg.ko crypto/ccm.ko crypto/cbc.ko crypto/sha256_generic.ko crypto/sha512_generic.ko crypto/asymmetric_keys/pkcs8_key_parser.ko net/rfkill/rfkill.ko net/wireless/cfg80211.ko net/mac80211/mac80211.ko $HWSIM_KO"
+                # Build the dependency chain: crypto -> wireless -> hwsim
+                TARGETS=""
+                for mod in $MISSING_MODULES; do
+                    case "$mod" in
+                        arc4) TARGETS="$TARGETS crypto/arc4.ko" ;;
+                        md4) TARGETS="$TARGETS crypto/md4.ko" ;;
+                        cmac) TARGETS="$TARGETS crypto/cmac.ko" ;;
+                        ecb) TARGETS="$TARGETS crypto/ecb.ko" ;;
+                        des3_ede|des_generic) TARGETS="$TARGETS crypto/des_generic.ko" ;;
+                        algif_skcipher) TARGETS="$TARGETS crypto/algif_skcipher.ko" ;;
+                        algif_hash) TARGETS="$TARGETS crypto/algif_hash.ko" ;;
+                        af_alg) TARGETS="$TARGETS crypto/af_alg.ko" ;;
+                        ccm) TARGETS="$TARGETS crypto/ccm.ko" ;;
+                        cbc) TARGETS="$TARGETS crypto/cbc.ko" ;;
+                        sha256_generic) TARGETS="$TARGETS crypto/sha256_generic.ko" ;;
+                        sha512_generic) TARGETS="$TARGETS crypto/sha512_generic.ko" ;;
+                        pkcs8_key_parser) TARGETS="$TARGETS crypto/asymmetric_keys/pkcs8_key_parser.ko" ;;
+                        rfkill) TARGETS="$TARGETS net/rfkill/rfkill.ko" ;;
+                        cfg80211) TARGETS="$TARGETS net/wireless/cfg80211.ko" ;;
+                        mac80211) TARGETS="$TARGETS net/mac80211/mac80211.ko" ;;
+                        mac80211_hwsim) TARGETS="$TARGETS $HWSIM_KO" ;;
+                    esac
+                done
 
-                echo "Building modules: $TARGETS"
+                echo "Building ONLY missing modules: $TARGETS"
                 make -j"$(nproc)" $TARGETS || echo "::warning::Some module targets failed to build"
 
-                # Install and cache
+                # Install compiled modules and cache for next run
                 sudo mkdir -p "/lib/modules/$(uname -r)/updates"
                 mkdir -p "$CACHE_DIR"
 
                 find . -name "*.ko" | while IFS= read -r ko; do
+                    modname=$(basename "$ko")
+                    echo "  Installing: $modname (vermagic: $(modinfo -F vermagic "$ko" 2>/dev/null || echo 'N/A'))"
                     sudo cp "$ko" "/lib/modules/$(uname -r)/updates/"
                     cp "$ko" "$CACHE_DIR/"
                 done
