@@ -107,6 +107,16 @@ jobs:
         sudo chmod +x tests/integration/run_interop.sh
         sudo ./tests/integration/run_interop.sh --skip-wifi
 
+    - name: Cleanup before bundle tests
+      if: always()
+      run: |
+        # Ensure all containers from the standard interop test are fully terminated
+        for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+            sudo machinectl terminate "$m" 2>/dev/null || true
+        done
+        sleep 2
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+
     - name: Run ROCKNIX Bundle Integration Tests
       run: |
         make rocknix-release
@@ -261,7 +271,23 @@ jobs:
                     echo "::warning::No /boot/config found, using defconfig"
                     make defconfig
                 fi
-                cp "/usr/src/linux-headers-$(uname -r)/Module.symvers" . 2>/dev/null || true
+                # Module.symvers is CRITICAL for symbol resolution during modpost.
+                # Without it, all symbols are unresolved and .ko files won't load.
+                SYMVERS_FOUND=false
+                for sympath in \
+                    "/usr/src/linux-headers-$(uname -r)/Module.symvers" \
+                    "/usr/src/linux-headers-$(uname -r | sed 's/-generic//')/Module.symvers" \
+                    "/lib/modules/$(uname -r)/build/Module.symvers"; do
+                    if [ -f "$sympath" ]; then
+                        cp "$sympath" .
+                        echo "Module.symvers sourced from: $sympath"
+                        SYMVERS_FOUND=true
+                        break
+                    fi
+                done
+                if [ "$SYMVERS_FOUND" = "false" ]; then
+                    echo "::warning::Module.symvers not found. Compiled modules may fail to load."
+                fi
 
                 # Force-enable only the modules we need
                 printf '%s\n' \
@@ -288,18 +314,13 @@ jobs:
                     >> .config
 
                 make olddefconfig
-                # Use M= out-of-tree style where possible to avoid gendwarfksyms dep
-                make modules_prepare 2>/dev/null || {
-                    echo "::warning::modules_prepare failed, attempting direct module build..."
-                    make scripts 2>/dev/null || true
-                }
+                make modules_prepare || make scripts || true
 
-                # Build only the specific modules that are missing
                 # Dynamically locate hwsim source (moved to virtual/ in 6.x kernels)
                 HWSIM_SRC=$(find drivers/net/wireless -name "mac80211_hwsim.c" | head -n1)
                 HWSIM_KO="${HWSIM_SRC%.c}.ko"
 
-                # Build the dependency chain: crypto -> wireless -> hwsim
+                # Build the dependency chain: only modules that are actually missing
                 TARGETS=""
                 for mod in $MISSING_MODULES; do
                     case "$mod" in
@@ -324,7 +345,7 @@ jobs:
                 done
 
                 echo "Building ONLY missing modules: $TARGETS"
-                make -j"$(nproc)" $TARGETS || echo "::warning::Some module targets failed to build"
+                make KBUILD_MODPOST_WARN=1 -j"$(nproc)" $TARGETS || echo "::warning::Some module targets failed to build"
 
                 # Install compiled modules and cache for next run
                 sudo mkdir -p "/lib/modules/$(uname -r)/updates"
