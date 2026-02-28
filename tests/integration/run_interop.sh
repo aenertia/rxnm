@@ -22,8 +22,7 @@ source "$HARNESS_DIR/harness.sh"
 
 trap cleanup EXIT
 
-sudo systemctl start systemd-machined || true
-
+ensure_machined
 setup_bridge
 [ "$SKIP_WIFI" = "false" ] && setup_hwsim
 build_rootfs

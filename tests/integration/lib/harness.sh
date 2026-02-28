@@ -38,12 +38,18 @@ m_exec() {
 cleanup() {
     EXIT_CODE=$?
     echo "--- Teardown (Exit Code: $EXIT_CODE) ---"
-    
+
     [ -n "$TCPDUMP_PID" ] && { kill "$TCPDUMP_PID" 2>/dev/null || true; wait "$TCPDUMP_PID" 2>/dev/null || true; }
     [ -n "$WIFI_TCPDUMP_PID" ] && { kill "$WIFI_TCPDUMP_PID" 2>/dev/null || true; wait "$WIFI_TCPDUMP_PID" 2>/dev/null || true; }
-    
+
     if [ "$EXIT_CODE" -ne 0 ]; then
         err "TEST FAILED - DUMPING DIAGNOSTICS"
+
+        info "=== nspawn boot logs (Server) ==="
+        cat "/tmp/$SERVER.log" 2>/dev/null | tail -n 30 || true
+        info "=== nspawn boot logs (Client) ==="
+        cat "/tmp/$CLIENT.log" 2>/dev/null | tail -n 30 || true
+
         info "=== systemd-networkd logs (Server) ==="
         journalctl -M "$SERVER" -u systemd-networkd -n 50 --no-pager 2>/dev/null || true
         info "=== systemd-networkd logs (Client) ==="
@@ -81,6 +87,15 @@ setup_bridge() {
 
 build_rootfs() {
     info "Building Container RootFS at $ROOTFS..."
+
+    # Validate cached rootfs - if it's corrupt or incomplete, rebuild
+    if [ -d "$ROOTFS/etc" ]; then
+        if [ ! -x "$ROOTFS/sbin/init" ] && [ ! -x "$ROOTFS/usr/lib/systemd/systemd" ]; then
+            warn "Cached rootfs appears corrupt (no init). Rebuilding..."
+            sudo rm -rf "$ROOTFS"
+        fi
+    fi
+
     if [ ! -d "$ROOTFS/etc" ]; then
         sudo mkdir -p "$ROOTFS"
         local engine="docker"
@@ -119,7 +134,7 @@ setup_hwsim() {
             [ $(echo "$WLAN_IFACES" | wc -w) -ge 2 ] && break
             sleep 0.5
         done
-        
+
         for iface in $WLAN_IFACES; do
             if [ -z "$WLAN_SRV" ]; then
                 WLAN_SRV="$iface"
@@ -130,7 +145,7 @@ setup_hwsim() {
                 break
             fi
         done
-        
+
         if [ -n "$WLAN_SRV" ] && [ -n "$WLAN_CLI" ]; then
             HWSIM_LOADED=true
             info "✓ Virtual radios allocated: $WLAN_SRV, $WLAN_CLI"
@@ -184,6 +199,20 @@ check_ready() {
     return 1
 }
 
+ensure_machined() {
+    # Ensure systemd-machined is running and responsive before launching containers.
+    # Flaky CI runners sometimes have machined in a degraded state.
+    info "Ensuring systemd-machined is ready..."
+    sudo systemctl start systemd-machined 2>/dev/null || true
+    for i in $(seq 1 10); do
+        if machinectl list --no-pager >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    warn "systemd-machined slow to respond, continuing anyway..."
+}
+
 boot_machines() {
     info "Booting Machines..."
     COMMON_ARGS=(
@@ -200,13 +229,26 @@ boot_machines() {
         COMMON_ARGS+=("--bind=/dev/rfkill")
     fi
 
+    # Clean up any stale containers from previous failed runs
+    machinectl terminate "$SERVER" 2>/dev/null || true
+    machinectl terminate "$CLIENT" 2>/dev/null || true
+    sleep 1
+
     systemd-nspawn -D "$ROOTFS" -M "$SERVER" "${COMMON_ARGS[@]}" > "/tmp/$SERVER.log" 2>&1 &
     systemd-nspawn -D "$ROOTFS" -M "$CLIENT" "${COMMON_ARGS[@]}" > "/tmp/$CLIENT.log" 2>&1 &
 
     info "Waiting for systemd initialization..."
-    check_ready "$SERVER" || { err "$SERVER failed"; exit 1; }
-    check_ready "$CLIENT" || { err "$CLIENT failed"; exit 1; }
-    
+    if ! check_ready "$SERVER"; then
+        err "$SERVER failed to reach ready state. Boot log:"
+        cat "/tmp/$SERVER.log" 2>/dev/null | tail -n 20 || true
+        exit 1
+    fi
+    if ! check_ready "$CLIENT"; then
+        err "$CLIENT failed to reach ready state. Boot log:"
+        cat "/tmp/$CLIENT.log" 2>/dev/null | tail -n 20 || true
+        exit 1
+    fi
+
     if [ "$SKIP_WIFI" = "true" ]; then
         info "Masking IWD to prevent noise during wired-only tests..."
         m_exec "$SERVER" systemctl stop iwd 2>/dev/null || true

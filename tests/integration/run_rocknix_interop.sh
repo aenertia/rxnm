@@ -28,8 +28,7 @@ if [ ! -f "$BUNDLE_BIN" ] || [ -z "$AGENT_BIN" ]; then
     err "Bundle artifacts missing. Run 'make rocknix-release' first."; exit 1
 fi
 
-sudo systemctl start systemd-machined || true
-
+ensure_machined
 setup_bridge
 [ "$SKIP_WIFI" = "false" ] && setup_hwsim
 build_rootfs
