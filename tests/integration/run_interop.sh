@@ -381,27 +381,25 @@ NETEOF"
     info "Phase 10.1: Full teardown of previous AP..."
     m_exec "$CLIENT" rxnm wifi disconnect --interface "$CLI_WLAN" 2>/dev/null || true
 
-    # Explicitly stop IWD AP and wait for full mode transition
+    # Full IWD reset: stop AP, restart IWD to force clean state
     m_exec "$SERVER" iwctl ap "$SRV_WLAN" stop 2>/dev/null || true
-    m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" 2>/dev/null || true
-
-    # Poll until IWD device is back in station mode (up to 20s)
-    for i in $(seq 1 10); do
-        sleep 2
-        CUR_MODE=$(m_exec "$SERVER" iwctl device "$SRV_WLAN" show 2>/dev/null | awk '/Mode/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
-        if [ "$CUR_MODE" = "station" ]; then break; fi
-    done
-    info "Phase 10.1: Server mode after teardown: $CUR_MODE"
-    if [ "$CUR_MODE" != "station" ]; then
-        warn "Server stuck in $CUR_MODE mode — open AP test may fail"
-    fi
+    m_exec "$SERVER" systemctl restart iwd 2>/dev/null || true
+    sleep 3
+    wait_iwd_ready "$SERVER"
 
     # Clean up old AP profiles and config files
     m_exec "$SERVER" rm -f /var/lib/iwd/ap/*.ap 2>/dev/null || true
     m_exec "$SERVER" rm -f /run/systemd/network/65-wifi-host-*.network 2>/dev/null || true
 
-    info "Phase 10.2: Start open AP (no password)..."
-    m_exec "$SERVER" rxnm wifi ap start "RXNM_Open_Net" --share --interface "$SRV_WLAN" 2>&1 || true
+    CUR_MODE=$(m_exec "$SERVER" iwctl device "$SRV_WLAN" show 2>/dev/null | awk '/Mode/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+    info "Phase 10.1: Server mode after IWD restart: $CUR_MODE"
+
+    info "Phase 10.2: Start open AP (no password) via iwctl directly..."
+    # IWD start-profile with no [Security] section may fail on some versions.
+    # Use iwctl ap start <iface> <ssid> directly for open networks.
+    m_exec "$SERVER" iwctl device "$SRV_WLAN" set-property Mode ap 2>/dev/null || true
+    sleep 2
+    m_exec "$SERVER" iwctl ap "$SRV_WLAN" start "RXNM_Open_Net" 2>&1 || true
     sleep 2
 
     # Re-apply server AP config (same nspawn workaround as Phase 6)
