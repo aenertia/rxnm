@@ -8,7 +8,8 @@ Description=Rocknix Wi-Fi P2P Group Owner
 # Standard P2P subnet (Commonly used in Android/Linux P2P)
 Address=192.168.49.1/24
 DHCPServer=yes
-# IP Forwarding (v255.8 compliant). NAT is handled externally by rxnm-system.
+# IP Forwarding. NAT is handled externally by rxnm-system.
+# Uses IPForward= for systemd 255 (ROCKNIX) compatibility.
 IPForward=yes
 # Ensure local name resolution works for the group
 MulticastDNS=no

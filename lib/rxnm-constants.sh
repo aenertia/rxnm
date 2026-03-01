@@ -92,6 +92,25 @@ fi
 
 : "${IWD_DBUS_MAX_KB:=512}"
 
+# --- systemd-networkd Version-Aware Config Keys ---
+# IPForward= was deprecated in systemd 256, replaced by IPv4Forwarding=/IPv6Forwarding=.
+# Detect the running networkd version and emit the correct key for dynamic configs.
+# Shipped .network templates use IPForward= (works on all versions, deprecated warning on 256+).
+if [ -z "${RXNM_NETWORKD_KEY_IPFORWARD:-}" ]; then
+    _sd_ver=""
+    if command -v networkctl >/dev/null 2>&1; then
+        _sd_ver=$(networkctl --version 2>/dev/null | awk '/^systemd / {print $2; exit}')
+    fi
+    _sd_ver="${_sd_ver:-255}"
+    if [ "$_sd_ver" -ge 256 ] 2>/dev/null; then
+        RXNM_NETWORKD_KEY_IPFORWARD="IPv4Forwarding=yes\nIPv6Forwarding=yes"
+    else
+        RXNM_NETWORKD_KEY_IPFORWARD="IPForward=yes"
+    fi
+fi
+# OtherInformation= is correct for all systemd versions (OtherConfig was never valid)
+: "${RXNM_NETWORKD_KEY_RA_OTHER:=OtherInformation}"
+
 # --- FD Reservations ---
 RXNM_FD_GLOBAL_LOCK=8
 RXNM_FD_IFACE_LOCK=9
