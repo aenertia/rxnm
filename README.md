@@ -1,6 +1,6 @@
 # RXNM (ROCKNIX Network Manager)
 
-[![Version](https://img.shields.io/badge/version-1.1.0--rc3-blue.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm)
 [![API](https://img.shields.io/badge/API-v1.1-brightgreen.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm/src/branch/main/api-schema.json)
 [![Arch](https://img.shields.io/badge/arch-Hybrid%20(Bash%20%7C%20POSIX%20%7C%20C)-orange.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm/src/branch/main/BUILD.md)
 [![Footprint](https://img.shields.io/badge/footprint-%7E300KB-blueviolet.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm/src/branch/main/BENCHMARKS.md)

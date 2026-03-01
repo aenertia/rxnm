@@ -1,6 +1,6 @@
 # 🚀 RXNM Performance & Architectural Benchmarks
 
-[![Version](https://img.shields.io/badge/version-1.1.0--rc3-blue.svg?style=flat-square)](https://codeberg.org/joelpaul/rxnm)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg?style=flat-square)](https://codeberg.org/aenertia/rxnm)
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-green.svg?style=flat-square)](LICENSE)
 [![Arch](https://img.shields.io/badge/arch-ARM%20%7C%20RISC--V-orange.svg?style=flat-square)](architecture)
 [![Footprint](https://img.shields.io/badge/footprint-%7E300KB-blueviolet.svg?style=flat-square)](footprint)
