@@ -253,11 +253,19 @@ _task_forget() {
     json_success '{"action": "forget", "ssid": "'"$json_safe_ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
-_task_p2p_scan() {
-    # P2P operations require busctl + jq (Bash path). POSIX path delegates to agent.
+_p2p_check_deps() {
+    # P2P operations require busctl + jq (Bash path only).
+    # POSIX/BusyBox: return 501 — agent P2P support deferred to 2.0.
     if [ "$RXNM_HAS_JQ" != "true" ] || ! command -v busctl >/dev/null 2>&1; then
-        echo "P2P scan requires jq and busctl" >&2; return 1
+        json_error "P2P requires Bash path (jq + busctl). Not available on POSIX path." "501" \
+            "Agent P2P support planned for RXNM 2.0"
+        return 1
     fi
+    return 0
+}
+
+_task_p2p_scan() {
+    _p2p_check_deps || return 1
 
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
@@ -291,6 +299,7 @@ _task_p2p_scan() {
 }
 
 _task_p2p_connect() {
+    _p2p_check_deps || return 1
     local peer_name="$1"
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local peer_path
@@ -301,6 +310,7 @@ _task_p2p_connect() {
 }
 
 _task_p2p_disconnect() {
+    _p2p_check_deps || return 1
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local connected_peer; connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) | select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) | .key')
     if [ -z "$connected_peer" ]; then echo "No P2P connection active"; return 1; fi
@@ -308,6 +318,7 @@ _task_p2p_disconnect() {
 }
 
 _task_p2p_status() {
+    _p2p_check_deps || return 1
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local net_json="[]"
     if command -v networkctl >/dev/null; then net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]"); fi
