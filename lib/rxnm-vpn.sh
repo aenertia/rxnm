@@ -15,16 +15,17 @@ _task_connect_wireguard() {
     
     ensure_dirs
     local netdev_file="${STORAGE_NET_DIR}/90-${name}.netdev"
-    local netdev_content="[NetDev]\nName=${name}\nKind=wireguard\n\n[WireGuard]\nPrivateKey=${priv}\n"
-    
+    local netdev_content
+    netdev_content=$(printf '[NetDev]\nName=%s\nKind=wireguard\n\n[WireGuard]\nPrivateKey=%s\n' "$name" "$priv")
+
     local network_file="${STORAGE_NET_DIR}/90-${name}.network"
-    local network_content="[Match]\nName=${name}\n\n[Network]\nAddress=${addr}\n"
-    
-    [ -n "$dns" ] && network_content="${network_content}DNS=${dns}\n"
-    
-    network_content="${network_content}\n[WireGuardPeer]\nPublicKey=${peer}\nEndpoint=${endp}\n"
+    local network_content
+    network_content=$(printf '[Match]\nName=%s\n\n[Network]\nAddress=%s\n' "$name" "$addr")
+
+    [ -n "$dns" ] && network_content=$(printf '%s\nDNS=%s' "$network_content" "$dns")
+
     [ -z "$ips" ] && ips="0.0.0.0/0"
-    network_content="${network_content}AllowedIPs=${ips}\nPersistentKeepalive=25\n"
+    network_content=$(printf '%s\n\n[WireGuardPeer]\nPublicKey=%s\nEndpoint=%s\nAllowedIPs=%s\nPersistentKeepalive=25\n' "$network_content" "$peer" "$endp" "$ips")
 
     # Prevent credential leak in logs
     { set +x; } 2>/dev/null
@@ -47,20 +48,21 @@ _task_create_tuntap() {
     # To uppercase kind: using awk since ${var^} is Bash
     local kind_upper
     kind_upper=$(echo "$kind" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
-    local netdev_content="[NetDev]\nName=${name}\nKind=${kind}\n\n[${kind_upper}]\n"
-    
-    [ -n "$user" ] && netdev_content="${netdev_content}User=${user}\n"
-    [ -n "$group" ] && netdev_content="${netdev_content}Group=${group}\n"
-    
+    local netdev_content
+    netdev_content=$(printf '[NetDev]\nName=%s\nKind=%s\n\n[%s]\n' "$name" "$kind" "$kind_upper")
+
+    [ -n "$user" ] && netdev_content=$(printf '%sUser=%s\n' "$netdev_content" "$user")
+    [ -n "$group" ] && netdev_content=$(printf '%sGroup=%s\n' "$netdev_content" "$group")
+
     # Enable packet info by default for better compatibility with some daemons
-    netdev_content="${netdev_content}PacketInfo=yes\n"
+    netdev_content=$(printf '%sPacketInfo=yes\n' "$netdev_content")
 
     secure_write "$netdev_file" "$netdev_content" "644"
-    
+
     # Ensure networkd manages the link status even if IP is handled externally
     local network_file="${STORAGE_NET_DIR}/75-config-${name}.network"
-    # Basic config to keep it up. Users can use 'rxnm interface set ...' to add IPs later.
-    local content="[Match]\nName=${name}\n\n[Network]\nLinkLocalAddressing=no\nKeepConfiguration=yes\n"
+    local content
+    content=$(printf '[Match]\nName=%s\n\n[Network]\nLinkLocalAddressing=no\nKeepConfiguration=yes\n' "$name")
     secure_write "$network_file" "$content" "644"
     
     reload_networkd
