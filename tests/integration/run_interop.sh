@@ -378,13 +378,30 @@ NETEOF"
     # Use case: Quick local multiplayer session without WPA overhead
     # =======================================================================
     info "--- [PHASE 10] Open AP Mode ---"
-    info "Phase 10.1: Disconnect client and stop previous AP..."
+    info "Phase 10.1: Full teardown of previous AP..."
     m_exec "$CLIENT" rxnm wifi disconnect --interface "$CLI_WLAN" 2>/dev/null || true
-    m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" 2>/dev/null || true
-    sleep 3
 
-    info "Phase 10.2: Start open AP..."
-    m_exec "$SERVER" rxnm wifi ap start "RXNM_Open_Net" --share --interface "$SRV_WLAN" || true
+    # Explicitly stop IWD AP and wait for full mode transition
+    m_exec "$SERVER" iwctl ap "$SRV_WLAN" stop 2>/dev/null || true
+    m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" 2>/dev/null || true
+
+    # Poll until IWD device is back in station mode (up to 20s)
+    for i in $(seq 1 10); do
+        sleep 2
+        CUR_MODE=$(m_exec "$SERVER" iwctl device "$SRV_WLAN" show 2>/dev/null | awk '/Mode/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+        if [ "$CUR_MODE" = "station" ]; then break; fi
+    done
+    info "Phase 10.1: Server mode after teardown: $CUR_MODE"
+    if [ "$CUR_MODE" != "station" ]; then
+        warn "Server stuck in $CUR_MODE mode — open AP test may fail"
+    fi
+
+    # Clean up old AP profiles and config files
+    m_exec "$SERVER" rm -f /var/lib/iwd/ap/*.ap 2>/dev/null || true
+    m_exec "$SERVER" rm -f /run/systemd/network/65-wifi-host-*.network 2>/dev/null || true
+
+    info "Phase 10.2: Start open AP (no password)..."
+    m_exec "$SERVER" rxnm wifi ap start "RXNM_Open_Net" --share --interface "$SRV_WLAN" 2>&1 || true
     sleep 2
 
     # Re-apply server AP config (same nspawn workaround as Phase 6)
@@ -410,23 +427,30 @@ NETEOF"
     m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
     sleep 3
 
+    # Check if open AP actually started
+    OPEN_AP_STATE=$(m_exec "$SERVER" iwctl ap "$SRV_WLAN" show 2>/dev/null || echo "not running")
+    info "Phase 10.2a: Open AP state: $(echo "$OPEN_AP_STATE" | head -n3)"
+
     info "Phase 10.3: Scan and connect to open AP..."
     sleep 3
     SCAN_OPEN=$(m_exec "$CLIENT" rxnm wifi scan --interface "$CLI_WLAN" --format json || echo "{}")
     if echo "$SCAN_OPEN" | grep -q "RXNM_Open_Net"; then
         info "✓ Open AP detected in scan"
-    else
-        warn "Open AP not detected in scan (non-fatal)"
-    fi
 
-    # Open network connect (no password)
-    m_exec "$CLIENT" rxnm wifi connect "RXNM_Open_Net" --interface "$CLI_WLAN" || true
-    sleep 5
-    OPEN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
-    if [ "$OPEN_STATE" = "connected" ]; then
-        info "✓ Connected to open AP"
+        # Open network connect (no password)
+        m_exec "$CLIENT" rxnm wifi connect "RXNM_Open_Net" --interface "$CLI_WLAN" 2>&1 || true
+        sleep 5
+        OPEN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+        if [ "$OPEN_STATE" = "connected" ]; then
+            info "✓ Connected to open AP"
+        else
+            warn "Open AP connect state: $OPEN_STATE (IWD >= 3.x required for open AP)"
+        fi
     else
-        warn "Open AP connect state: $OPEN_STATE (non-fatal — open AP may not work on all IWD versions)"
+        warn "Open AP not detected in scan — AP may not have started"
+        info "IWD AP diagnostic:"
+        m_exec "$SERVER" iwctl ap list 2>/dev/null || true
+        m_exec "$SERVER" iw dev "$SRV_WLAN" info 2>/dev/null || true
     fi
 
     # =======================================================================
