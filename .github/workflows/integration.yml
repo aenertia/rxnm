@@ -385,7 +385,7 @@ jobs:
         sudo chmod +x tests/integration/run_interop.sh
         sudo ./tests/integration/run_interop.sh --wifi-only
 
-    - name: Cleanup between test suites
+    - name: Cleanup and reset hwsim between test suites
       if: always() && env.HWSIM_FAILED != 'true'
       run: |
         for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
@@ -393,6 +393,12 @@ jobs:
         done
         sleep 3
         sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+        # Reload hwsim to get fresh virtual radios for the next test suite.
+        # After PHY injection + container termination, radios can be wedged.
+        sudo modprobe -r mac80211_hwsim 2>/dev/null || true
+        sleep 1
+        sudo modprobe mac80211_hwsim radios=2 2>/dev/null || true
+        sleep 2
 
     - name: Run ROCKNIX Bundle WiFi Tests
       if: env.HWSIM_FAILED != 'true'
@@ -401,12 +407,18 @@ jobs:
         sudo chmod +x tests/integration/run_rocknix_interop.sh
         sudo ./tests/integration/run_rocknix_interop.sh --wifi-only
 
-    - name: Cleanup between test suites
+    - name: Cleanup and reset hwsim between test suites
       if: always() && env.HWSIM_FAILED != 'true'
       run: |
         for m in $(sudo machinectl list --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
             sudo machinectl terminate "$m" 2>/dev/null || true
         done
+        sleep 3
+        sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
+        sudo modprobe -r mac80211_hwsim 2>/dev/null || true
+        sleep 1
+        sudo modprobe mac80211_hwsim radios=2 2>/dev/null || true
+        sleep 2
         sleep 3
         sudo rm -rf /var/lib/machines/fedora-rxnm-bundle 2>/dev/null || true
 
