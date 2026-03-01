@@ -611,6 +611,10 @@ validate_integer() {
     rxnm_match "$val" '^[0-9]+$'
 }
 
+# Description: Lightweight integer check (POSIX case-based, no subprocess).
+# Accepts negative integers. Used by roaming/scan poll loops.
+is_integer() { case "$1" in ''|*[!0-9-]*) return 1;; esac; return 0; }
+
 validate_vlan_id() {
     local id="$1"
     if ! validate_integer "$id"; then return 1; fi

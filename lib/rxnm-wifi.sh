@@ -158,8 +158,9 @@ _task_host_mode() {
     local ap_conf="${STATE_DIR}/iwd/ap/${ssid}.ap"
     mkdir -p "${STATE_DIR}/iwd/ap"
     
-    local ap_data="[General]\nChannel=${channel:-1}\n"
-    if [ -n "$pass" ]; then ap_data="${ap_data}[Security]\nPassphrase=${pass}\n"; fi
+    local ap_data
+    ap_data=$(printf '[General]\nChannel=%s\n' "${channel:-1}")
+    if [ -n "$pass" ]; then ap_data=$(printf '%s\n[Security]\nPassphrase=%s\n' "$ap_data" "$pass"); fi
     
     if [ "$mode" != "adhoc" ]; then
          local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
@@ -217,7 +218,8 @@ _task_save_wifi_creds() {
     ensure_dirs
     local safe_ssid; safe_ssid=$(iwd_encode_ssid "$ssid")
     local was_x=0; if case $- in *x*) true;; *) false;; esac; then was_x=1; set +x; fi
-    local psk_data="[Security]\nPassphrase=${pass}\n"
+    local psk_data
+    psk_data=$(printf '[Security]\nPassphrase=%s\n' "$pass")
     secure_write "${STATE_DIR}/iwd/${safe_ssid}.psk" "$psk_data" "600"
     if [ "$was_x" -eq 1 ]; then set -x; fi
 }
@@ -251,7 +253,20 @@ _task_forget() {
     json_success '{"action": "forget", "ssid": "'"$json_safe_ssid"'", "removed_configs": '"$removed_count"'}'
 }
 
+_p2p_check_deps() {
+    # P2P operations require busctl + jq (Bash path only).
+    # POSIX/BusyBox: return 501 — agent P2P support deferred to 2.0.
+    if [ "$RXNM_HAS_JQ" != "true" ] || ! command -v busctl >/dev/null 2>&1; then
+        json_error "P2P requires Bash path (jq + busctl). Not available on POSIX path." "501" \
+            "Agent P2P support planned for RXNM 2.0"
+        return 1
+    fi
+    return 0
+}
+
 _task_p2p_scan() {
+    _p2p_check_deps || return 1
+
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then
         if ! is_service_active "iwd"; then echo "IWD not running" >&2; return 1; fi
@@ -284,6 +299,7 @@ _task_p2p_scan() {
 }
 
 _task_p2p_connect() {
+    _p2p_check_deps || return 1
     local peer_name="$1"
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local peer_path
@@ -294,6 +310,7 @@ _task_p2p_connect() {
 }
 
 _task_p2p_disconnect() {
+    _p2p_check_deps || return 1
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local connected_peer; connected_peer=$(echo "$objects_json" | "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["net.connman.iwd.p2p.Peer"] != null) | select(.value["net.connman.iwd.p2p.Peer"].Connected.data == true) | .key')
     if [ -z "$connected_peer" ]; then echo "No P2P connection active"; return 1; fi
@@ -301,6 +318,7 @@ _task_p2p_disconnect() {
 }
 
 _task_p2p_status() {
+    _p2p_check_deps || return 1
     local objects_json; objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
     local net_json="[]"
     if command -v networkctl >/dev/null; then net_json=$(timeout 2s networkctl list --json=short 2>/dev/null || echo "[]"); fi
@@ -347,7 +365,20 @@ action_scan() {
     if [ -z "$iface" ]; then json_error "No WiFi interface found"; return 0; fi
     if ! is_service_active "iwd"; then json_error "IWD service not running"; return 0; fi
     ensure_interface_active "$iface"
-    
+
+    # POSIX guard: busctl + jq required for scan. On BusyBox/ash, fall back to agent --dump.
+    if [ "$RXNM_HAS_JQ" != "true" ] || ! command -v busctl >/dev/null 2>&1; then
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            local agent_out
+            if agent_out=$("$RXNM_AGENT_BIN" --dump 2>/dev/null); then
+                json_success "$agent_out"
+                return 0
+            fi
+        fi
+        json_error "WiFi scan requires jq and busctl, or rxnm-agent"
+        return 0
+    fi
+
     local objects_json=""
     if ! objects_json=$(busctl --timeout=2s call net.connman.iwd / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null); then json_error "Failed to query IWD via DBus"; return 0; fi
     if [ -z "$objects_json" ]; then json_error "IWD returned empty data"; return 0; fi
