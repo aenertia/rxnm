@@ -48,7 +48,7 @@ Several critical paths have specific fallbacks when preferred tools are absent.
 
 ## 🚀 Build Profiles
 
-RXNM provides three primary compilation targets depending on your deployment constraints.
+RXNM provides four primary compilation targets depending on your deployment constraints.
 
 ### 1. The Standard Build (Dynamic Linking)
 
@@ -57,6 +57,7 @@ Best for desktop development, debugging, or standard glibc-based distributions (
 ```
 make
 sudo make install
+
 
 ```
 
@@ -71,6 +72,7 @@ Best for standard embedded devices, initramfs, or Alpine/Buildroot environments.
 ```
 make tiny
 sudo make install
+
 
 ```
 
@@ -89,6 +91,7 @@ This target triggers `scripts/bundle.sh` to forcefully strip out enterprise netw
 ```
 make rocknix-release
 
+
 ```
 
 * **Result:** Outputs exactly two files to the `build/` directory:
@@ -98,6 +101,17 @@ make rocknix-release
   2. `build/rxnm-agent`: The tiny static C-agent.
 
 * **Validation:** Automatically runs a dedicated bundle fuzzer to ensure the script amalgamation did not introduce syntax errors.
+
+### 4. The Full Combined Bundle
+
+**Target:** Embedded environments requiring Enterprise networking features (Overlay Tunnels, Service Namespaces, VRF, Bond, MPLS stubs) without the filesystem overhead of multiple module files.
+
+```
+make combined-full
+
+```
+
+* **Result:** A single, monolithic script (`build/rxnm-full`) containing the entirety of RXNM's capabilities, paired with the static `build/rxnm-agent`.
 
 ## 🔀 Architecture: Dual Execution Paths (Bash vs. POSIX)
 
@@ -156,6 +170,7 @@ Runs basic linting, binary footprint validation, and Phase 2 Netlink checks.
 ```
 make check
 
+
 ```
 
 ### Full Regression Suite
@@ -165,6 +180,7 @@ Executes the entire local validation matrix (Fuzzing, Consistency, Profiling).
 ```
 make test-all
 
+
 ```
 
 #### Test Matrix Breakdown:
@@ -173,6 +189,10 @@ make test-all
 
 * **Foundation (`test_foundation.sh`):** Validates static linkage, binary size limits (<100KB), and timestamp synchrony.
 
+* **Core Agent (`test_phase2.sh`):** Validates raw Netlink parsing (Interface/IP existence) and experimental module syntax.
+
+* **JSON Querying (`test_query.sh`):** Validates the Agent's `--get` dot-notation data extraction path.
+
 * **Consistency (`test_consistency.sh`):** Strict JSON diffing. Compares the hardware data (IPs, Routes, MACs) extracted by the C-Agent against data parsed by the legacy Shell fallback.
 
 * **Performance (`test_performance.sh`):** Nanosecond latency benchmarking. Ensures the Agent responds in `< 5ms` on average, failing the build if a performance regression occurs.
@@ -180,6 +200,8 @@ make test-all
 * **Stability (`test_stability.sh`):** Executes memory leak detection via `valgrind` across the C-Agent's dynamic realloc buffers.
 
 * **Fuzzing (`test_cli_fuzz.sh` & `test_bundle_fuzz.sh`):** Injects malformed arguments into the CLI dispatcher within an isolated, mocked environment to ensure graceful degradation (no unhandled shell panics).
+
+* **Verification (`verify_release.sh`):** End-to-end integration checks for Service Namespaces (`CLONE_NEWNET`), experimental stub correctness, and pure bash degradation handling.
 
 ### Interoperability Tests (Systemd-Nspawn)
 
@@ -192,13 +214,14 @@ sudo ./tests/integration/run_interop.sh
 # Test the flat-file ROCKNIX minimal bundle architecture
 sudo ./tests/integration/run_rocknix_interop.sh
 
+
 ```
 
 ## 📂 Installation Paths
 
 `make install` deploys files to standard system paths compliant with FHS and systemd conventions.
 
-> **Security Note:** `rxnm-agent` uses `setns(fd, CLONE_NEWNET)` for namespace and service operations, which requires `CAP_SYS_ADMIN`. It must be run as root or granted the capability (e.g. via `setcap cap_sys_admin+ep`). In `systemd-nspawn` environments, passing `--capability=all` covers this. In production systemd units, consider adding `AmbientCapabilities=CAP_SYS_ADMIN`.
+> **Security Note:** `rxnm-agent` uses `setns(fd, CLONE_NEWNET)` for namespace and service operations, which requires `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`. It must be run as root or granted the capability (e.g. via `setcap cap_sys_admin,cap_net_admin+ep`). In `systemd-nspawn` environments, passing `--capability=all` covers this. In production systemd units, consider adding `AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN`.
 
 **Note on the Main Entry Point:** To protect the relative path hierarchy required by the modular library system (and to keep `/usr/bin/` clean), the actual executable script is installed to `/usr/lib/rocknix-network-manager/bin/rxnm`. A symbolic link is then placed at `/usr/bin/rxnm` to expose the command globally. The dispatcher script inherently uses `readlink` to resolve its true location before attempting to source dependencies from `../lib/`.
 
@@ -211,12 +234,13 @@ sudo ./tests/integration/run_rocknix_interop.sh
 | **Templates** | `/usr/lib/systemd/network/` | Configuration defaults (e.g., USB Gadget, WiFi). | 
 | **Hooks** | `/usr/lib/systemd/system-sleep/rxnm-resume` | WiFi state restoration logic for suspend. | 
 | **Completion** | `/usr/share/bash-completion/completions/rxnm` | Tab completion logic. | 
-| **Service** | `/etc/systemd/system/rxnm.service` | Main boot-time orchestrator service. | 
+| **Systemd Units** | `systemd/*` (Provided in source) | Boot-time orchestration service (`rxnm.service`) and REST-Lite Socket interfaces (`rxnm-api.socket`). *Note: Handled by OS Packagers, not copied by `make install`.* | 
 
 To override the installation prefix (default `/usr`):
 
 ```
 make install PREFIX=/usr/local
+
 
 ```
 
@@ -230,6 +254,7 @@ RXNM's zero-dependency design makes it trivial to cross-compile for target embed
 export CC=aarch64-linux-gnu-gcc
 make tiny
 
+
 ```
 
 ### Cross-Compiling for RISC-V
@@ -237,6 +262,7 @@ make tiny
 ```
 export CC=riscv64-linux-gnu-gcc
 make tiny
+
 
 ```
 
@@ -246,5 +272,6 @@ To remove build artifacts, object files, generated headers, and temporary build 
 
 ```
 make clean
+
 
 ```

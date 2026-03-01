@@ -70,7 +70,7 @@ RXNM replaces heavy middleware with a direct, zero-dependency model. DBus-Lite m
 | **Total Disk Size** | **\~300 KB** | \~5.2 MB | \~400 KB | \~18.5 MB | 
 | **Breakdown** | 50KB Agent + 250KB Shell | Binaries + Plugins | Daemon + Scripts | Binaries + JNI | 
 | **Library Sprawl** | **0 Files** (Static) | \~140+ (.so) | \~15+ (.so) | \~65+ (.so) | 
-| **Privilege Model** | **Capabilities (cap_net)** | Root Daemon | Root Daemon | SELinux + Netd | 
+| **Privilege Model** | **Capabilities (cap_sys_admin, cap_net_admin)** | Root Daemon | Root Daemon | SELinux + Netd | 
 | **Immutable Support** | **Native (/run based)** | Challenging | Native | Native (A/B) | 
 
 ---
@@ -176,5 +176,11 @@ While RXNM is optimized for high-performance embedded scenarios, its design phil
 ## 🏁 Conclusion
 
 RXNM achieves functional parity with the **Android Networking Stack** (eBPF filtering, L2/L3 handoff, firmware-gated init) while maintaining the resource footprint of a minimalist embedded environment. It remains the "Third Way" for high-performance handheld and RISC-V development.
+
+### 📣 Call for Testers & Integrators!
+
+If RXNM's zero-resident, sub-5ms architecture sounds like the right fit for your embedded project, Linux distribution, or specific use case, we would love to hear from you! We are actively looking for integrators to stress-test these capabilities.
+
+*Please note: We track all issues, feature requests, and bug reports through our primary Codeberg repository. (The GitHub mirror is strictly read-only for CI purposes). Head over to Codeberg to join the discussion!*
 
 © 2026-present Joel Wirāmu Pauling

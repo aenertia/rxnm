@@ -134,7 +134,7 @@ This creates a targeted "Logical Kill-Switch." In this scenario, the physical Wi
 
 During the design phase, extending eBPF to Bluetooth via `BPF_PROG_TYPE_SOCKET_FILTER` was evaluated and rejected. Raw socket filters in Linux act as sniffers; dropping a BLE packet in a socket filter only hides it from the daemon holding the socket, it *does not* prevent the kernel's HCI core from processing the packet and waking the system.
 
-* **The RXNM Approach:** To establish a true logical air-gap and save power, we use the native `hciconfig hci0 down` (or `bluetoothctl power off`). This logically closes the HCI interface at the hardware boundary, guaranteeing zero wakeups without risking notoriously buggy SDIO driver unloads (`modprobe -r`).
+* **The RXNM Approach:** To establish a true logical air-gap and save power, we use the native `hciconfig` (e.g., `hciconfig hci0 down`). This logically closes the HCI interface at the hardware boundary, guaranteeing zero wakeups without risking notoriously buggy SDIO driver unloads (`modprobe -r`).
 
 ### 5.2. Inputs: The Proxy Trap (Explicitly Out-of-Scope)
 

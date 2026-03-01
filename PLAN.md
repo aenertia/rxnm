@@ -13,15 +13,15 @@ RXNM 2.0 moves to a **Converged Engine** where the C Agent becomes the primary l
 
 ### Evolution Comparison
 
-| Metric | 1.0 (Hybrid RC3) | OpenWrt (netifd) | 2.0 (Converged Mono) | 
+| Metric | 1.1 (Hybrid) | OpenWrt (netifd) | 2.0 (Converged Mono) | 
 | :--- | :--- | :--- | :--- | 
 | **Logic Engine** | Bash / systemd-networkd | C / **ubus** / Shell Scripts | Monolithic C Engine | 
 | **Connectivity** | `iwd` (D-Bus) | `hostapd` / `wpa_s` | Internalized `ell`/`iwd` Logic | 
 | **Data Plane** | Kernel IP Stack | Kernel IP Stack / Bridge | **eBPF / XDP (Primary)** | 
 | **IPC** | D-Bus (System/Lite) | **ubus** (libubox) | **Zero-IPC (Internal)** | 
-| **Service Logic** | `ip netns` (Fork) | Flat Router Namespace | Native `setns` / BPF Maps | 
+| **Service Logic** | Native `unshare`/`setns` (Agent) | Flat Router Namespace | Native `setns` / BPF Maps | 
 | **CPU Wakeups (Idle)** | \~20-40 / sec | \~10-20 / sec | **< 2 / sec** | 
-| **Resident RAM** | \~11.5MB | \~6.5MB | **\~2.5MB (Unified)** | 
+| **Resident RAM** | \~7.7 MB | \~6.5MB | **\~2.5MB (Unified)** | 
 
 ## 2. Core Architecture Pillars
 
@@ -71,7 +71,7 @@ Comparison of the Monolithic 2.0 stack against standard `systemd-networkd` and O
 
 | Metric | systemd-networkd | OpenWrt (netifd) | Micro-RXNM 2.0 (Mono) | 
 | :--- | :--- | :--- | :--- | 
-| **Resident RAM** | \~11.5 MB | \~6.5 MB | **\~2.5 MB** | 
+| **Resident RAM** | \~7.7 MB (Total Stack) | \~6.5 MB | **\~2.5 MB** | 
 | **Binary Footprint** | \~5.2 MB | \~1.2 MB | **\~0.9 MB** | 
 | **Cold Start Latency** | \~450ms | \~250ms | **\~15ms** | 
 | **USB/TB Hotplug** | \~180ms | \~80ms | **< 5ms** | 
@@ -118,7 +118,7 @@ Comparison of the Monolithic 2.0 stack against standard `systemd-networkd` and O
 
 ## 7. Functionality Matrix: The 2.0 Standard
 
-| Feature | RXNM 1.0 (Hybrid) | OpenWrt (netifd) | RXNM 2.0 (Mono) | 
+| Feature | RXNM 1.1 (Hybrid) | OpenWrt (netifd) | RXNM 2.0 (Mono) | 
 | :--- | :--- | :--- | :--- | 
 | **Logic Engine** | systemd-networkd | C + Shell Scripts | **Internal C Logic** | 
 | **WiFi Auth** | External `iwd` | External `wpa_s` | **Internal Module** | 

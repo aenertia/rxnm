@@ -118,7 +118,7 @@ How `rxnm` translates from traditional Linux networking tools.
 | **Set DHCP** | `rxnm interface eth0 set dhcp` | `nmcli con mod eth0 ipv4.method auto` | *(Automatic)* | `udhcpc -i eth0` | 
 | **Set Static IP** | `rxnm interface eth0 set static IP/24` | `nmcli con mod eth0 ipv4.addresses IP/24` | `connmanctl config ... ipv4 manual ...` | `ip addr add IP/24 dev eth0` | 
 | **Set Gateway** | `... set static ... --gateway GW` | `nmcli con mod eth0 ipv4.gateway GW` | *(As above)* | `ip route add default via GW` | 
-| **Link Up/Down** | `rxnm interface eth0 enable/disable` | `nmcli device connect/disconnect eth0` | `connmanctl enable/disable ethernet` | `ip link set eth0 up/down` | 
+| **L3 Deconfigure** | `rxnm interface eth0 disable` | `nmcli device disconnect eth0` | `connmanctl disable ethernet` | `ip addr flush dev eth0` | 
 | **Internet Check** | `rxnm system check internet` | `nmcli networking connectivity` | *(None)* | `ping -c 1 8.8.8.8` | 
 | **Power Silence** | `rxnm system nullify enable` | *(None)* | *(None)* | *(Requires custom XDP/eBPF code)* | 
 
@@ -199,7 +199,7 @@ rxnm wifi dpp enroll "DPP:C:81/1;M:001122334455;K:..."
 | `set dhcp` | Enable dynamic addressing | 
 | `set static` | Configure fixed IP/Gateway/DNS | 
 | `set hardware` | Adjust MAC, Speed, Duplex, or MTU | 
-| `enable/disable` | Administrative UP/DOWN toggle | 
+| `enable/disable` | Halts or initiates L3 configuration via networkd overrides | 
 
 **Examples:**
 ```bash
@@ -237,7 +237,9 @@ rxnm system nullify enable --soft-wol yes
 rxnm system ipv6 disable
 ```
 
-### 4. Virtual Networking & VPN (`rxnm bridge|bond|vlan|vrf|vpn`)
+### 4. Virtual Networking, Namespaces & VPN
+
+RXNM inherently supports deep integration with standard Linux overlay and containerization technologies. 
 
 **Examples:**
 ```bash
@@ -249,6 +251,11 @@ rxnm bridge add-member eth0 --bridge br0
 rxnm vpn wireguard connect wg0 \
   --private-key "..." --peer-key "..." \
   --endpoint "vpn.host.com:51820" --address "10.0.0.2/24"
+
+# Create an isolated Network Namespace (Requires RXNM_EXPERIMENTAL=true)
+RXNM_EXPERIMENTAL=true rxnm service create my_sandbox
+RXNM_EXPERIMENTAL=true rxnm service attach my_sandbox eth1
+RXNM_EXPERIMENTAL=true rxnm service exec my_sandbox ping 8.8.8.8
 ```
 
 ## 🥗 User Stories & Cookbooks
@@ -284,6 +291,14 @@ echo '{"category":"wifi", "action":"connect", "ssid":"HomeNet", "password":"test
 
 ### Integration Contract
 The [api-schema.json](https://codeberg.org/aenertia/rxnm/src/branch/main/api-schema.json) serves as the strict stability contract. It guarantees that frontend UI/C++ code won't break even if the underlying Linux kernel tools (like `iproute2` or `networkctl`) change their CLI output formatting. All structured output is strictly validated against this JSON schema.
+
+## 🔢 Versioning System
+
+RXNM follows strict [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`) to ensure predictability for scripts, integrations, and downstream OS packagers.
+
+* **Major (`X.0.0`):** Significant architectural shifts (e.g., the transition from the v1.x Hybrid Bash/C architecture to the planned v2.0 Monolithic C Engine) or breaking changes to the JSON API schema (`api-schema.json`) and CLI syntax.
+* **Minor (`1.X.0`):** Addition of new networking features (e.g., new `rxnm service` commands, overlay tunnels), substantial performance optimizations, or backwards-compatible API extensions.
+* **Bugfix Only (`1.1.X`):** Strictly limited to non-breaking bug fixes, security patches, upstream kernel mitigations (like adding new quirks for flaky SDIO WiFi drivers), and compatibility updates. No new features or API keys will be introduced in these releases.
 
 ## 📦 Deployment & Build Profiles
 
