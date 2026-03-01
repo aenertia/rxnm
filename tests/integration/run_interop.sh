@@ -278,9 +278,163 @@ NETEOF"
     done
     [ "$CONVERGED" = "false" ] && { err "WiFi Convergence Failed (L2=$CONN_STATE, GW=${GW:-none})"; exit 1; }
 
-    info "--- [PHASE 6b] Client Mode Restoration ---"
+    # =======================================================================
+    # PHASE 7: WiFi Disconnect / Reconnect Cycle
+    # Use case: User switches networks, reconnects after going offline
+    # =======================================================================
+    info "--- [PHASE 7] WiFi Disconnect & Reconnect ---"
+    info "Phase 7.1: Explicit disconnect..."
+    m_exec "$CLIENT" rxnm wifi disconnect --interface "$CLI_WLAN" || true
+    sleep 2
+    DISC_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+    if [ "$DISC_STATE" = "disconnected" ] || [ "$DISC_STATE" = "autoconnect_quick" ] || [ "$DISC_STATE" = "autoconnect_full" ]; then
+        info "✓ Disconnect confirmed (state: $DISC_STATE)"
+    else
+        warn "Disconnect state unexpected: $DISC_STATE (non-fatal)"
+    fi
+
+    info "Phase 7.2: Reconnect to saved network..."
+    m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
+    sleep 5
+    CONVERGED=false
+    for i in $(seq 1 15); do
+        CONN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+        if [ "$CONN_STATE" = "connected" ]; then
+            GW=$(m_exec "$CLIENT" ip -4 route show default dev "$CLI_WLAN" 2>/dev/null | awk '/via/{print $3}' | head -n1)
+            if [ -n "$GW" ]; then
+                if m_exec "$CLIENT" ping -c 1 -W 2 "$GW" >/dev/null 2>&1; then
+                    info "✓ Reconnect successful (gateway: $GW)"
+                    CONVERGED=true; break
+                fi
+            fi
+        fi
+        sleep 2
+    done
+    [ "$CONVERGED" = "false" ] && { err "Reconnect failed (L2=$CONN_STATE, GW=${GW:-none})"; exit 1; }
+
+    # =======================================================================
+    # PHASE 8: WiFi Nullify (Project Silence over WiFi)
+    # Use case: Handheld entering deep sleep, silencing WiFi traffic
+    # =======================================================================
+    info "--- [PHASE 8] Project Silence over WiFi ---"
+    info "Phase 8.1: Enable nullify on client WiFi..."
+    m_exec "$CLIENT" rxnm system nullify enable --interface "$CLI_WLAN" --xdp yes --wowlan no --bt no || warn "Nullify enable failed (expected if XDP unsupported in nspawn)"
+    sleep 2
+
+    info "Phase 8.2: Verify traffic blocked..."
+    if m_exec "$CLIENT" ping -c 1 -W 1 192.168.212.1 >/dev/null 2>&1; then
+        warn "Nullify bypass (XDP not supported on hwsim in nspawn — non-fatal)"
+    else
+        info "✓ Traffic dropped by XDP"
+    fi
+
+    info "Phase 8.3: Disable nullify and verify restoration..."
+    m_exec "$CLIENT" rxnm system nullify disable --interface "$CLI_WLAN" || true
+    sleep 3
+
+    # Reconnect if nullify dropped the connection
+    CONN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+    if [ "$CONN_STATE" != "connected" ]; then
+        info "Phase 8.3a: Reconnecting after nullify..."
+        m_exec "$CLIENT" rxnm wifi connect "RXNM_Test_Net" --password "supersecret" --interface "$CLI_WLAN" || true
+        sleep 5
+    fi
+
+    RESTORED=false
+    for i in $(seq 1 10); do
+        if m_exec "$CLIENT" ping -c 1 -W 2 192.168.212.1 >/dev/null 2>&1; then
+            info "✓ Network restored after nullify"
+            RESTORED=true; break
+        fi
+        sleep 2
+    done
+    [ "$RESTORED" = "false" ] && { err "Network not restored after nullify disable"; exit 1; }
+
+    # =======================================================================
+    # PHASE 9: WiFi Credential Management
+    # Use case: User forgets a saved network
+    # =======================================================================
+    info "--- [PHASE 9] Credential Management ---"
+    info "Phase 9.1: List known networks..."
+    KNOWN=$(m_exec "$CLIENT" rxnm wifi networks --format json 2>/dev/null || echo "{}")
+    if echo "$KNOWN" | grep -q "RXNM_Test_Net"; then
+        info "✓ RXNM_Test_Net found in known networks"
+    else
+        warn "RXNM_Test_Net not in known networks list (IWD may not persist in ephemeral container)"
+    fi
+
+    info "Phase 9.2: Forget network..."
+    m_exec "$CLIENT" rxnm wifi forget "RXNM_Test_Net" --yes 2>/dev/null || true
+    sleep 1
+    KNOWN_AFTER=$(m_exec "$CLIENT" rxnm wifi networks --format json 2>/dev/null || echo "{}")
+    if echo "$KNOWN_AFTER" | grep -q "RXNM_Test_Net"; then
+        warn "Network still in known list after forget (non-fatal in ephemeral container)"
+    else
+        info "✓ Network forgotten successfully"
+    fi
+
+    # =======================================================================
+    # PHASE 10: Open AP (No Password)
+    # Use case: Quick local multiplayer session without WPA overhead
+    # =======================================================================
+    info "--- [PHASE 10] Open AP Mode ---"
+    info "Phase 10.1: Disconnect client and stop previous AP..."
+    m_exec "$CLIENT" rxnm wifi disconnect --interface "$CLI_WLAN" 2>/dev/null || true
+    m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" 2>/dev/null || true
+    sleep 3
+
+    info "Phase 10.2: Start open AP..."
+    m_exec "$SERVER" rxnm wifi ap start "RXNM_Open_Net" --share --interface "$SRV_WLAN" || true
+    sleep 2
+
+    # Re-apply server AP config (same nspawn workaround as Phase 6)
+    m_exec "$SERVER" /bin/bash -c "cat > /run/systemd/network/50-wifi-ap-test.network << 'NETEOF'
+[Match]
+Name=$SRV_WLAN
+
+[Network]
+Description=CI Open AP Test
+Address=192.168.212.1/24
+DHCPServer=yes
+LinkLocalAddressing=yes
+ConfigureWithoutCarrier=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=50
+EmitDNS=yes
+EmitRouter=yes
+NETEOF"
+    m_exec "$SERVER" networkctl reload 2>/dev/null || true
+    sleep 1
+    m_exec "$SERVER" networkctl reconfigure "$SRV_WLAN" 2>/dev/null || true
+    sleep 3
+
+    info "Phase 10.3: Scan and connect to open AP..."
+    sleep 3
+    SCAN_OPEN=$(m_exec "$CLIENT" rxnm wifi scan --interface "$CLI_WLAN" --format json || echo "{}")
+    if echo "$SCAN_OPEN" | grep -q "RXNM_Open_Net"; then
+        info "✓ Open AP detected in scan"
+    else
+        warn "Open AP not detected in scan (non-fatal)"
+    fi
+
+    # Open network connect (no password)
+    m_exec "$CLIENT" rxnm wifi connect "RXNM_Open_Net" --interface "$CLI_WLAN" || true
+    sleep 5
+    OPEN_STATE=$(m_exec "$CLIENT" iwctl station "$CLI_WLAN" show 2>/dev/null | awk '/State/{print $NF}' | tr '[:upper:]' '[:lower:]' || echo "unknown")
+    if [ "$OPEN_STATE" = "connected" ]; then
+        info "✓ Connected to open AP"
+    else
+        warn "Open AP connect state: $OPEN_STATE (non-fatal — open AP may not work on all IWD versions)"
+    fi
+
+    # =======================================================================
+    # PHASE 11: Client Mode Restoration (Final Cleanup)
+    # Use case: Returning to station mode after hotspot/AP session
+    # =======================================================================
+    info "--- [PHASE 11] Final Client Mode Restoration ---"
     m_exec "$SERVER" rxnm wifi client --interface "$SRV_WLAN" || true
-    # AP → station mode transition on hwsim is slow; poll with retries
     SRV_MODE="ap"
     for i in $(seq 1 10); do
         sleep 2
@@ -290,10 +444,11 @@ NETEOF"
         fi
     done
     if [ "$SRV_MODE" = "station" ] || [ "$SRV_MODE" = "unknown" ]; then
-        info "✓ AP state cleaned up successfully (mode: $SRV_MODE)"
+        info "✓ Server restored to station mode (mode: $SRV_MODE)"
     else
         warn "AP mode transition slow (mode: $SRV_MODE) — non-fatal in CI"
     fi
+
 elif [ "$SKIP_WIFI" = "false" ]; then
     info "--- [PHASE 6] SKIPPED (Virtual WiFi module unavailable) ---"
 fi
