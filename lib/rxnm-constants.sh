@@ -93,11 +93,12 @@ fi
 : "${IWD_DBUS_MAX_KB:=512}"
 
 # --- systemd-networkd Version-Aware Config Keys ---
-# Detect target systemd version for version-appropriate .network keys.
-# RXNM_SYSTEMD_VERSION can be set by the build system; otherwise detect at runtime.
+# IPForward= was deprecated in systemd 256, replaced by IPv4Forwarding=/IPv6Forwarding=.
+# Detect the running networkd version and emit the correct key for dynamic configs.
+# Shipped .network templates use IPForward= (works on all versions, deprecated warning on 256+).
 if [ -z "${RXNM_NETWORKD_KEY_IPFORWARD:-}" ]; then
-    _sd_ver="${RXNM_SYSTEMD_VERSION:-}"
-    if [ -z "$_sd_ver" ] && command -v networkctl >/dev/null 2>&1; then
+    _sd_ver=""
+    if command -v networkctl >/dev/null 2>&1; then
         _sd_ver=$(networkctl --version 2>/dev/null | awk '/^systemd / {print $2; exit}')
     fi
     _sd_ver="${_sd_ver:-255}"

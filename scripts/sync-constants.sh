@@ -131,26 +131,6 @@ else
 fi
 echo "" >> "$HEADER_FILE"
 
-echo "// --- systemd-networkd Version-Aware Keys ---" >> "$HEADER_FILE"
-# Detect target systemd version for version-appropriate .network config keys.
-# RXNM_SYSTEMD_VERSION: set by the build system (e.g., ROCKNIX OE/Buildroot).
-# Fallback: parse from networkctl --version if available (native builds).
-SYSTEMD_VER="${RXNM_SYSTEMD_VERSION:-}"
-if [ -z "$SYSTEMD_VER" ] && command -v networkctl >/dev/null 2>&1; then
-    SYSTEMD_VER=$(networkctl --version 2>/dev/null | awk '/^systemd / {print $2; exit}')
-fi
-SYSTEMD_VER="${SYSTEMD_VER:-255}"
-echo "// Target systemd version: $SYSTEMD_VER" >> "$HEADER_FILE"
-
-# IPForward= was deprecated in v256; replaced by IPv4Forwarding= + IPv6Forwarding=
-# OtherInformation= is the correct key for all versions (OtherConfig was never valid)
-if [ "$SYSTEMD_VER" -ge 256 ] 2>/dev/null; then
-    printf '%s\n' "#define RXNM_NETWORKD_IPFORWARD_KEY \"IPv4Forwarding=yes\\nIPv6Forwarding=yes\"" >> "$HEADER_FILE"
-else
-    echo "#define RXNM_NETWORKD_IPFORWARD_KEY \"IPForward=yes\"" >> "$HEADER_FILE"
-fi
-echo "" >> "$HEADER_FILE"
-
 echo "// --- Kernel Header Sync (Drift Guard) ---" >> "$HEADER_FILE"
 # Check standard header path for IFLA_XDP_FLAGS definition
 # This helps us avoid the magic number '3' if the build env has valid headers
