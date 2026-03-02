@@ -2,9 +2,9 @@ name: RXNM CI (Native Nspawn)
 
 on:
   push:
-    branches: [ "main", "master", "v1.1.0", "1.1.x-CI", "agentic-review" ]
+    branches: [ "main", "master", "v1.1.0", "v1.1.1", "1.1.x-CI", "agentic-review" ]
   pull_request:
-    branches: [ "main", "master", "v1.1.0" ]
+    branches: [ "main", "master", "v1.1.0", "v1.1.1" ]
 
 jobs:
   unit-and-posix:
@@ -27,6 +27,12 @@ jobs:
         make lint
         export GITHUB_ACTIONS=true
         make test-all
+
+    - name: "v1.1.1 Regression Suite"
+      run: |
+        echo "=== v1.1.1 Structural Regression Tests ==="
+        chmod +x tests/test_v111_regressions.sh
+        bash tests/test_v111_regressions.sh
 
     - name: "Path B: POSIX/dash compatibility"
       run: |

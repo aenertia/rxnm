@@ -154,20 +154,25 @@ _task_set_link() {
     reload_networkd
     reconfigure_iface "$iface"
 
-    # Flush addresses for disabled protocols using agent to bypass busybox limitations
+    # Flush addresses and routes for disabled protocols using agent's native
+    # netlink to completely bypass busybox ip deficiencies.
     if [ "$ipv6" = "off" ]; then
         if [ -x "$RXNM_AGENT_BIN" ]; then
             "$RXNM_AGENT_BIN" --flush-addrs "$iface:6" >/dev/null 2>&1 || true
+            "$RXNM_AGENT_BIN" --flush-routes "$iface:6" >/dev/null 2>&1 || true
         else
             ip -6 addr flush dev "$iface" scope global 2>/dev/null || true
             ip -6 addr flush dev "$iface" scope link 2>/dev/null || true
+            ip -6 route flush dev "$iface" 2>/dev/null || true
         fi
     fi
     if [ "$ipv4" = "off" ]; then
         if [ -x "$RXNM_AGENT_BIN" ]; then
             "$RXNM_AGENT_BIN" --flush-addrs "$iface:4" >/dev/null 2>&1 || true
+            "$RXNM_AGENT_BIN" --flush-routes "$iface:4" >/dev/null 2>&1 || true
         else
             ip -4 addr flush dev "$iface" 2>/dev/null || true
+            ip -4 route flush dev "$iface" 2>/dev/null || true
         fi
     fi
 }

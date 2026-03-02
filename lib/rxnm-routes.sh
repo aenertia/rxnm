@@ -184,31 +184,43 @@ action_route_get() {
 }
 
 action_route_flush() {
-    local target="$1" # e.g., table ID, or cache
+    local target="$1" # e.g., table ID, cache, or interface name
     shift
-    local table=""
-    
-    # Parse args to be safe
+    local table="" iface=""
+
+    # Parse args
     if [ "$target" = "cache" ]; then
-        ip route flush cache
+        ip route flush cache 2>/dev/null || true
         json_success '{"action": "route_flush", "target": "cache"}'
         return 0
     fi
-    
+
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --table) table="$2"; shift 2 ;;
+            --iface) iface="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
-    
+
+    # Interface-scoped flush: prefer agent netlink, fallback to ip
+    if [ -n "$iface" ]; then
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --flush-routes "$iface" >/dev/null 2>&1
+        else
+            ip route flush dev "$iface" 2>/dev/null || true
+        fi
+        json_success '{"action": "route_flush", "iface": "'"$iface"'"}'
+        return 0
+    fi
+
     if [ -n "$table" ]; then
-        if ip route flush table "$table"; then
+        if ip route flush table "$table" 2>/dev/null; then
             json_success '{"action": "route_flush", "table": "'"$table"'"}'
         else
             json_error "Failed to flush table $table"
         fi
     else
-        json_error "Specify target to flush (e.g. 'rxnm route flush cache' or 'rxnm route flush --table 100')"
+        json_error "Specify target to flush (e.g. 'rxnm route flush cache' or 'rxnm route flush --iface wlan0')"
     fi
 }

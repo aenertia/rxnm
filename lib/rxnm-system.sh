@@ -272,6 +272,14 @@ action_system_ipv6() {
             iname=$(basename "$iface")
             [ "$iname" = "lo" ] && continue
             sysctl -w "net.ipv6.conf.${iname}.disable_ipv6=1" >/dev/null 2>&1 || true
+            # Flush IPv6 addresses and routes for clean teardown
+            if [ -x "$RXNM_AGENT_BIN" ]; then
+                "$RXNM_AGENT_BIN" --flush-addrs "$iname:6" >/dev/null 2>&1 || true
+                "$RXNM_AGENT_BIN" --flush-routes "$iname:6" >/dev/null 2>&1 || true
+            else
+                ip -6 addr flush dev "$iname" scope global 2>/dev/null || true
+                ip -6 route flush dev "$iname" 2>/dev/null || true
+            fi
         done
         
         printf "net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n" > "$conf_file" 2>/dev/null || true

@@ -1484,6 +1484,123 @@ void cmd_check_internet() {
     printf("{\n  \"%s\": true,\n  \"connected\": %s,\n  \"ipv4\": %s,\n  \"ipv6\": %s\n}\n", KEY_SUCCESS, (v4 || v6) ? "true" : "false", v4 ? "true" : "false", v6 ? "true" : "false");
 }
 
+int cmd_flush_routes(const char *arg) {
+    char arg_copy[256];
+    strncpy(arg_copy, arg, sizeof(arg_copy) - 1);
+    arg_copy[sizeof(arg_copy)-1] = '\0';
+
+    char *iface = strtok(arg_copy, ":");
+    char *fam_str = strtok(NULL, ":");
+    int target_family = AF_UNSPEC;
+    if (fam_str) {
+        if (strcmp(fam_str, "4") == 0) target_family = AF_INET;
+        else if (strcmp(fam_str, "6") == 0) target_family = AF_INET6;
+    }
+
+    if (!iface) return 1;
+    int ifindex = if_nametoindex(iface);
+    if (ifindex == 0) {
+        fprintf(stderr, "Interface %s not found\n", iface);
+        return 1;
+    }
+
+    int sock = open_netlink_rt();
+    if (sock < 0) return 1;
+
+    struct { struct nlmsghdr nlh; struct rtgenmsg rtg; } req;
+    memset(&req, 0, sizeof(req));
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+    req.nlh.nlmsg_type = RTM_GETROUTE;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = time(NULL);
+    req.rtg.rtgen_family = (target_family == AF_UNSPEC) ? AF_UNSPEC : target_family;
+    send(sock, &req, req.nlh.nlmsg_len, 0);
+
+    #define MAX_FLUSH_ROUTES 128
+    struct rtmsg to_delete[MAX_FLUSH_ROUTES];
+    struct rtattr *rta_dst[MAX_FLUSH_ROUTES];
+    struct rtattr *rta_gw[MAX_FLUSH_ROUTES];
+    struct rtattr *rta_oif[MAX_FLUSH_ROUTES];
+    struct rtattr *rta_priority[MAX_FLUSH_ROUTES];
+    int del_count = 0;
+
+    char buf[BUF_SIZE];
+    int len;
+    while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
+        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+            if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto rt_dump_done;
+            if (nh->nlmsg_type == RTM_NEWROUTE) {
+                struct rtmsg *rt = NLMSG_DATA(nh);
+                struct rtattr *tb[RTA_MAX + 1];
+                parse_rtattr(tb, RTA_MAX, RTM_RTA(rt), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*rt)));
+
+                if (tb[RTA_OIF] && *(int *)RTA_DATA(tb[RTA_OIF]) == ifindex) {
+                    if (target_family == AF_UNSPEC || rt->rtm_family == target_family) {
+                        if (del_count < MAX_FLUSH_ROUTES) {
+                            to_delete[del_count] = *rt;
+                            rta_dst[del_count] = NULL;
+                            rta_gw[del_count] = NULL;
+                            rta_oif[del_count] = NULL;
+                            rta_priority[del_count] = NULL;
+
+                            if (tb[RTA_DST]) {
+                                int rta_len = tb[RTA_DST]->rta_len;
+                                rta_dst[del_count] = malloc(rta_len);
+                                if (rta_dst[del_count]) memcpy(rta_dst[del_count], tb[RTA_DST], rta_len);
+                            }
+                            if (tb[RTA_GATEWAY]) {
+                                int rta_len = tb[RTA_GATEWAY]->rta_len;
+                                rta_gw[del_count] = malloc(rta_len);
+                                if (rta_gw[del_count]) memcpy(rta_gw[del_count], tb[RTA_GATEWAY], rta_len);
+                            }
+                            if (tb[RTA_OIF]) {
+                                int rta_len = tb[RTA_OIF]->rta_len;
+                                rta_oif[del_count] = malloc(rta_len);
+                                if (rta_oif[del_count]) memcpy(rta_oif[del_count], tb[RTA_OIF], rta_len);
+                            }
+                            if (tb[RTA_PRIORITY]) {
+                                int rta_len = tb[RTA_PRIORITY]->rta_len;
+                                rta_priority[del_count] = malloc(rta_len);
+                                if (rta_priority[del_count]) memcpy(rta_priority[del_count], tb[RTA_PRIORITY], rta_len);
+                            }
+                            del_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+rt_dump_done:
+
+    for (int i = 0; i < del_count; i++) {
+        struct {
+            struct nlmsghdr n;
+            struct rtmsg rtm;
+            char attrbuf[512];
+        } del_req;
+        memset(&del_req, 0, sizeof(del_req));
+        del_req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+        del_req.n.nlmsg_type = RTM_DELROUTE;
+        del_req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+        del_req.n.nlmsg_seq = time(NULL) + i;
+        del_req.rtm = to_delete[i];
+
+        if (rta_dst[i]) { add_nl_attr(&del_req.n, sizeof(del_req), RTA_DST, RTA_DATA(rta_dst[i]), RTA_PAYLOAD(rta_dst[i])); free(rta_dst[i]); }
+        if (rta_gw[i]) { add_nl_attr(&del_req.n, sizeof(del_req), RTA_GATEWAY, RTA_DATA(rta_gw[i]), RTA_PAYLOAD(rta_gw[i])); free(rta_gw[i]); }
+        if (rta_oif[i]) { add_nl_attr(&del_req.n, sizeof(del_req), RTA_OIF, RTA_DATA(rta_oif[i]), RTA_PAYLOAD(rta_oif[i])); free(rta_oif[i]); }
+        if (rta_priority[i]) { add_nl_attr(&del_req.n, sizeof(del_req), RTA_PRIORITY, RTA_DATA(rta_priority[i]), RTA_PAYLOAD(rta_priority[i])); free(rta_priority[i]); }
+
+        send(sock, &del_req, del_req.n.nlmsg_len, 0);
+        char ackbuf[1024];
+        recv(sock, ackbuf, sizeof(ackbuf), 0);
+    }
+    close(sock);
+
+    printf("{\"success\": true, \"action\": \"flush_routes\", \"iface\": \"%s\", \"count\": %d}\n", iface, del_count);
+    return 0;
+}
+
 /* --- JSON Formatting --- */
 
 void get_proxy_config(char* http, char* https, char* no_proxy) {
@@ -2513,6 +2630,7 @@ char *g_ns_delete = NULL;
 char *g_ns_exec_name = NULL;
 char *g_route_table = NULL;
 char *g_flush_addrs = NULL;
+char *g_flush_routes = NULL;
 
 int main(int argc, char *argv[]) {
     atexit(cleanup_ifaces);
@@ -2541,6 +2659,7 @@ int main(int argc, char *argv[]) {
         {"nullify-xdp", required_argument, 0, 'X'},
         {"encode-ssid", required_argument, 0, 'E'},
         {"flush-addrs", required_argument, 0, 'F'},
+        {"flush-routes", required_argument, 0, 'R'},
         {"ns-create", required_argument, 0, 1001},
         {"ns-delete", required_argument, 0, 1002},
         {"ns-list", no_argument, 0, 1003},
@@ -2551,10 +2670,10 @@ int main(int argc, char *argv[]) {
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:E:F:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:E:F:R:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n--flush-addrs <iface>[:family]\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n--flush-addrs <iface>[:family]\n--flush-routes <iface>[:family]\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -2575,6 +2694,7 @@ int main(int argc, char *argv[]) {
             case 'X': g_nullify_xdp_iface = optarg; break;
             case 'E': cmd_encode_ssid(optarg); return 0;
             case 'F': g_flush_addrs = optarg; break;
+            case 'R': g_flush_routes = optarg; break;
             case 1001: g_ns_create = optarg; break;
             case 1002: g_ns_delete = optarg; break;
             case 1003: cmd_ns_list(); return 0;
@@ -2614,6 +2734,7 @@ end_args:
     }
     
     if (g_flush_addrs) { return cmd_flush_addrs(g_flush_addrs); }
+    if (g_flush_routes) { return cmd_flush_routes(g_flush_routes); }
     if (g_atomic_path) { return cmd_atomic_write(g_atomic_path, g_perm_str); }
     if (g_append_path && g_append_line) { return cmd_append_config(g_append_path, g_append_line); }
     if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }
