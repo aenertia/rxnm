@@ -95,7 +95,7 @@ _task_profile_load_global() {
     # to its baseline condition. Non-default profiles must contain files to prevent accidental
     # network lockouts during standard profile switching.
     if [ "$has_files" = "false" ] && [ "$name" != "default" ]; then
-        rm -rf "$staging_dir"
+        rm -rf "${staging_dir:?}"
         log_error "Profile is empty or sync failed. Aborted to prevent network loss."
         return 1
     fi
@@ -110,7 +110,7 @@ _task_profile_load_global() {
         for f in "$staging_dir"/*; do
             [ -e "$f" ] && mv -f "$f" "${EPHEMERAL_NET_DIR}/"
         done
-        rm -rf "$staging_dir"
+        rm -rf "${staging_dir:?}"
     fi
     
     [ -f "$profile_dir/proxy.conf" ] && cp "$profile_dir/proxy.conf" "${STORAGE_PROXY_GLOBAL}"
@@ -203,7 +203,7 @@ action_profile() {
                 [ ! -d "$global_dir/$name" ] && { json_error "Profile not found: $name"; return 1; }
 
                 confirm_action "Delete global profile '$name'?" "$FORCE_ACTION"
-                rm -rf "$global_dir/$name"
+                rm -rf "${global_dir:?}/${name:?}"
 
                 local active_prof="default"
                 [ -f "$global_dir/.default" ] && active_prof=$(cat "$global_dir/.default" | tr -d '\r\n')
