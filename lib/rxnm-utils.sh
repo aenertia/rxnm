@@ -114,6 +114,28 @@ secure_exec() {
     return $ret
 }
 
+# Description: BusyBox-compatible flock with timeout.
+# BusyBox flock lacks -w (wait), so we retry with -n (non-blocking).
+# Arguments: $1 = Timeout (seconds), $2 = File descriptor
+# Returns: 0 on lock acquired, 1 on timeout.
+_flock_wait() {
+    local timeout="$1" fd="$2"
+    # Try GNU flock -w first (fast path for full coreutils)
+    if flock -w "$timeout" "$fd" 2>/dev/null; then
+        return 0
+    fi
+    # Fallback: BusyBox-compatible retry loop with flock -n
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if flock -n "$fd" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
 # Description: Acquires the global singleton lock for the RXNM process.
 # Arguments: $1 = Timeout (seconds)
 # Returns: 0 on success, 1 on failure.
@@ -125,7 +147,7 @@ acquire_global_lock() {
     # FD 8 reserved for global lock — see RXNM_FD_GLOBAL_LOCK in rxnm-constants.sh.
     exec 8>"$GLOBAL_LOCK_FILE"
     
-    if ! flock -w "$timeout" 8; then
+    if ! _flock_wait "$timeout" 8; then
         # Lock exists, check if stale
         if [ -f "$GLOBAL_PID_FILE" ]; then
             local old_pid
@@ -134,7 +156,7 @@ acquire_global_lock() {
                 log_warn "Removing stale lock (PID $old_pid)"
                 rm -f "$GLOBAL_LOCK_FILE" "$GLOBAL_PID_FILE"
                 exec 8>"$GLOBAL_LOCK_FILE"
-                if ! flock -w 2 8; then
+                if ! _flock_wait 2 8; then
                     log_error "Lock race on stale-lock cleanup — concurrent instance won"
                     exec 8>&-
                     return 1
@@ -188,7 +210,7 @@ with_iface_lock() {
     
     eval "exec ${_wi_fd}>\"$_wi_lock_file\""
     
-    if ! flock -w "$_wi_timeout" "$_wi_fd"; then
+    if ! _flock_wait "$_wi_timeout" "$_wi_fd"; then
         log_error "Failed to acquire lock for $_wi_iface after ${_wi_timeout}s"
         eval "exec ${_wi_fd}>&-"
         return 1
@@ -401,10 +423,9 @@ confirm_action() {
     if [ "$force" = "true" ]; then return 0; fi
     if [ "${RXNM_FORMAT:-human}" = "json" ]; then return 0; fi # Implicit yes in JSON mode
     
-    if ! [ -t 0 ]; then
-        log_error "Destructive action requires confirmation or --yes flag."
-        return 1
-    fi
+    # Non-interactive (pipe, script, cron): auto-confirm since there is no
+    # way to prompt. This is safe for embedded/headless devices.
+    if ! [ -t 0 ]; then return 0; fi
     
     printf '⚠ %s [y/N] ' "$msg"
     read -r REPLY

@@ -79,6 +79,7 @@ _task_set_dhcp() {
         --ipv6-pd "$ipv6_pd")
 
     secure_write "${STORAGE_NET_DIR}/75-config-${iface}.network" "$content" "644"
+    reload_networkd
     reconfigure_iface "$iface"
 }
 
@@ -135,6 +136,7 @@ _task_set_static() {
         --dhcp-client-id "$dhcp_id")
 
     secure_write "${STORAGE_NET_DIR}/75-static-${iface}.network" "$content" "644"
+    reload_networkd
     reconfigure_iface "$iface"
 }
 
@@ -149,7 +151,18 @@ _task_set_link() {
     content=$(printf '[Match]\nName=%s\n\n[Network]\nDescription=Link Toggles\nDHCP=%s\nLinkLocalAddressing=%s\nIPv6AcceptRA=%s\n' \
         "$iface" "$dhcp" "$ll" "$ra")
     secure_write "$cfg_file" "$content" "644"
+    reload_networkd
     reconfigure_iface "$iface"
+
+    # Flush addresses for disabled protocols — networkd reconfigure alone
+    # does not remove existing addresses until their lifetimes expire.
+    if [ "$ipv6" = "off" ]; then
+        ip -6 addr flush dev "$iface" scope global 2>/dev/null
+        ip -6 addr flush dev "$iface" scope link 2>/dev/null
+    fi
+    if [ "$ipv4" = "off" ]; then
+        ip -4 addr flush dev "$iface" 2>/dev/null
+    fi
 }
 
 _task_set_hardware() {
