@@ -154,14 +154,21 @@ _task_set_link() {
     reload_networkd
     reconfigure_iface "$iface"
 
-    # Flush addresses for disabled protocols — networkd reconfigure alone
-    # does not remove existing addresses until their lifetimes expire.
+    # Flush addresses for disabled protocols using agent to bypass busybox limitations
     if [ "$ipv6" = "off" ]; then
-        ip -6 addr flush dev "$iface" scope global 2>/dev/null
-        ip -6 addr flush dev "$iface" scope link 2>/dev/null
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --flush-addrs "$iface:6" >/dev/null 2>&1 || true
+        else
+            ip -6 addr flush dev "$iface" scope global 2>/dev/null || true
+            ip -6 addr flush dev "$iface" scope link 2>/dev/null || true
+        fi
     fi
     if [ "$ipv4" = "off" ]; then
-        ip -4 addr flush dev "$iface" 2>/dev/null
+        if [ -x "$RXNM_AGENT_BIN" ]; then
+            "$RXNM_AGENT_BIN" --flush-addrs "$iface:4" >/dev/null 2>&1 || true
+        else
+            ip -4 addr flush dev "$iface" 2>/dev/null || true
+        fi
     fi
 }
 

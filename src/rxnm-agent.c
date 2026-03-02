@@ -1531,6 +1531,121 @@ void print_escaped_string(const char *val) {
     printf("\"");
 }
 
+/* --- Netlink IP Flush Implementation --- */
+int cmd_flush_addrs(const char *arg) {
+    char arg_copy[256];
+    strncpy(arg_copy, arg, sizeof(arg_copy) - 1);
+    arg_copy[sizeof(arg_copy)-1] = '\0';
+
+    char *iface = strtok(arg_copy, ":");
+    char *fam_str = strtok(NULL, ":");
+    int target_family = AF_UNSPEC;
+    if (fam_str) {
+        if (strcmp(fam_str, "4") == 0) target_family = AF_INET;
+        else if (strcmp(fam_str, "6") == 0) target_family = AF_INET6;
+    }
+
+    if (!iface) return 1;
+    int ifindex = if_nametoindex(iface);
+    if (ifindex == 0) {
+        fprintf(stderr, "Interface %s not found\n", iface);
+        return 1;
+    }
+
+    int sock = open_netlink_rt();
+    if (sock < 0) return 1;
+
+    /* Request all addresses */
+    struct { struct nlmsghdr nlh; struct rtgenmsg rtg; } req;
+    memset(&req, 0, sizeof(req));
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+    req.nlh.nlmsg_type = RTM_GETADDR;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = time(NULL);
+    req.rtg.rtgen_family = AF_UNSPEC;
+    send(sock, &req, req.nlh.nlmsg_len, 0);
+
+    #define MAX_FLUSH_ADDRS 64
+    struct ifaddrmsg to_delete[MAX_FLUSH_ADDRS];
+    struct rtattr *rta_local[MAX_FLUSH_ADDRS];
+    struct rtattr *rta_address[MAX_FLUSH_ADDRS];
+    int del_count = 0;
+
+    /* Harvest exact address payloads from dump response */
+    char buf[BUF_SIZE];
+    int len;
+    while ((len = recv(sock, buf, sizeof(buf), 0)) > 0) {
+        struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+        for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+            if (nh->nlmsg_type == NLMSG_DONE || nh->nlmsg_type == NLMSG_ERROR) goto dump_done;
+            if (nh->nlmsg_type == RTM_NEWADDR) {
+                struct ifaddrmsg *ifa = NLMSG_DATA(nh);
+                if (ifa->ifa_index == (unsigned)ifindex) {
+                    if (target_family == AF_UNSPEC || ifa->ifa_family == target_family) {
+                        if (del_count < MAX_FLUSH_ADDRS) {
+                            to_delete[del_count] = *ifa;
+                            struct rtattr *tb[IFA_MAX + 1];
+                            parse_rtattr(tb, IFA_MAX, IFA_RTA(ifa), nh->nlmsg_len - NLMSG_LENGTH(sizeof(*ifa)));
+
+                            if (tb[IFA_LOCAL]) {
+                                int rta_len = tb[IFA_LOCAL]->rta_len;
+                                rta_local[del_count] = malloc(rta_len);
+                                if (rta_local[del_count]) memcpy(rta_local[del_count], tb[IFA_LOCAL], rta_len);
+                            } else {
+                                rta_local[del_count] = NULL;
+                            }
+
+                            if (tb[IFA_ADDRESS]) {
+                                int rta_len = tb[IFA_ADDRESS]->rta_len;
+                                rta_address[del_count] = malloc(rta_len);
+                                if (rta_address[del_count]) memcpy(rta_address[del_count], tb[IFA_ADDRESS], rta_len);
+                            } else {
+                                rta_address[del_count] = NULL;
+                            }
+                            del_count++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+dump_done:
+
+    /* Transmit RTM_DELADDR for each harvested address */
+    for (int i = 0; i < del_count; i++) {
+        struct {
+            struct nlmsghdr n;
+            struct ifaddrmsg ifa;
+            char attrbuf[256];
+        } del_req;
+        memset(&del_req, 0, sizeof(del_req));
+        del_req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+        del_req.n.nlmsg_type = RTM_DELADDR;
+        del_req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+        del_req.n.nlmsg_seq = time(NULL) + i;
+        del_req.ifa = to_delete[i];
+
+        if (rta_local[i]) {
+            add_nl_attr(&del_req.n, sizeof(del_req), IFA_LOCAL, RTA_DATA(rta_local[i]), RTA_PAYLOAD(rta_local[i]));
+            free(rta_local[i]);
+        }
+        if (rta_address[i]) {
+            add_nl_attr(&del_req.n, sizeof(del_req), IFA_ADDRESS, RTA_DATA(rta_address[i]), RTA_PAYLOAD(rta_address[i]));
+            free(rta_address[i]);
+        }
+
+        send(sock, &del_req, del_req.n.nlmsg_len, 0);
+
+        /* Read ACK */
+        char ackbuf[1024];
+        recv(sock, ackbuf, sizeof(ackbuf), 0);
+    }
+    close(sock);
+
+    printf("{\"success\": true, \"action\": \"flush_addrs\", \"iface\": \"%s\", \"count\": %d}\n", iface, del_count);
+    return 0;
+}
+
 void print_json_status() {
     printf("{\n  \"%s\": true,\n  \"agent_version\": \"%s\",\n", KEY_SUCCESS, g_agent_version);
     
@@ -2397,6 +2512,7 @@ char *g_ns_create = NULL;
 char *g_ns_delete = NULL;
 char *g_ns_exec_name = NULL;
 char *g_route_table = NULL;
+char *g_flush_addrs = NULL;
 
 int main(int argc, char *argv[]) {
     atexit(cleanup_ifaces);
@@ -2424,6 +2540,7 @@ int main(int argc, char *argv[]) {
         {"nullify", required_argument, 0, 'N'},
         {"nullify-xdp", required_argument, 0, 'X'},
         {"encode-ssid", required_argument, 0, 'E'},
+        {"flush-addrs", required_argument, 0, 'F'},
         {"ns-create", required_argument, 0, 1001},
         {"ns-delete", required_argument, 0, 1002},
         {"ns-list", no_argument, 0, 1003},
@@ -2434,10 +2551,10 @@ int main(int argc, char *argv[]) {
     };
     
     int opt, option_index = 0;
-    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:E:", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhHtdLcrC:i:g:W:P:T:A:l:M:S:N:X:E:F:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v': cmd_version(); return 0;
-            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n"); return 0;
+            case 'h': printf("Usage: rxnm-agent [options]\n--dump  Full JSON status\n--ns-create <name> Create namespace\n--route-dump <table_id> Dump routing table\n--nullify-xdp <iface>\n--flush-addrs <iface>[:family]\n"); return 0;
             case 'H': cmd_health(); return 0;
             case 't': cmd_time(); return 0;
             case 'L': cmd_is_low_power(); return 0;
@@ -2457,6 +2574,7 @@ int main(int argc, char *argv[]) {
             case 'N': g_nullify_cmd = optarg; break;
             case 'X': g_nullify_xdp_iface = optarg; break;
             case 'E': cmd_encode_ssid(optarg); return 0;
+            case 'F': g_flush_addrs = optarg; break;
             case 1001: g_ns_create = optarg; break;
             case 1002: g_ns_delete = optarg; break;
             case 1003: cmd_ns_list(); return 0;
@@ -2495,6 +2613,7 @@ end_args:
         }
     }
     
+    if (g_flush_addrs) { return cmd_flush_addrs(g_flush_addrs); }
     if (g_atomic_path) { return cmd_atomic_write(g_atomic_path, g_perm_str); }
     if (g_append_path && g_append_line) { return cmd_append_config(g_append_path, g_append_line); }
     if (g_monitor_iface) { cmd_monitor_roam(g_monitor_iface, g_monitor_thresh); return 0; }

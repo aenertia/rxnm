@@ -136,21 +136,26 @@ _task_profile_load_global() {
 
 action_profile() {
     local cmd="${1:-}" name="${2:-}" iface="${3:-}"
-    
+
     if [ "$cmd" = "save" ] || [ "$cmd" = "load" ]; then
         [ -z "$name" ] && name="default"
     fi
     ensure_dirs
-    
+
     if [ -z "$iface" ]; then
         local global_dir="${STORAGE_PROFILES_DIR}/global"
         mkdir -p "$global_dir"
-        
+
         case "$cmd" in
             save)
                 confirm_action "Overwrite existing global profile '$name'?" "$FORCE_ACTION"
-                _task_profile_save_global "$name"
-                json_success '{"action": "saved_global", "name": "'"$name"'"}'
+                if _task_profile_save_global "$name"; then
+                    echo "$name" > "$global_dir/.default"
+                    json_success '{"action": "saved_global", "name": "'"$name"'"}'
+                else
+                    json_error "Failed to save profile: $name"
+                    return 1
+                fi
                 ;;
             load)
                 if [ "$name" = "default" ] && [ ! -d "$global_dir/default" ]; then
@@ -159,14 +164,20 @@ action_profile() {
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
                      find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
                      reload_networkd
+                     echo "default" > "$global_dir/.default"
                      json_success '{"action": "loaded_default", "note": "ephemeral_wiped"}'
                      return 0
                 fi
                 [ ! -d "$global_dir/$name" ] && { json_error "Profile not found: $name"; return 1; }
-                
+
                 confirm_action "Load global profile '$name' into RAM?" "$FORCE_ACTION"
-                _task_profile_load_global "$name"
-                json_success '{"action": "loaded_global", "name": "'"$name"'"}'
+                if _task_profile_load_global "$name"; then
+                    echo "$name" > "$global_dir/.default"
+                    json_success '{"action": "loaded_global", "name": "'"$name"'"}'
+                else
+                    json_error "Failed to load profile: $name"
+                    return 1
+                fi
                 ;;
             list)
                 local _pnames=""
@@ -174,20 +185,47 @@ action_profile() {
                     [ -d "$f" ] && _pnames="${_pnames}${f##*/} "
                 done
                 [ ! -d "$global_dir/default" ] && _pnames="${_pnames}default "
-                
+
+                local active_prof="default"
+                [ -f "$global_dir/.default" ] && active_prof=$(cat "$global_dir/.default" | tr -d '\r\n')
+
                 local json_list="[]"
                 if [ -n "$_pnames" ]; then
                     # shellcheck disable=SC2086
                     json_list=$(printf '%s\n' $_pnames | sort -u | "$JQ_BIN" -R . | "$JQ_BIN" -s .)
                 fi
-                json_success '{"profiles": '"$json_list"', "scope": "global"}'
+
+                json_success '{"profiles": '"$json_list"', "scope": "global", "active": "'"$active_prof"'"}'
+                ;;
+            delete)
+                [ -z "$name" ] && { json_error "Profile name required"; return 1; }
+                [ "$name" = "default" ] && { json_error "Cannot delete default profile"; return 1; }
+                [ ! -d "$global_dir/$name" ] && { json_error "Profile not found: $name"; return 1; }
+
+                confirm_action "Delete global profile '$name'?" "$FORCE_ACTION"
+                rm -rf "$global_dir/$name"
+
+                local active_prof="default"
+                [ -f "$global_dir/.default" ] && active_prof=$(cat "$global_dir/.default" | tr -d '\r\n')
+                if [ "$active_prof" = "$name" ]; then
+                    echo "default" > "$global_dir/.default"
+                fi
+
+                json_success '{"action": "deleted_global", "name": "'"$name"'"}'
                 ;;
             boot)
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.network" -delete
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.netdev" -delete
                 find "${EPHEMERAL_NET_DIR}" -maxdepth 1 -type f -name "*.link" -delete
-                
-                if [ -d "$global_dir/default" ]; then
+
+                local target_prof="default"
+                if [ -f "$global_dir/.default" ]; then
+                    target_prof=$(cat "$global_dir/.default" | tr -d '\r\n')
+                fi
+
+                if [ -d "$global_dir/$target_prof" ]; then
+                    _sync_active_configs "$global_dir/$target_prof" "${EPHEMERAL_NET_DIR}"
+                elif [ "$target_prof" != "default" ] && [ -d "$global_dir/default" ]; then
                     _sync_active_configs "$global_dir/default" "${EPHEMERAL_NET_DIR}"
                 fi
                 _sync_active_configs "${PERSISTENT_NET_DIR}" "${EPHEMERAL_NET_DIR}"
@@ -195,18 +233,18 @@ action_profile() {
         esac
         return 0
     fi
-    
+
     local profile_iface_dir="${STORAGE_PROFILES_DIR}/${iface}"
     mkdir -p "$profile_iface_dir"
-    
+
     local active_cfg="${EPHEMERAL_NET_DIR}/75-config-${iface}.network"
     local active_link="${EPHEMERAL_NET_DIR}/10-rxnm-${iface}.link"
     local active_proxy="${EPHEMERAL_NET_DIR}/proxy-${iface}.conf"
-    
+
     local profile_path="${profile_iface_dir}/${name}.network"
     local profile_link="${profile_iface_dir}/${name}.link"
     local profile_proxy="${profile_iface_dir}/${name}.proxy.conf"
-    
+
     case "$cmd" in
         save)
             if [ ! -f "$active_cfg" ] && [ ! -f "$active_link" ]; then json_error "No active config to save for $iface"; return 1; fi
