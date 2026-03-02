@@ -1,7 +1,9 @@
 # 80-wired.network
+# Match physical ethernet interfaces by name.
+# Type=ethernet is NOT used because it requires 80-net-setup-link.rules
+# which some distributions remove to prevent interface renaming.
 [Match]
 Name=en* eth*
-Type=ethernet
 
 [Network]
 Description=Rocknix Wired Default
