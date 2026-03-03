@@ -153,7 +153,7 @@ while [ "$#" -gt 0 ]; do
         --help|-h) SHOW_HELP="true"; [ "$#" -gt 0 ] && shift ;;
         --stdin)   USE_STDIN="true"; [ "$#" -gt 0 ] && shift ;;
         --version) printf 'RXNM %s (API %s)\n' \
-                           "${RXNM_VERSION:-1.1.0}" "${RXNM_API_VERSION:-1.1}"
+                           "${RXNM_VERSION:-1.1.1}" "${RXNM_API_VERSION:-1.1}"
                        exit 0 ;;
         *)
             if [ -z "$_accumulated_args" ]; then
