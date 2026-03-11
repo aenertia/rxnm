@@ -3,7 +3,7 @@
 # Replaces legacy bridge setups.
 
 [Match]
-Name=usb* rndis*
+Name=usb* rndis* gadget
 Type=gadget
 
 [Link]
