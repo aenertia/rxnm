@@ -128,9 +128,17 @@ action_setup() {
         rm -f "${RUN_DIR}/hosts"
     fi
     
+    # Apply regulatory country code — use saved value or default
+    if [ -f "$STORAGE_COUNTRY_FILE" ]; then
+        iw reg set "$(cat "$STORAGE_COUNTRY_FILE")" 2>/dev/null || true
+    elif [ -n "${DEFAULT_COUNTRY:-}" ]; then
+        iw reg set "$DEFAULT_COUNTRY" 2>/dev/null || true
+        echo "$DEFAULT_COUNTRY" > "$STORAGE_COUNTRY_FILE"
+    fi
+
     fix_permissions
     tune_network_stack "client"
-    
+
     local needs_unblock=0
     for rdir in /sys/class/rfkill/rfkill*; do
         if [ -e "$rdir/soft" ]; then 
@@ -163,6 +171,7 @@ ensure_dirs() {
     [ -d "${STATE_DIR}/iwd" ] || mkdir -p "${STATE_DIR}/iwd"
     [ -d "${STORAGE_PROFILES_DIR}" ] || mkdir -p "${STORAGE_PROFILES_DIR}"
     [ -d "${STORAGE_RESOLVED_DIR}" ] || mkdir -p "${STORAGE_RESOLVED_DIR}"
+    [ -d "${STORAGE_WIFI_DIR}" ] || mkdir -p "${STORAGE_WIFI_DIR}"
     [ -d "$RUN_DIR" ] || mkdir -p "$RUN_DIR"
 }
 

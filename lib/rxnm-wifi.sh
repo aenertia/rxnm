@@ -511,8 +511,11 @@ action_connect() {
                  timeout 15s iwctl station "$iface" "$cmd" "$ssid" >/dev/null 2>&1 || true
             fi
         fi
-        
-        sleep 2
+
+        # WPA3-SAE anti-clogging (status 77) causes IWD to briefly enter
+        # disconnected state between retry rounds. Allow 4s for the async
+        # SAE handshake to settle before checking state.
+        sleep 4
         conn_state=$(iwctl station "$iface" show 2>/dev/null | grep -i "State" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
         case "$conn_state" in
             connected)
@@ -522,8 +525,10 @@ action_connect() {
                 return 0
                 ;;
             disconnected)
-                json_error "Authentication failed - check passphrase or network range"
-                return 0
+                # Don't bail immediately — SAE may still be retrying async.
+                # Treat as another attempt rather than definitive failure.
+                attempts=$((attempts + 1))
+                continue
                 ;;
             connecting|authenticating) attempts=$((attempts + 1)); continue ;;
             *"not found"*|*"no network"*) json_error "Network '$ssid' not found"; return 0 ;;
@@ -531,7 +536,7 @@ action_connect() {
         attempts=$((attempts + 1))
         sleep $((attempts * 2))
     done
-    json_error "Failed to connect to $ssid"
+    json_error "Authentication failed - check passphrase or network range"
     return 0
 }
 

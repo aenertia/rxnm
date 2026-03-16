@@ -11,6 +11,7 @@
 : "${RXNM_VERSION:=1.1.2}"
 : "${RXNM_API_VERSION:=1.1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
+: "${DEFAULT_COUNTRY:=NZ}"
 
 # Feature Flags
 : "${RXNM_EXPERIMENTAL:=false}"
