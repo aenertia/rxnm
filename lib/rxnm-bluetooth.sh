@@ -178,6 +178,86 @@ action_bt_unpair() {
     fi
 }
 
+action_bt_connect() {
+    local mac="$1"
+    [ -z "$mac" ] && { json_error "MAC address required"; return 0; }
+
+    ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
+
+    local adapters; adapters=$(_get_dbus_adapters)
+    local adapter; adapter=$(echo "$adapters" | head -n1)
+    [ -z "$adapter" ] && { json_error "No Bluetooth adapter found"; return 0; }
+
+    local hci_name; hci_name="${adapter##*/}"
+    local path; path="/org/bluez/${hci_name}/dev_$(echo "$mac" | tr ':' '_')"
+
+    log_info "Connecting to $mac..."
+    if busctl call org.bluez "$path" org.bluez.Device1 Connect --timeout=30s >/dev/null 2>&1; then
+        json_success '{"action": "connect", "mac": "'"$mac"'", "status": "connected"}'
+    else
+        if timeout 30s bluetoothctl connect "$mac" >/dev/null 2>&1; then
+            json_success '{"action": "connect", "mac": "'"$mac"'", "status": "connected", "method": "fallback"}'
+        else
+            json_error "Connect failed for $mac"
+        fi
+    fi
+}
+
+action_bt_disconnect() {
+    local mac="$1"
+    [ -z "$mac" ] && { json_error "MAC address required"; return 0; }
+
+    local adapters; adapters=$(_get_dbus_adapters)
+    local adapter; adapter=$(echo "$adapters" | head -n1)
+    [ -z "$adapter" ] && { json_error "No Bluetooth adapter found"; return 0; }
+
+    local hci_name; hci_name="${adapter##*/}"
+    local path; path="/org/bluez/${hci_name}/dev_$(echo "$mac" | tr ':' '_')"
+
+    if busctl call org.bluez "$path" org.bluez.Device1 Disconnect --timeout=5s >/dev/null 2>&1; then
+        json_success '{"action": "disconnect", "mac": "'"$mac"'", "status": "disconnected"}'
+    else
+        if timeout 5s bluetoothctl disconnect "$mac" >/dev/null 2>&1; then
+            json_success '{"action": "disconnect", "mac": "'"$mac"'", "status": "disconnected", "method": "fallback"}'
+        else
+            json_error "Disconnect failed for $mac"
+        fi
+    fi
+}
+
+action_bt_list() {
+    if [ "$RXNM_HAS_JQ" != "true" ]; then
+        json_error "jq required for bluetooth list"
+        return 0
+    fi
+
+    local objects
+    objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null)
+
+    if [ -z "$objects" ]; then
+        json_success '{"devices": []}'
+        return 0
+    fi
+
+    local devices
+    devices=$(echo "$objects" | "$JQ_BIN" -r '
+        [
+            .data[0] | to_entries[] |
+            select(.value["org.bluez.Device1"] != null) |
+            select(.value["org.bluez.Device1"].Paired.data == true) |
+            {
+                mac: .value["org.bluez.Device1"].Address.data,
+                name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                connected: (.value["org.bluez.Device1"].Connected.data == true),
+                paired: true,
+                adapter: .value["org.bluez.Device1"].Adapter.data
+            }
+        ] | sort_by(.name)
+    ')
+
+    json_success "{\"devices\": $devices}"
+}
+
 action_pan_net() {
     local cmd="$1"   # enable/disable
     local iface="$2"

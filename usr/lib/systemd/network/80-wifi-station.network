@@ -16,3 +16,7 @@ IPv6AcceptRA=yes
 [DHCPv4]
 # Metric 20: Established hierarchy: Wired(10) > WiFi(20) > Tether(30)
 RouteMetric=20
+UseDomains=yes
+
+[IPv6AcceptRA]
+UseDomains=yes

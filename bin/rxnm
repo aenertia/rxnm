@@ -745,6 +745,17 @@ case "$CATEGORY" in
     bluetooth)
         ACTION="${1:-scan}"; if [ "$#" -gt 0 ]; then shift; fi
         case "$ACTION" in
+            connect)
+                MAC="${1:-}"; [ "$#" -gt 0 ] && shift
+                [ -z "$MAC" ] && { json_error "MAC address required"; exit 1; }
+                action_bt_connect "$MAC"
+                ;;
+            disconnect)
+                MAC="${1:-}"; [ "$#" -gt 0 ] && shift
+                [ -z "$MAC" ] && { json_error "MAC address required"; exit 1; }
+                action_bt_disconnect "$MAC"
+                ;;
+            list) action_bt_list ;;
             pan)
                 SUBCMD="${1:-}"; [ "$#" -gt 0 ] && shift
                 MODE="client"; SHARE="false"; IP=""
