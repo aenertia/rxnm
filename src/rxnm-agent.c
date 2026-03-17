@@ -1772,7 +1772,26 @@ void print_json_status() {
         if (f) { if (fgets(hostname, sizeof(hostname), f)) hostname[strcspn(hostname, "\n")] = 0; fclose(f); }
     }
     printf("  "); json_print_string("hostname", hostname, true);
-    
+
+    /* Extract DHCP-acquired search domain from systemd-resolved */
+    char domain[256] = "";
+    {
+        FILE *rf = fopen("/run/systemd/resolve/resolv.conf", "r");
+        if (rf) {
+            char line[512];
+            while (fgets(line, sizeof(line), rf)) {
+                if (strncmp(line, "search ", 7) == 0) {
+                    char *d = line + 7;
+                    d[strcspn(d, " \t\n\r")] = '\0';
+                    if (strlen(d) > 0) snprintf(domain, sizeof(domain), "%s", d);
+                    break;
+                }
+            }
+            fclose(rf);
+        }
+    }
+    printf("  "); json_print_string("domain", domain, true);
+
     char p_http[256] = "", p_https[256] = "", p_no[256] = "";
     get_proxy_config(p_http, p_https, p_no);
     bool has_proxy = (strlen(p_http) > 0 || strlen(p_https) > 0 || strlen(p_no) > 0);
