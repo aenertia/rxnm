@@ -368,9 +368,11 @@ case "$CATEGORY" in
         . "${LIB_DIR}/rxnm-virt.sh" 
         . "${LIB_DIR}/rxnm-diagnostics.sh"
         ;;
-    bluetooth) 
-        . "${LIB_DIR}/rxnm-bluetooth.sh" 
+    bluetooth)
+        . "${LIB_DIR}/rxnm-bluetooth.sh"
         . "${LIB_DIR}/rxnm-nullify.sh"
+        . "${LIB_DIR}/rxnm-config-builder.sh"
+        . "${LIB_DIR}/rxnm-templates.sh"
         ;;
     profile) . "${LIB_DIR}/rxnm-profiles.sh" ;;
     system|config) 
