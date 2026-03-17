@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------
 
 # --- Identity & Defaults ---
-: "${RXNM_VERSION:=1.1.2}"
+: "${RXNM_VERSION:=1.1.4-dev}"
 : "${RXNM_API_VERSION:=1.1}"
 : "${DEFAULT_HOSTNAME:=ROCKNIX}"
 : "${DEFAULT_COUNTRY:=NZ}"

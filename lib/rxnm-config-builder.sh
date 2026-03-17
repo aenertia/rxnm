@@ -54,6 +54,7 @@ build_network_config() {
     local ipv6_privacy=""
     local dhcp_client_id=""
     local ipv6_pd="yes"
+    local use_domains=""
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -80,12 +81,18 @@ build_network_config() {
             --ipv6-privacy) ipv6_privacy="$2"; shift 2 ;;
             --dhcp-client-id) dhcp_client_id="$2"; shift 2 ;;
             --ipv6-pd) ipv6_pd="$2"; shift 2 ;;
+            --use-domains) use_domains="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
 
     if [ "$mdns" = "yes" ] && command -v is_avahi_running >/dev/null 2>&1 && is_avahi_running; then
         mdns="no"
+    fi
+
+    # Default: propagate DHCP-acquired search domains to systemd-resolved
+    if [ -z "$use_domains" ] && [ "$dhcp" != "no" ]; then
+        use_domains="yes"
     fi
 
     local safe_match_iface; safe_match_iface=$(_ini_safe "${match_iface}")
@@ -179,8 +186,14 @@ build_network_config() {
              printf "ClientIdentifier=%s\n" "${safe_dhcp_id}"
          fi
          [ "$dhcp" != "no" ] && [ -n "$metric" ] && printf "RouteMetric=%s\n" "${metric}"
+         [ "$use_domains" = "yes" ] && printf "UseDomains=yes\n"
     fi
-    
+
+    # IPv6 domain propagation via RA (mirrors DHCPv4 UseDomains behavior)
+    if [ "$use_domains" = "yes" ]; then
+        printf "\n[IPv6AcceptRA]\nUseDomains=yes\n"
+    fi
+
     if [ "$ipv6_pd" = "no" ]; then
         printf "\n[DHCPv6]\nUseDelegatedPrefix=no\n"
     fi

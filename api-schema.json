@@ -227,12 +227,13 @@
         "autoneg": { "type": "string" },
         "wol": { "type": "string" },
         "mac_policy": { "type": "string" },
-        "name_policy": { "type": "string" }
+        "name_policy": { "type": "string" },
+        "use_domains": { "enum": [ "yes", "no", "route" ] }
       }
     },
     "BluetoothInput": {
       "properties": {
-        "action": { "enum": [ "scan", "pair", "unpair", "pan", "nullify" ] },
+        "action": { "enum": [ "scan", "pair", "unpair", "connect", "disconnect", "list", "pan", "nullify" ] },
         "mac": { "type": "string" },
         "subcommand": { "enum": [ "enable", "disable" ] },
         "mode": { "enum": [ "client", "host" ] },

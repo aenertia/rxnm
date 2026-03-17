@@ -34,23 +34,24 @@ _task_set_member() {
 _task_set_dhcp() {
     local iface="" ssid="" dns="" domains="" routes=""
     local mdns="yes" llmnr="yes" metric="" mtu="" mac=""
-    local ipv6_priv="" dhcp_id="" ipv6_pd="yes"
-    
+    local ipv6_priv="" dhcp_id="" ipv6_pd="yes" use_domains=""
+
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --iface)     iface="$2";     shift 2 ;;
-            --ssid)      ssid="$2";      shift 2 ;;
-            --dns)       dns="$2";       shift 2 ;;
-            --domains)   domains="$2";   shift 2 ;;
-            --routes)    routes="$2";    shift 2 ;;
-            --mdns)      mdns="$2";      shift 2 ;;
-            --llmnr)     llmnr="$2";     shift 2 ;;
-            --metric)    metric="$2";    shift 2 ;;
-            --mtu)       mtu="$2";       shift 2 ;;
-            --mac)       mac="$2";       shift 2 ;;
-            --ipv6-priv) ipv6_priv="$2"; shift 2 ;;
-            --dhcp-id)   dhcp_id="$2";   shift 2 ;;
-            --ipv6-pd)   ipv6_pd="$2";   shift 2 ;;
+            --iface)       iface="$2";       shift 2 ;;
+            --ssid)        ssid="$2";        shift 2 ;;
+            --dns)         dns="$2";         shift 2 ;;
+            --domains)     domains="$2";     shift 2 ;;
+            --routes)      routes="$2";      shift 2 ;;
+            --mdns)        mdns="$2";        shift 2 ;;
+            --llmnr)       llmnr="$2";       shift 2 ;;
+            --metric)      metric="$2";      shift 2 ;;
+            --mtu)         mtu="$2";         shift 2 ;;
+            --mac)         mac="$2";         shift 2 ;;
+            --ipv6-priv)   ipv6_priv="$2";   shift 2 ;;
+            --dhcp-id)     dhcp_id="$2";     shift 2 ;;
+            --ipv6-pd)     ipv6_pd="$2";     shift 2 ;;
+            --use-domains) use_domains="$2"; shift 2 ;;
             *) shift ;;
         esac
     done
@@ -76,7 +77,8 @@ _task_set_dhcp() {
         --mac-addr "$mac" \
         --ipv6-privacy "$ipv6_priv" \
         --dhcp-client-id "$dhcp_id" \
-        --ipv6-pd "$ipv6_pd")
+        --ipv6-pd "$ipv6_pd" \
+        ${use_domains:+--use-domains "$use_domains"})
 
     secure_write "${STORAGE_NET_DIR}/75-config-${iface}.network" "$content" "644"
     reload_networkd
