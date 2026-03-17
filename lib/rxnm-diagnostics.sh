@@ -91,8 +91,14 @@ _status_posix_fallback() {
     local hn="ROCKNIX"
     [ -f /etc/hostname ] && read -r hn < /etc/hostname 2>/dev/null || true
     hn=$(json_escape "$hn")
-    
-    printf '{"success":true,"source":"posix_fallback","hostname":"%s","online":%s,"interfaces":{%s}}\n' "$hn" "$online" "$iface_entries"
+
+    local domain=""
+    if [ -f /run/systemd/resolve/resolv.conf ]; then
+        domain=$(awk '/^search /{print $2; exit}' /run/systemd/resolve/resolv.conf 2>/dev/null)
+    fi
+    domain=$(json_escape "${domain}")
+
+    printf '{"success":true,"source":"posix_fallback","hostname":"%s","domain":"%s","online":%s,"interfaces":{%s}}\n' "$hn" "$domain" "$online" "$iface_entries"
 }
 
 action_status_legacy() {
@@ -109,6 +115,10 @@ action_status_legacy() {
     local filter_iface="${1:-}"
     local hostname="ROCKNIX"
     if [ -f /etc/hostname ]; then read -r hostname < /etc/hostname || true; fi
+    local domain=""
+    if [ -f /run/systemd/resolve/resolv.conf ]; then
+        domain=$(awk '/^search /{print $2; exit}' /run/systemd/resolve/resolv.conf 2>/dev/null)
+    fi
     
     local net_json="[]"
     if command -v networkctl >/dev/null 2>&1; then
@@ -168,6 +178,7 @@ action_status_legacy() {
     # Final Merge
     "$JQ_BIN" -n \
         --arg hn "$hostname" \
+        --arg dm "$domain" \
         --arg filter "$filter_iface" \
         --argjson gp "$global_proxy_json" \
         --argjson net "$net_json" \
@@ -235,6 +246,7 @@ action_status_legacy() {
         {
             success: true,
             hostname: $hn,
+            domain: $dm,
             global_proxy: $gp,
             interfaces: ($normalized_net | map(
                 select($filter == "" or .Name == $filter) |

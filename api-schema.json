@@ -329,6 +329,7 @@
       "required": [ "hostname", "interfaces" ],
       "properties": {
         "hostname": { "type": "string" },
+        "domain": { "type": "string", "description": "DHCP-acquired search domain from systemd-resolved" },
         "global_proxy": { "$ref": "#/definitions/ProxyConfig" },
         "interfaces": { "type": "object", "additionalProperties": { "$ref": "#/definitions/InterfaceDetails" } }
       }
