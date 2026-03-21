@@ -1,0 +1,133 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present Joel Wirāmu Pauling <aenertia@aenertia.net>
+#
+# rxnm plugin: wg-import
+# Imports wg-quick style .conf files into systemd-networkd managed WireGuard tunnels
+#
+# Usage:
+#   rxnm wg-import <conf-file> [interface-name]
+#   rxnm wg-import --help
+#
+# The .conf file is parsed and converted to .netdev + .network pairs under
+# /run/systemd/network/, making the tunnel visible to rxnm status and
+# managed by systemd-networkd.
+
+set -e
+
+# Source rxnm libraries for helpers
+LIB_DIR="${RXNM_LIB_DIR:-/usr/lib/rocknix-network-manager/lib}"
+. "${LIB_DIR}/rxnm-constants.sh"
+. "${LIB_DIR}/rxnm-utils.sh"
+
+# --- Help ---
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    cat <<'HELP'
+wg-import — Import wg-quick .conf into systemd-networkd
+
+Usage:
+  rxnm wg-import <conf-file> [interface-name]
+
+Arguments:
+  conf-file        Path to a wg-quick format .conf file
+  interface-name   Optional interface name (default: derived from filename)
+
+The .conf is parsed for [Interface] and [Peer] sections. The resulting
+WireGuard tunnel is created as systemd-networkd .netdev + .network files
+and activated immediately via networkctl reload.
+
+Example:
+  rxnm wg-import /storage/.config/wireguard/home.conf
+  rxnm wg-import /storage/.config/wireguard/work.conf wg-work
+HELP
+    exit 0
+fi
+
+# --- Parser ---
+
+_parse_wgquick_conf() {
+    local file="$1"
+    _WG_PRIV="" ; _WG_ADDR="" ; _WG_DNS=""
+    _WG_PEER="" ; _WG_ENDP="" ; _WG_IPS="" ; _WG_KEEPALIVE=""
+
+    local section=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Strip inline comments and leading/trailing whitespace
+        line="${line%%#*}"
+        case "$line" in *[!\ ]*) ;; *) continue ;; esac
+
+        case "$line" in
+            "["*"]"*) section="$line" ; continue ;;
+        esac
+
+        local key val
+        key="${line%%=*}"
+        val="${line#*=}"
+        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        val=$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        case "$section" in
+            *Interface*)
+                case "$key" in
+                    PrivateKey) _WG_PRIV="$val" ;;
+                    Address)    _WG_ADDR="$val" ;;
+                    DNS)        _WG_DNS="$val" ;;
+                esac
+                ;;
+            *Peer*)
+                case "$key" in
+                    PublicKey)           _WG_PEER="$val" ;;
+                    Endpoint)            _WG_ENDP="$val" ;;
+                    AllowedIPs)          _WG_IPS="$val" ;;
+                    PersistentKeepalive) _WG_KEEPALIVE="$val" ;;
+                esac
+                ;;
+        esac
+    done < "$file"
+}
+
+# --- Main ---
+
+FILE="${1:-}"
+[ -z "$FILE" ] && { json_error "Usage: rxnm wg-import <conf-file> [name]"; exit 1; }
+[ ! -f "$FILE" ] && { json_error "File not found: $FILE"; exit 1; }
+
+shift
+NAME="${1:-}"
+if [ -z "$NAME" ]; then
+    NAME=$(basename "$FILE" .conf)
+fi
+! validate_interface_name "$NAME" && { json_error "Invalid interface name: $NAME"; exit 1; }
+
+_parse_wgquick_conf "$FILE"
+
+if [ -z "$_WG_PRIV" ] || [ -z "$_WG_PEER" ] || [ -z "$_WG_ENDP" ] || [ -z "$_WG_ADDR" ]; then
+    json_error "Conf file missing required fields (PrivateKey, PublicKey, Endpoint, Address)"
+    exit 1
+fi
+
+# Build systemd-networkd .netdev
+ensure_dirs
+netdev_file="${STORAGE_NET_DIR}/90-${NAME}.netdev"
+netdev_content=$(printf '[NetDev]\nName=%s\nKind=wireguard\n\n[WireGuard]\nPrivateKey=%s\n' "$NAME" "$_WG_PRIV")
+
+# Build systemd-networkd .network
+network_file="${STORAGE_NET_DIR}/90-${NAME}.network"
+network_content=$(printf '[Match]\nName=%s\n\n[Network]\nAddress=%s\n' "$NAME" "$_WG_ADDR")
+
+[ -n "$_WG_DNS" ] && network_content=$(printf '%s\nDNS=%s' "$network_content" "$_WG_DNS")
+[ -z "$_WG_IPS" ] && _WG_IPS="0.0.0.0/0"
+
+peer_section=$(printf '\n[WireGuardPeer]\nPublicKey=%s\nEndpoint=%s\nAllowedIPs=%s\n' "$_WG_PEER" "$_WG_ENDP" "$_WG_IPS")
+[ -n "$_WG_KEEPALIVE" ] && peer_section=$(printf '%sPersistentKeepalive=%s\n' "$peer_section" "$_WG_KEEPALIVE")
+network_content=$(printf '%s%s' "$network_content" "$peer_section")
+
+# Write with restricted permissions (contains private keys)
+{ set +x; } 2>/dev/null
+secure_write "$netdev_file" "$netdev_content" "600"
+secure_write "$network_file" "$network_content" "600"
+
+reload_networkd
+
+json_success '{"type": "wireguard", "iface": "'"$NAME"'", "status": "imported", "source": "'"$FILE"'"}'
