@@ -118,7 +118,7 @@ _bt_collect_devices() {
         bluetoothctl devices 2>/dev/null | grep -E '^Device [0-9A-Fa-f]{2}:' > "$devfile" || true
     fi
 
-    while read -r _ mac name; do
+    while IFS=' ' read -r _ mac name; do
         [ -z "$mac" ] && continue
         local dev_json
         dev_json=$(_bt_query_device "$mac" "$name")
@@ -386,7 +386,7 @@ action_bt_auto_pair() {
         devfile=$(mktemp) || continue
         bluetoothctl devices 2>/dev/null | grep -E '^Device [0-9A-Fa-f]{2}:' > "$devfile" || true
 
-        while read -r _ mac name; do
+        while IFS=' ' read -r _ mac name; do
             [ -z "$mac" ] && continue
 
             # Check if already paired — skip
@@ -475,7 +475,7 @@ action_bt_live_scan() {
         bluetoothctl devices 2>/dev/null | grep -E '^Device [0-9A-Fa-f]{2}:' > "$devfile" || true
 
         # Read from file (NOT pipe) to stay in current shell for stdout
-        while read -r _ mac name; do
+        while IFS=' ' read -r _ mac name; do
             [ -z "$mac" ] && continue
             grep -q "$mac" "$seen_file" 2>/dev/null && continue
             printf '%s\n' "$mac" >> "$seen_file"
