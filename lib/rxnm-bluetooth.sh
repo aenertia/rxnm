@@ -258,6 +258,215 @@ action_bt_list() {
     json_success "{\"devices\": $devices}"
 }
 
+action_bt_enable() {
+    log_info "Enabling Bluetooth..."
+    if command -v rfkill >/dev/null; then
+        rfkill unblock bluetooth 2>/dev/null || true
+    fi
+    if command -v systemctl >/dev/null && ! is_service_active "bluetooth"; then
+        systemctl start bluetooth 2>/dev/null || {
+            json_error "Failed to start bluetooth.service"
+            return 0
+        }
+        sleep 1
+    fi
+    ensure_bluetooth_power || { json_error "Bluetooth hardware not available"; return 0; }
+    json_success '{"action": "enable", "status": "enabled"}'
+}
+
+action_bt_disable() {
+    log_info "Disabling Bluetooth..."
+    if command -v rfkill >/dev/null; then
+        rfkill block bluetooth 2>/dev/null || true
+    fi
+    json_success '{"action": "disable", "status": "disabled"}'
+}
+
+# Auto-pair: scan for first matching device, pair+trust+connect, then exit.
+# Options: --filter input (match Icon=input-*), --mac XX:XX (specific device),
+#          --timeout N (default 30s)
+action_bt_auto_pair() {
+    local filter="" mac="" timeout_sec=30
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --filter) filter="${2:-}"; shift 2 ;;
+            --mac) mac="${2:-}"; shift 2 ;;
+            --timeout) timeout_sec="${2:-30}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
+
+    # Register temporary agent for passkey auto-accept
+    local agent_pid=""
+    if command -v bluetoothctl >/dev/null; then
+        (echo "agent NoInputNoOutput"; echo "default-agent"; sleep "$timeout_sec") | bluetoothctl >/dev/null 2>&1 &
+        agent_pid=$!
+        sleep 0.5
+    fi
+
+    # Start discovery
+    local adapters; adapters=$(_get_dbus_adapters)
+    for adapter in $adapters; do
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
+    done
+
+    log_info "Auto-pair: scanning (filter=${filter:-any}, timeout=${timeout_sec}s)..."
+
+    local elapsed=0 paired_mac="" paired_name=""
+    while [ "$elapsed" -lt "$timeout_sec" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+
+        # Query all devices
+        local objects
+        objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null) || continue
+        [ "$RXNM_HAS_JQ" = "true" ] || continue
+
+        # Find first unpaired device matching filter
+        local match
+        match=$(echo "$objects" | "$JQ_BIN" -r --arg filter "$filter" --arg mac "$mac" '
+            .data[0] | to_entries[] |
+            select(.value["org.bluez.Device1"] != null) |
+            select(.value["org.bluez.Device1"].Paired.data != true) |
+            {
+                path: .key,
+                mac: .value["org.bluez.Device1"].Address.data,
+                name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
+                rssi: (.value["org.bluez.Device1"].RSSI.data // -100)
+            } |
+            select(
+                ($mac != "" and .mac == $mac) or
+                ($filter == "input" and (.icon | startswith("input"))) or
+                ($filter == "" and $mac == "")
+            )
+        ' 2>/dev/null | head -n1)
+
+        [ -z "$match" ] && continue
+
+        paired_mac=$(echo "$match" | "$JQ_BIN" -r '.mac')
+        paired_name=$(echo "$match" | "$JQ_BIN" -r '.name')
+        local dev_path
+        dev_path=$(echo "$match" | "$JQ_BIN" -r '.path')
+
+        log_info "Found device: $paired_name ($paired_mac), pairing..."
+
+        # Trust + Pair + Connect
+        busctl set-property org.bluez "$dev_path" org.bluez.Device1 Trusted b true 2>/dev/null || true
+        if busctl call org.bluez "$dev_path" org.bluez.Device1 Pair --timeout=15s >/dev/null 2>&1; then
+            log_info "Paired with $paired_name, connecting..."
+            busctl call org.bluez "$dev_path" org.bluez.Device1 Connect --timeout=15s >/dev/null 2>&1 || true
+        else
+            # Fallback
+            timeout 15s bluetoothctl pair "$paired_mac" >/dev/null 2>&1 || true
+            timeout 10s bluetoothctl connect "$paired_mac" >/dev/null 2>&1 || true
+        fi
+        break
+    done
+
+    # Cleanup
+    for adapter in $adapters; do
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
+    done
+    [ -n "$agent_pid" ] && kill "$agent_pid" 2>/dev/null
+
+    if [ -n "$paired_mac" ]; then
+        json_success '{"status": "paired", "device": {"mac": "'"$paired_mac"'", "name": "'"$paired_name"'"}}'
+    else
+        json_success '{"status": "timeout", "message": "No matching device found within '"$timeout_sec"'s"}'
+    fi
+}
+
+# Live-scan: stream discovered devices as JSON-per-line to stdout.
+# Runs until killed or --timeout expires.
+action_bt_live_scan() {
+    local timeout_sec=60
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --timeout) timeout_sec="${2:-60}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
+
+    local adapters; adapters=$(_get_dbus_adapters)
+    for adapter in $adapters; do
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
+    done
+
+    local prev_macs="" elapsed=0
+    while [ "$elapsed" -lt "$timeout_sec" ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+
+        local objects
+        objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null) || continue
+        [ "$RXNM_HAS_JQ" = "true" ] || continue
+
+        # Emit JSON for each device, deduplicated by MAC
+        local current_macs
+        current_macs=$(echo "$objects" | "$JQ_BIN" -r '
+            .data[0] | to_entries[] |
+            select(.value["org.bluez.Device1"] != null) |
+            {
+                mac: .value["org.bluez.Device1"].Address.data,
+                name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
+                rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
+                paired: (.value["org.bluez.Device1"].Paired.data == true),
+                connected: (.value["org.bluez.Device1"].Connected.data == true)
+            } | @json
+        ' 2>/dev/null)
+
+        echo "$current_macs" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local this_mac
+            this_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
+            # Only emit if not already reported
+            case "$prev_macs" in
+                *"$this_mac"*) ;;
+                *) echo "{\"event\":\"added\",$( echo "$line" | sed 's/^{//' )}" ;;
+            esac
+        done
+
+        prev_macs="$prev_macs $(echo "$current_macs" | "$JQ_BIN" -r '.mac' 2>/dev/null | tr '\n' ' ')"
+    done
+
+    for adapter in $adapters; do
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
+    done
+}
+
+action_bt_save() {
+    local backup="/storage/roms/backups/bluetooth.tar"
+    if [ -d /storage/.config/bluetooth ]; then
+        mkdir -p "$(dirname "$backup")"
+        tar cf "$backup" -C /storage/.config bluetooth 2>/dev/null
+        json_success '{"action": "save", "status": "saved", "path": "'"$backup"'"}'
+    else
+        json_success '{"action": "save", "status": "nothing_to_save"}'
+    fi
+}
+
+action_bt_restore() {
+    local backup="/storage/roms/backups/bluetooth.tar"
+    if [ -f "$backup" ]; then
+        mkdir -p /storage/.config/bluetooth
+        tar xf "$backup" -C /storage/.config 2>/dev/null
+        if command -v systemctl >/dev/null; then
+            systemctl restart bluetooth 2>/dev/null || true
+        fi
+        json_success '{"action": "restore", "status": "restored"}'
+    else
+        json_success '{"action": "restore", "status": "no_backup"}'
+    fi
+}
+
 action_pan_net() {
     local cmd="$1"   # enable/disable
     local iface="$2"

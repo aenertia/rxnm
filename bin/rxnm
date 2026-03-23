@@ -776,6 +776,12 @@ case "$CATEGORY" in
                     disable) action_pan_net "disable" "" "" "" "" "" ;;
                 esac
                 ;;
+            enable) action_bt_enable ;;
+            disable) action_bt_disable ;;
+            auto-pair) action_bt_auto_pair "$@" ;;
+            live-scan) action_bt_live_scan "$@" ;;
+            save) action_bt_save ;;
+            restore) action_bt_restore ;;
             scan) action_bt_scan ;;
             pair)
                 MAC="${1:-}"; [ "$#" -gt 0 ] && shift
