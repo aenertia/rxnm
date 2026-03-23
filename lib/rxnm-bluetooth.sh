@@ -7,6 +7,18 @@
 # ARCHITECTURE: Logic / Bluetooth
 # -----------------------------------------------------------------------------
 
+# Map BlueZ Icon to ES menu icon name
+# BlueZ: input-gaming, input-keyboard, audio-headphones, computer, phone, etc.
+# ES expects: joystick, keyboard, mouse, audio, unknown
+_bt_icon_map='
+  if startswith("input-gam") or startswith("input-joy") then "joystick"
+  elif startswith("input-key") then "keyboard"
+  elif startswith("input-mouse") or startswith("input-tablet") then "mouse"
+  elif startswith("audio") then "audio"
+  else "unknown"
+  end
+'
+
 # Internal Helper: Get list of adapter object paths from BlueZ
 _get_dbus_adapters() {
     if [ "$RXNM_HAS_JQ" = "true" ]; then
@@ -78,9 +90,10 @@ action_bt_scan() {
 
     log_info "Scanning for Bluetooth devices (Event-driven, up to ${timeout_sec}s)..."
     
-    # Start discovery in background via busctl (low latency)
+    # Start dual-transport discovery (BR/EDR + LE) via busctl
     local adapters; adapters=$(_get_dbus_adapters)
     for adapter in $adapters; do
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 SetDiscoveryFilter 'a{sv}' 1 Transport s auto >/dev/null 2>&1 || true
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
     done
 
@@ -115,7 +128,7 @@ action_bt_scan() {
             {
                 mac: .value["org.bluez.Device1"].Address.data,
                 name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
-                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
+                icon: ((.value["org.bluez.Device1"].Icon.data // "unknown") | '"${_bt_icon_map}"'),
                 rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
                 connected: (.value["org.bluez.Device1"].Connected.data == true),
                 paired: (.value["org.bluez.Device1"].Paired.data == true),
@@ -249,7 +262,7 @@ action_bt_list() {
             {
                 mac: .value["org.bluez.Device1"].Address.data,
                 name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
-                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
+                icon: ((.value["org.bluez.Device1"].Icon.data // "unknown") | '"${_bt_icon_map}"'),
                 connected: (.value["org.bluez.Device1"].Connected.data == true),
                 paired: true,
                 adapter: .value["org.bluez.Device1"].Adapter.data
@@ -398,6 +411,8 @@ action_bt_live_scan() {
 
     local adapters; adapters=$(_get_dbus_adapters)
     for adapter in $adapters; do
+        # Set discovery filter to dual transport (BR/EDR + LE) to find all devices
+        busctl call org.bluez "$adapter" org.bluez.Adapter1 SetDiscoveryFilter 'a{sv}' 1 Transport s auto >/dev/null 2>&1 || true
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
     done
 
@@ -412,19 +427,19 @@ action_bt_live_scan() {
         objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null) || continue
         [ "$RXNM_HAS_JQ" = "true" ] || continue
 
-        # Get current device set
+        # Get current device set as JSON-per-line (one object per line)
         local current_macs_file=$(mktemp)
-        echo "$objects" | "$JQ_BIN" -r '
+        echo "$objects" | "$JQ_BIN" -c --argjson iconmap "null" '
             .data[0] | to_entries[] |
             select(.value["org.bluez.Device1"] != null) |
             {
                 mac: .value["org.bluez.Device1"].Address.data,
                 name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
-                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
+                icon: ((.value["org.bluez.Device1"].Icon.data // "unknown") | '"${_bt_icon_map}"'),
                 rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
                 paired: (.value["org.bluez.Device1"].Paired.data == true),
                 connected: (.value["org.bluez.Device1"].Connected.data == true)
-            } | @json
+            }
         ' 2>/dev/null > "$current_macs_file"
 
         # Emit added events (new MACs not in prev)
@@ -433,7 +448,7 @@ action_bt_live_scan() {
             local this_mac
             this_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
             if ! grep -q "\"$this_mac\"" "$prev_macs_file" 2>/dev/null; then
-                echo "{\"event\":\"added\",$(echo "$line" | sed 's/^{//')}"
+                echo "$line" | "$JQ_BIN" -c '. + {event: "added"}'
             fi
         done < "$current_macs_file"
 
