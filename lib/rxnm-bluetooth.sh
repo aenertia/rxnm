@@ -110,11 +110,12 @@ action_bt_scan() {
     local devices
     devices=$(echo "$objects" | "$JQ_BIN" -r '
         [
-            .data[0] | to_entries[] | 
+            .data[0] | to_entries[] |
             select(.value["org.bluez.Device1"] != null) |
             {
                 mac: .value["org.bluez.Device1"].Address.data,
                 name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
                 rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
                 connected: (.value["org.bluez.Device1"].Connected.data == true),
                 paired: (.value["org.bluez.Device1"].Paired.data == true),
@@ -248,6 +249,7 @@ action_bt_list() {
             {
                 mac: .value["org.bluez.Device1"].Address.data,
                 name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
+                icon: (.value["org.bluez.Device1"].Icon.data // "unknown"),
                 connected: (.value["org.bluez.Device1"].Connected.data == true),
                 paired: true,
                 adapter: .value["org.bluez.Device1"].Adapter.data
@@ -399,7 +401,9 @@ action_bt_live_scan() {
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
     done
 
-    local prev_macs="" elapsed=0
+    local prev_macs_file=$(mktemp)
+    > "$prev_macs_file"
+    local elapsed=0
     while [ "$elapsed" -lt "$timeout_sec" ]; do
         sleep 1
         elapsed=$((elapsed + 1))
@@ -408,9 +412,9 @@ action_bt_live_scan() {
         objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null) || continue
         [ "$RXNM_HAS_JQ" = "true" ] || continue
 
-        # Emit JSON for each device, deduplicated by MAC
-        local current_macs
-        current_macs=$(echo "$objects" | "$JQ_BIN" -r '
+        # Get current device set
+        local current_macs_file=$(mktemp)
+        echo "$objects" | "$JQ_BIN" -r '
             .data[0] | to_entries[] |
             select(.value["org.bluez.Device1"] != null) |
             {
@@ -421,21 +425,32 @@ action_bt_live_scan() {
                 paired: (.value["org.bluez.Device1"].Paired.data == true),
                 connected: (.value["org.bluez.Device1"].Connected.data == true)
             } | @json
-        ' 2>/dev/null)
+        ' 2>/dev/null > "$current_macs_file"
 
-        echo "$current_macs" | while IFS= read -r line; do
+        # Emit added events (new MACs not in prev)
+        while IFS= read -r line; do
             [ -z "$line" ] && continue
             local this_mac
             this_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
-            # Only emit if not already reported
-            case "$prev_macs" in
-                *"$this_mac"*) ;;
-                *) echo "{\"event\":\"added\",$( echo "$line" | sed 's/^{//' )}" ;;
-            esac
-        done
+            if ! grep -q "\"$this_mac\"" "$prev_macs_file" 2>/dev/null; then
+                echo "{\"event\":\"added\",$(echo "$line" | sed 's/^{//')}"
+            fi
+        done < "$current_macs_file"
 
-        prev_macs="$prev_macs $(echo "$current_macs" | "$JQ_BIN" -r '.mac' 2>/dev/null | tr '\n' ' ')"
+        # Emit removed events (MACs in prev but not current)
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local old_mac
+            old_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
+            if ! grep -q "\"$old_mac\"" "$current_macs_file" 2>/dev/null; then
+                echo "{\"event\":\"removed\",\"mac\":\"$old_mac\"}"
+            fi
+        done < "$prev_macs_file"
+
+        cp "$current_macs_file" "$prev_macs_file"
+        rm -f "$current_macs_file"
     done
+    rm -f "$prev_macs_file"
 
     for adapter in $adapters; do
         busctl call org.bluez "$adapter" org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
