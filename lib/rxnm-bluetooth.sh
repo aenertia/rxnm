@@ -20,12 +20,23 @@ _bt_icon_map='
 '
 
 # Internal Helper: Get list of adapter object paths from BlueZ
+# NOTE: busctl GetManagedObjects --json=short is broken on systemd 255 for
+# complex types (a{oa{sa{sv}}}). Use hciconfig + sysfs as fallback.
 _get_dbus_adapters() {
+    # Try busctl first (works on newer systemd)
     if [ "$RXNM_HAS_JQ" = "true" ]; then
-        # Query ObjectManager for objects implementing the Adapter1 interface
-        busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | \
-        "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key' 2>/dev/null || echo ""
+        local result
+        result=$(busctl --timeout=2s call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null | \
+            "$JQ_BIN" -r '.data[0] | to_entries[] | select(.value["org.bluez.Adapter1"] != null) | .key' 2>/dev/null)
+        if [ -n "$result" ]; then
+            echo "$result"
+            return
+        fi
     fi
+    # Fallback: enumerate from sysfs
+    for hci in /sys/class/bluetooth/hci*; do
+        [ -d "$hci" ] && echo "/org/bluez/$(basename "$hci")"
+    done
 }
 
 # Description: Ensures Bluetooth is unblocked via rfkill and powered on via BlueZ
@@ -49,30 +60,24 @@ ensure_bluetooth_power() {
         fi
     fi
 
-    # 2. Check DBus connectivity and Power State
-    if ! is_service_active "bluetooth" && ! pgrep bluetoothd >/dev/null; then
+    # 2. Check BlueZ is running
+    if ! pgrep -x bluetoothd >/dev/null 2>&1; then
+        if command -v systemctl >/dev/null && ! systemctl is-active --quiet bluetooth 2>/dev/null; then
+            return 1
+        fi
+    fi
+
+    # 3. Check adapter exists
+    if [ ! -d /sys/class/bluetooth/hci0 ]; then
+        log_debug "No Bluetooth adapter found in sysfs"
         return 1
     fi
 
-    local adapters; adapters=$(_get_dbus_adapters)
-    if [ -z "$adapters" ]; then
-        # If no adapters seen via DBus, bluetoothctl is likely to fail/abort
-        log_debug "No Bluetooth adapters found via DBus ObjectManager"
-        return 1
-    fi
-
-    # Check if any adapter is powered
-    local powered="false"
-    for adapter in $adapters; do
-        local p; p=$(busctl get-property org.bluez "$adapter" org.bluez.Adapter1 Powered --json=short 2>/dev/null | "$JQ_BIN" -r '.data' || echo "false")
-        if [ "$p" = "true" ]; then powered="true"; break; fi
-    done
-
-    if [ "$powered" = "false" ]; then
+    # 4. Ensure powered on
+    local powered
+    powered=$(bluetoothctl show 2>/dev/null | grep "Powered:" | awk '{print $2}')
+    if [ "$powered" != "yes" ]; then
         log_info "Powering on Bluetooth adapter..."
-        # Use first available adapter
-        local first; first=$(echo "$adapters" | head -n1)
-        busctl set-property org.bluez "$first" org.bluez.Adapter1 Powered b true 2>/dev/null || \
         timeout 2s bluetoothctl power on >/dev/null 2>&1 || return 1
         sleep 0.5
     fi
@@ -409,67 +414,53 @@ action_bt_live_scan() {
 
     ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
 
-    local adapters; adapters=$(_get_dbus_adapters)
-    for adapter in $adapters; do
-        # Set discovery filter to dual transport (BR/EDR + LE) to find all devices
-        busctl call org.bluez "$adapter" org.bluez.Adapter1 SetDiscoveryFilter 'a{sv}' 1 Transport s auto >/dev/null 2>&1 || true
-        busctl call org.bluez "$adapter" org.bluez.Adapter1 StartDiscovery >/dev/null 2>&1 || true
-    done
+    # bluetoothctl scan in background (dual transport BR/EDR + LE)
+    # Poll bluetoothctl devices + info for results (busctl --json=short is
+    # broken on systemd 255 for complex ObjectManager responses)
+    bluetoothctl --timeout "$timeout_sec" scan on >/dev/null 2>&1 &
+    local scan_pid=$!
+    trap "kill $scan_pid 2>/dev/null" EXIT
 
-    local prev_macs_file=$(mktemp)
-    > "$prev_macs_file"
+    local seen_file=$(mktemp)
+    > "$seen_file"
     local elapsed=0
-    while [ "$elapsed" -lt "$timeout_sec" ]; do
-        sleep 1
-        elapsed=$((elapsed + 1))
+    while [ "$elapsed" -lt "$timeout_sec" ] && kill -0 "$scan_pid" 2>/dev/null; do
+        sleep 2
+        elapsed=$((elapsed + 2))
 
-        local objects
-        objects=$(busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects --json=short 2>/dev/null) || continue
-        [ "$RXNM_HAS_JQ" = "true" ] || continue
+        # Get device list snapshot (filter strictly for "Device XX:XX" lines)
+        local devfile=$(mktemp)
+        bluetoothctl devices 2>/dev/null | grep -E '^Device [0-9A-Fa-f]{2}:' > "$devfile" || true
 
-        # Get current device set as JSON-per-line (one object per line)
-        local current_macs_file=$(mktemp)
-        echo "$objects" | "$JQ_BIN" -c --argjson iconmap "null" '
-            .data[0] | to_entries[] |
-            select(.value["org.bluez.Device1"] != null) |
-            {
-                mac: .value["org.bluez.Device1"].Address.data,
-                name: (.value["org.bluez.Device1"].Name.data // .value["org.bluez.Device1"].Alias.data // "Unknown"),
-                icon: ((.value["org.bluez.Device1"].Icon.data // "unknown") | '"${_bt_icon_map}"'),
-                rssi: (.value["org.bluez.Device1"].RSSI.data // -100),
-                paired: (.value["org.bluez.Device1"].Paired.data == true),
-                connected: (.value["org.bluez.Device1"].Connected.data == true)
-            }
-        ' 2>/dev/null > "$current_macs_file"
+        while read -r _ mac name; do
+            [ -z "$mac" ] && continue
+            grep -q "$mac" "$seen_file" 2>/dev/null && continue
+            echo "$mac" >> "$seen_file"
 
-        # Emit added events (new MACs not in prev)
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            local this_mac
-            this_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
-            if ! grep -q "\"$this_mac\"" "$prev_macs_file" 2>/dev/null; then
-                echo "$line" | "$JQ_BIN" -c '. + {event: "added"}'
+            local info icon="unknown" paired="false" connected="false"
+            info=$(bluetoothctl info "$mac" 2>/dev/null)
+            local raw_icon
+            raw_icon=$(echo "$info" | sed -n 's/.*Icon: *//p' | head -1)
+            if [ -n "$raw_icon" ]; then
+                case "$raw_icon" in
+                    input-gam*|input-joy*) icon="joystick" ;;
+                    input-key*)            icon="keyboard" ;;
+                    input-mouse*|input-tab*) icon="mouse" ;;
+                    audio*)                icon="audio" ;;
+                    *)                     icon="unknown" ;;
+                esac
             fi
-        done < "$current_macs_file"
+            echo "$info" | grep -q "Paired: yes" && paired="true"
+            echo "$info" | grep -q "Connected: yes" && connected="true"
 
-        # Emit removed events (MACs in prev but not current)
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            local old_mac
-            old_mac=$(echo "$line" | "$JQ_BIN" -r '.mac' 2>/dev/null)
-            if ! grep -q "\"$old_mac\"" "$current_macs_file" 2>/dev/null; then
-                echo "{\"event\":\"removed\",\"mac\":\"$old_mac\"}"
-            fi
-        done < "$prev_macs_file"
-
-        cp "$current_macs_file" "$prev_macs_file"
-        rm -f "$current_macs_file"
+            printf '{"event":"added","mac":"%s","name":"%s","icon":"%s","paired":%s,"connected":%s}\n' \
+                "$mac" "$name" "$icon" "$paired" "$connected"
+        done < "$devfile"
+        rm -f "$devfile"
     done
-    rm -f "$prev_macs_file"
-
-    for adapter in $adapters; do
-        busctl call org.bluez "$adapter" org.bluez.Adapter1 StopDiscovery >/dev/null 2>&1 || true
-    done
+    rm -f "$seen_file"
+    kill "$scan_pid" 2>/dev/null
+    wait "$scan_pid" 2>/dev/null
 }
 
 action_bt_save() {
