@@ -193,8 +193,9 @@ action_bt_scan() {
 
     log_info "Scanning for Bluetooth devices (${timeout_sec}s)..."
 
-    # Start discovery (background bluetoothctl for reliable dual-transport)
-    bluetoothctl --timeout "$timeout_sec" scan on >/dev/null 2>&1 &
+    # Start LE discovery (RTL8821CS needs explicit 'scan le' — 'scan on' with
+    # transport=auto doesn't trigger LE scanning on some adapters)
+    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
     local scan_pid=$!
     sleep "$timeout_sec"
     kill "$scan_pid" 2>/dev/null
@@ -231,7 +232,7 @@ action_bt_pair() {
     log_info "Attempting to pair with $mac..."
 
     # Start brief scan to re-discover device (BLE devices drop from cache quickly)
-    bluetoothctl --timeout 5 scan on >/dev/null 2>&1 &
+    bluetoothctl --timeout 5 scan le >/dev/null 2>&1 &
     local scan_pid=$!
     sleep 3
 
@@ -381,7 +382,7 @@ action_bt_auto_pair() {
     fi
 
     # Start discovery
-    bluetoothctl --timeout "$timeout_sec" scan on >/dev/null 2>&1 &
+    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
     local scan_pid=$!
 
     log_info "Auto-pair: scanning (filter=${filter:-any}, timeout=${timeout_sec}s)..."
@@ -463,7 +464,7 @@ action_bt_live_scan() {
     ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
 
     # Background bluetoothctl scan (reliable dual-transport BR/EDR + LE)
-    bluetoothctl --timeout "$timeout_sec" scan on >/dev/null 2>&1 &
+    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
     local scan_pid=$!
 
     local seen_file
