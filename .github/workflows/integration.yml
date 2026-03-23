@@ -2,9 +2,9 @@ name: RXNM CI (Native Nspawn)
 
 on:
   push:
-    branches: [ "main", "master", "v1.1.0", "v1.1.1", "1.1.x-CI", "agentic-review" ]
+    branches: [ "main", "master", "v1.1.0", "v1.1.1", "1.1.x-CI", "v1.2.0-dev" ]
   pull_request:
-    branches: [ "main", "master", "v1.1.0", "v1.1.1" ]
+    branches: [ "main", "master", "v1.1.0", "v1.1.1", "v1.2.0-dev" ]
 
 jobs:
   unit-and-posix:
