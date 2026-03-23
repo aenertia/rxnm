@@ -220,31 +220,40 @@ action_bt_pair() {
 
     ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
 
-    local adapters adapter hci_name path
-    adapters=$(_get_dbus_adapters)
-    adapter=$(printf '%s' "$adapters" | head -n1)
-    [ -z "$adapter" ] && { json_error "No Bluetooth adapter found"; return 0; }
-    hci_name="${adapter##*/}"
-    path="/org/bluez/${hci_name}/dev_$(printf '%s' "$mac" | tr ':' '_')"
+    # Register temporary agent for passkey auto-accept (NoInputNoOutput)
+    local agent_pid=""
+    # shellcheck disable=SC2016
+    (printf 'agent NoInputNoOutput\ndefault-agent\n'; sleep 35) \
+        | bluetoothctl >/dev/null 2>&1 &
+    agent_pid=$!
+    sleep 0.5
 
     log_info "Attempting to pair with $mac..."
 
-    # Trust first (required for auto-accept)
-    busctl set-property org.bluez "$path" org.bluez.Device1 Trusted b true \
-        2>/dev/null || true
+    # Start brief scan to re-discover device (BLE devices drop from cache quickly)
+    bluetoothctl --timeout 5 scan on >/dev/null 2>&1 &
+    local scan_pid=$!
+    sleep 3
 
-    # Try busctl pair (fast path)
-    if busctl call org.bluez "$path" org.bluez.Device1 Pair \
-        --timeout=30s >/dev/null 2>&1; then
+    # Trust + Pair via bluetoothctl (reliable, handles all PIN modes)
+    local paired="false"
+    timeout 5s bluetoothctl trust "$mac" >/dev/null 2>&1 || true
+    if timeout 30s bluetoothctl pair "$mac" >/dev/null 2>&1; then
+        paired="true"
+        timeout 10s bluetoothctl connect "$mac" >/dev/null 2>&1 || true
+    fi
+
+    kill "$scan_pid" 2>/dev/null
+    wait "$scan_pid" 2>/dev/null
+
+    # Cleanup agent
+    kill "$agent_pid" 2>/dev/null
+    wait "$agent_pid" 2>/dev/null
+
+    if [ "$paired" = "true" ]; then
         json_success '{"action":"pair","mac":"'"$mac"'","status":"paired"}'
     else
-        # Fallback: bluetoothctl (handles complex PIN negotiation)
-        if timeout 30s bluetoothctl trust "$mac" >/dev/null 2>&1 && \
-           timeout 30s bluetoothctl pair "$mac" >/dev/null 2>&1; then
-            json_success '{"action":"pair","mac":"'"$mac"'","status":"paired","method":"fallback"}'
-        else
-            json_error "Pairing failed. Ensure device is in pairing mode."
-        fi
+        json_error "Pairing failed. Ensure device is in pairing mode."
     fi
 }
 
