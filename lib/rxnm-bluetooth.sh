@@ -3,9 +3,80 @@
 
 # -----------------------------------------------------------------------------
 # FILE: rxnm-bluetooth.sh
-# PURPOSE: Bluetooth Management (BlueZ 5 via DBus/bluetoothctl)
+# PURPOSE: Bluetooth Management (BlueZ 5 via D-Bus / bluetoothctl fallback)
 # ARCHITECTURE: Logic / Bluetooth
+#
+# Primary path: busctl --json=short (systemd 260+, structured JSON)
+# Fallback path: bluetoothctl text parsing (POSIX compat, pre-260)
+# Scan strategy: adaptive — probe LE capability, fall back to BR/EDR
 # -----------------------------------------------------------------------------
+
+# shellcheck disable=SC3043 # Target shells (Ash/Dash) support 'local'
+
+# --- Adapter Quirk Detection ---
+
+# Cached scan mode: "on" (dual), "bredr" (classic-only), "le" (LE-only)
+# Probed once per session via _bt_detect_scan_mode().
+_BT_SCAN_MODE=""
+
+# Description: Probe adapter LE scan capability. RTL8821CS on kernel 7.0
+# returns I/O error on LE scan params. Cached in _BT_SCAN_MODE.
+# Returns: "on" | "bredr"
+_bt_detect_scan_mode() {
+    if [ -n "$_BT_SCAN_MODE" ]; then
+        printf '%s' "$_BT_SCAN_MODE"
+        return
+    fi
+    # Probe: attempt LE scan for 1 second
+    if timeout 2s hcitool lescan --duplicates >/dev/null 2>&1; then
+        _BT_SCAN_MODE="on"
+    else
+        log_debug "LE scan unavailable (hcitool lescan failed), using BR/EDR"
+        _BT_SCAN_MODE="bredr"
+    fi
+    printf '%s' "$_BT_SCAN_MODE"
+}
+
+# Description: Start bluetoothctl scan with adaptive transport mode.
+# Uses interactive pipe — ensures power+pairable are set first, then scans.
+# Devices are ONLY visible to bluetoothctl sessions that started the scan,
+# so this must run in the SAME session as device enumeration.
+# Usage: _bt_scan <timeout_seconds>
+_bt_scan() {
+    local timeout="${1:-10}"
+    local mode
+    mode=$(_bt_detect_scan_mode)
+    (printf 'power on\n'; sleep 0.5;
+     printf 'pairable on\nagent NoInputNoOutput\ndefault-agent\n'; sleep 0.5;
+     printf 'scan %s\n' "$mode"; sleep "$timeout";
+     printf 'scan off\nquit\n') \
+        | bluetoothctl >/dev/null 2>&1
+}
+
+# Description: Combined scan + collect in a single bluetoothctl session.
+# Returns device list from the "devices" command within the same session
+# that started discovery — required because BlueZ scopes discoveries per-client.
+# Usage: _bt_scan_and_list <timeout_seconds>
+# Outputs: lines of "Device XX:XX:XX:XX:XX:XX Name"
+_bt_scan_and_list() {
+    local timeout="${1:-10}"
+    local mode
+    mode=$(_bt_detect_scan_mode)
+    local outfile
+    outfile=$(mktemp) || return 1
+
+    (printf 'power on\n'; sleep 0.5;
+     printf 'pairable on\nagent NoInputNoOutput\ndefault-agent\n'; sleep 0.5;
+     printf 'scan %s\n' "$mode"; sleep "$timeout";
+     printf 'devices\n'; sleep 0.5;
+     printf 'scan off\nquit\n') \
+        | bluetoothctl 2>/dev/null | grep -E '^\s*Device [0-9A-Fa-f]{2}:' | sed 's/^[[:space:]]*//' > "$outfile"
+
+    cat "$outfile"
+    rm -f "$outfile"
+}
+
+# --- Icon Mapping ---
 
 # Internal Helper: Map BlueZ Icon string to ES menu icon name
 # BlueZ: input-gaming, input-keyboard, audio-headphones, computer, phone, etc.
@@ -20,10 +91,92 @@ _bt_map_icon() {
     esac
 }
 
-# Internal Helper: Query device properties via bluetoothctl, emit JSON fragment.
+# --- D-Bus Helpers (busctl primary, bluetoothctl fallback) ---
+
+# Internal Helper: Extract a string field from busctl --json=short output
+# Usage: _bt_json_str <json> <field_name>
+# Handles: "FieldName":{"type":"s","data":"value"}
+_bt_json_str() {
+    printf '%s' "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*{[^}]*"data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Internal Helper: Extract a boolean field from busctl --json=short output
+# Usage: _bt_json_bool <json> <field_name>
+# Handles: "FieldName":{"type":"b","data":true}
+_bt_json_bool() {
+    printf '%s' "$1" | grep -q '"'"$2"'"[^}]*"data"[[:space:]]*:[[:space:]]*true' && printf 'true' || printf 'false'
+}
+
+# Internal Helper: Extract an integer field from busctl --json=short output
+# Usage: _bt_json_int <json> <field_name> <default>
+_bt_json_int() {
+    local val
+    val=$(printf '%s' "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*{[^}]*"data"[[:space:]]*:[[:space:]]*\(-\{0,1\}[0-9]*\).*/\1/p' | head -1)
+    printf '%s' "${val:-${3:-0}}"
+}
+
+# Internal Helper: Get list of adapter object paths from BlueZ
+# busctl primary (no jq needed), sysfs POSIX fallback
+_get_dbus_adapters() {
+    local result
+    result=$(busctl --json=short --timeout=2s call org.bluez / \
+        org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null)
+    if [ -n "$result" ]; then
+        # Shell-native extraction: adapter paths near "org.bluez.Adapter1"
+        printf '%s' "$result" | grep -o '"/org/bluez/hci[0-9]*"' | tr -d '"'
+        return 0
+    fi
+    # POSIX fallback: sysfs enumeration
+    local found=0
+    for hci in /sys/class/bluetooth/hci*; do
+        if [ -d "$hci" ]; then
+            printf '/org/bluez/%s\n' "$(basename "$hci")"
+            found=1
+        fi
+    done
+    [ "$found" -eq 0 ] && return 1
+    return 0
+}
+
+# Internal Helper: Query device properties, emit JSON fragment.
+# busctl primary path, bluetoothctl fallback.
 # Usage: _bt_query_device <MAC> <NAME>
 # Outputs: {"mac":"...","name":"...","icon":"...","rssi":-100,"paired":false,"connected":false}
 _bt_query_device() {
+    local mac="$1" name="$2"
+    local dev_path="/org/bluez/hci0/dev_$(printf '%s' "$mac" | tr ':' '_')"
+
+    # busctl primary: get all Device1 properties as JSON
+    local props
+    props=$(busctl --json=short call org.bluez "$dev_path" \
+        org.freedesktop.DBus.Properties GetAll s org.bluez.Device1 2>/dev/null) || true
+
+    if [ -n "$props" ]; then
+        local icon raw_icon paired connected rssi safe_name
+        raw_icon=$(_bt_json_str "$props" "Icon")
+        icon=$(_bt_map_icon "$raw_icon")
+        paired=$(_bt_json_bool "$props" "Paired")
+        connected=$(_bt_json_bool "$props" "Connected")
+        rssi=$(_bt_json_int "$props" "RSSI" "-100")
+
+        # Prefer Name, fall back to Alias, then caller-supplied name
+        local dbus_name
+        dbus_name=$(_bt_json_str "$props" "Name")
+        [ -z "$dbus_name" ] && dbus_name=$(_bt_json_str "$props" "Alias")
+        [ -n "$dbus_name" ] && name="$dbus_name"
+
+        safe_name=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        printf '{"mac":"%s","name":"%s","icon":"%s","rssi":%s,"paired":%s,"connected":%s}' \
+            "$mac" "$safe_name" "$icon" "$rssi" "$paired" "$connected"
+        return
+    fi
+
+    # POSIX fallback: bluetoothctl info
+    _bt_query_device_ctl "$mac" "$name"
+}
+
+# POSIX fallback: query device via bluetoothctl text parsing
+_bt_query_device_ctl() {
     local mac="$1" name="$2"
     local info icon="unknown" paired="false" connected="false" rssi="-100"
 
@@ -42,7 +195,6 @@ _bt_query_device() {
         [ -n "$rssi_val" ] && rssi="$rssi_val"
     fi
 
-    # Escape name for JSON safety
     local safe_name
     safe_name=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
@@ -50,41 +202,11 @@ _bt_query_device() {
         "$mac" "$safe_name" "$icon" "$rssi" "$paired" "$connected"
 }
 
-# Internal Helper: Get list of adapter object paths from BlueZ
-# NOTE: busctl GetManagedObjects --json=short is broken on systemd 255 for
-# complex types (a{oa{sa{sv}}}). Sysfs enumeration as fallback.
-_get_dbus_adapters() {
-    # Try busctl first (works on newer systemd)
-    if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
-        local result
-        result=$(busctl --timeout=2s call org.bluez / \
-            org.freedesktop.DBus.ObjectManager GetManagedObjects \
-            --json=short 2>/dev/null | \
-            "$JQ_BIN" -r '.data[0] | to_entries[] |
-                select(.value["org.bluez.Adapter1"] != null) | .key' 2>/dev/null)
-        if [ -n "$result" ]; then
-            printf '%s\n' "$result"
-            return 0
-        fi
-    fi
-    # Fallback: enumerate from sysfs
-    local found=0
-    for hci in /sys/class/bluetooth/hci*; do
-        if [ -d "$hci" ]; then
-            printf '/org/bluez/%s\n' "$(basename "$hci")"
-            found=1
-        fi
-    done
-    [ "$found" -eq 0 ] && return 1
-    return 0
-}
-
-# Internal Helper: Start dual-transport discovery via adapter
+# Internal Helper: Start dual-transport discovery via adapter D-Bus
 _bt_start_discovery() {
     local adapters
     adapters=$(_get_dbus_adapters) || return 1
     for adapter in $adapters; do
-        # Set dual transport filter (BR/EDR + LE) before starting
         busctl call org.bluez "$adapter" org.bluez.Adapter1 \
             SetDiscoveryFilter 'a{sv}' 1 Transport s auto \
             >/dev/null 2>&1 || true
@@ -103,10 +225,78 @@ _bt_stop_discovery() {
     done
 }
 
-# Internal Helper: Collect device list via bluetoothctl, build JSON array.
+# Internal Helper: Collect device list, build JSON array.
 # Args: [Paired] — pass "Paired" to filter paired-only
 # Outputs: JSON array string: [{"mac":...}, ...]
 _bt_collect_devices() {
+    local filter="${1:-}"
+
+    # busctl primary: GetManagedObjects for all devices at once
+    local managed
+    managed=$(busctl --json=short call org.bluez / \
+        org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null) || true
+
+    if [ -n "$managed" ]; then
+        _bt_collect_devices_dbus "$managed" "$filter"
+        return
+    fi
+
+    # POSIX fallback: bluetoothctl enumeration
+    _bt_collect_devices_ctl "$filter"
+}
+
+# busctl path: parse GetManagedObjects JSON for Device1 entries
+_bt_collect_devices_dbus() {
+    local json="$1" filter="$2"
+    local result="[" first="true"
+
+    # Extract all dev_ paths from the JSON
+    local paths
+    paths=$(printf '%s' "$json" | grep -o '"/org/bluez/hci[0-9]*/dev_[^"]*"' | tr -d '"')
+
+    for devpath in $paths; do
+        # Extract the MAC from path: dev_AA_BB_CC_DD_EE_FF -> AA:BB:CC:DD:EE:FF
+        local mac_underscored="${devpath##*/dev_}"
+        local mac
+        mac=$(printf '%s' "$mac_underscored" | tr '_' ':')
+
+        # Get device properties via busctl (individual call, more reliable than
+        # parsing the monster GetManagedObjects JSON per-device)
+        local props
+        props=$(busctl --json=short call org.bluez "$devpath" \
+            org.freedesktop.DBus.Properties GetAll s org.bluez.Device1 2>/dev/null) || continue
+
+        # Filter: paired-only
+        if [ "$filter" = "Paired" ]; then
+            local is_paired
+            is_paired=$(_bt_json_bool "$props" "Paired")
+            [ "$is_paired" != "true" ] && continue
+        fi
+
+        local name raw_icon icon paired connected rssi safe_name
+        name=$(_bt_json_str "$props" "Name")
+        [ -z "$name" ] && name=$(_bt_json_str "$props" "Alias")
+        [ -z "$name" ] && name="$mac"
+        raw_icon=$(_bt_json_str "$props" "Icon")
+        icon=$(_bt_map_icon "$raw_icon")
+        paired=$(_bt_json_bool "$props" "Paired")
+        connected=$(_bt_json_bool "$props" "Connected")
+        rssi=$(_bt_json_int "$props" "RSSI" "-100")
+        safe_name=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+        if [ "$first" = "true" ]; then
+            first="false"
+        else
+            result="${result},"
+        fi
+        result="${result}{\"mac\":\"${mac}\",\"name\":\"${safe_name}\",\"icon\":\"${icon}\",\"rssi\":${rssi},\"paired\":${paired},\"connected\":${connected}}"
+    done
+
+    printf '%s]' "$result"
+}
+
+# POSIX fallback: bluetoothctl device enumeration
+_bt_collect_devices_ctl() {
     local filter="${1:-}"
     local result="[" first="true"
     local devfile
@@ -121,7 +311,7 @@ _bt_collect_devices() {
     while IFS=' ' read -r _ mac name; do
         [ -z "$mac" ] && continue
         local dev_json
-        dev_json=$(_bt_query_device "$mac" "$name")
+        dev_json=$(_bt_query_device_ctl "$mac" "$name")
         if [ "$first" = "true" ]; then
             first="false"
         else
@@ -168,22 +358,37 @@ ensure_bluetooth_power() {
         return 1
     fi
 
-    # 4. Ensure powered on (bluetoothctl — avoids busctl --json=short bug)
+    # 4. Ensure powered on — busctl primary, bluetoothctl fallback
     local powered
-    powered=$(bluetoothctl show 2>/dev/null | sed -n 's/^[[:space:]]*Powered: *//p' | head -1)
-    if [ "$powered" != "yes" ]; then
+    powered=$(busctl --json=short get-property org.bluez /org/bluez/hci0 \
+        org.bluez.Adapter1 Powered 2>/dev/null) || true
+
+    if [ -n "$powered" ]; then
+        if printf '%s' "$powered" | grep -q '"data":true'; then
+            return 0
+        fi
         log_info "Powering on Bluetooth adapter..."
-        timeout 2s bluetoothctl power on >/dev/null 2>&1 || return 1
-        sleep 0.5
+        busctl set-property org.bluez /org/bluez/hci0 \
+            org.bluez.Adapter1 Powered b true >/dev/null 2>&1 || \
+            timeout 2s bluetoothctl power on >/dev/null 2>&1 || return 1
+    else
+        # POSIX fallback
+        local ctl_powered
+        ctl_powered=$(bluetoothctl show 2>/dev/null | sed -n 's/^[[:space:]]*Powered: *//p' | head -1)
+        if [ "$ctl_powered" != "yes" ]; then
+            log_info "Powering on Bluetooth adapter..."
+            timeout 2s bluetoothctl power on >/dev/null 2>&1 || return 1
+        fi
     fi
 
+    sleep 0.5
     return 0
 }
 
 # --- Public Actions ---
 
 action_bt_scan() {
-    local timeout_sec=5
+    local timeout_sec=10
 
     if ! ensure_bluetooth_power; then
         json_error "Bluetooth hardware not found or service unreachable" "1" \
@@ -193,23 +398,24 @@ action_bt_scan() {
 
     log_info "Scanning for Bluetooth devices (${timeout_sec}s)..."
 
-    # Start LE discovery (RTL8821CS needs explicit 'scan le' — 'scan on' with
-    # transport=auto doesn't trigger LE scanning on some adapters)
-    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
-    local scan_pid=$!
-    sleep "$timeout_sec"
-    kill "$scan_pid" 2>/dev/null
-    wait "$scan_pid" 2>/dev/null
+    # Combined scan+list in single bluetoothctl session (BlueZ scopes per-client)
+    local devfile result="[" first="true"
+    devfile=$(mktemp) || { json_success '{"devices": []}'; return 0; }
+    _bt_scan_and_list "$timeout_sec" > "$devfile"
 
-    # Collect results via bluetoothctl
-    local devices
-    devices=$(_bt_collect_devices)
+    while IFS=' ' read -r _ mac name; do
+        [ -z "$mac" ] && continue
+        local dev_json
+        dev_json=$(_bt_query_device "$mac" "$name")
+        if [ "$first" = "true" ]; then first="false"; else result="${result},"; fi
+        result="${result}${dev_json}"
+    done < "$devfile"
+    rm -f "$devfile"
 
-    json_success "{\"devices\": ${devices}}"
+    json_success "{\"devices\": ${result}]}"
 }
 
 action_bt_list() {
-    # List paired devices only
     local devices
     devices=$(_bt_collect_devices "Paired")
     json_success "{\"devices\": ${devices}}"
@@ -231,8 +437,8 @@ action_bt_pair() {
 
     log_info "Attempting to pair with $mac..."
 
-    # Start brief scan to re-discover device (BLE devices drop from cache quickly)
-    bluetoothctl --timeout 5 scan le >/dev/null 2>&1 &
+    # Start brief scan to re-discover device (devices drop from cache quickly)
+    _bt_scan 5 &
     local scan_pid=$!
     sleep 3
 
@@ -381,8 +587,8 @@ action_bt_auto_pair() {
         sleep 0.5
     fi
 
-    # Start discovery
-    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
+    # Adaptive scan
+    _bt_scan "$timeout_sec" &
     local scan_pid=$!
 
     log_info "Auto-pair: scanning (filter=${filter:-any}, timeout=${timeout_sec}s)..."
@@ -463,28 +669,38 @@ action_bt_live_scan() {
 
     ensure_bluetooth_power || { json_error "Bluetooth not available"; return 0; }
 
-    # Background bluetoothctl scan (reliable dual-transport BR/EDR + LE)
-    bluetoothctl --timeout "$timeout_sec" scan le >/dev/null 2>&1 &
-    local scan_pid=$!
+    local mode
+    mode=$(_bt_detect_scan_mode)
 
-    local seen_file
+    local seen_file scan_output
     seen_file=$(mktemp) || return 1
+    scan_output=$(mktemp) || { rm -f "$seen_file"; return 1; }
     : > "$seen_file"
+
+    # Start interactive bluetoothctl session that scans continuously.
+    # We pipe commands in stages and read its stdout for [NEW] Device lines.
+    (printf 'power on\n'; sleep 0.5;
+     printf 'pairable on\nagent NoInputNoOutput\ndefault-agent\n'; sleep 0.5;
+     printf 'scan %s\n' "$mode"; sleep "$timeout_sec";
+     printf 'scan off\nquit\n') \
+        | bluetoothctl 2>/dev/null > "$scan_output" &
+    local scan_pid=$!
 
     # Cleanup trap
     # shellcheck disable=SC2064
-    trap "kill $scan_pid 2>/dev/null; rm -f '$seen_file'" EXIT INT TERM
+    trap "kill $scan_pid 2>/dev/null; rm -f '$seen_file' '$scan_output'" EXIT INT TERM
 
     local elapsed=0
     while [ "$elapsed" -lt "$timeout_sec" ] && kill -0 "$scan_pid" 2>/dev/null; do
         sleep 2
         elapsed=$((elapsed + 2))
 
+        # Extract [NEW] Device lines from bluetoothctl output
         local devfile
         devfile=$(mktemp) || continue
-        bluetoothctl devices 2>/dev/null | grep -E '^Device [0-9A-Fa-f]{2}:' > "$devfile" || true
+        grep -oE 'Device [0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2} .*' \
+            "$scan_output" 2>/dev/null | sort -u > "$devfile" || true
 
-        # Read from file (NOT pipe) to stay in current shell for stdout
         while IFS=' ' read -r _ mac name; do
             [ -z "$mac" ] && continue
             grep -q "$mac" "$seen_file" 2>/dev/null && continue
@@ -492,14 +708,8 @@ action_bt_live_scan() {
 
             local dev_json
             dev_json=$(_bt_query_device "$mac" "$name")
-            # Merge event field — use jq if available, else manual
-            if [ "${RXNM_HAS_JQ:-false}" = "true" ]; then
-                printf '%s' "$dev_json" | "$JQ_BIN" -c '. + {event:"added"}' 2>/dev/null
-            else
-                # Manual merge: strip trailing }, append event field
-                local body="${dev_json%\}}"
-                printf '%s,"event":"added"}\n' "$body"
-            fi
+            local body="${dev_json%\}}"
+            printf '%s,"event":"added"}\n' "$body"
         done < "$devfile"
         rm -f "$devfile"
     done
